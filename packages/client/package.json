@@ -1,6 +1,6 @@
 {
   "name": "@symma/client",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Drive an ACP prompt against a local agent or one hosted by a remote companion",
   "repository": {
     "type": "git",

@@ -20,7 +20,10 @@ import { checkEndpointReady, runLocalAcpPrompt, runRemotePrompt } from '@symma/c
 
 // Local: spawn the agent on this machine.
 const spec = kiloAcpSpec(await readFile(kiloAuthPath, 'utf8'));
-const local = await runLocalAcpPrompt(spec, workspace, 'kilo/default', prompt, 'review', log);
+const local = await runLocalAcpPrompt(spec, workspace, 'kilo/default', prompt, 'review', log, {
+  // Optional: observe every frame in both directions.
+  tee: (dir, frame) => journal(dir, frame),
+});
 
 // Remote: through a gateway to someone else's companion.
 const config = { gateway, token, endpoint: 'laptop', runId: 'run-1' };

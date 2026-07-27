@@ -84,9 +84,19 @@ describe('runLocalAcpPrompt', () => {
     // Never reads stdin, never answers: only the wall clock ends this.
     const { spec } = specFor(script('wedged.mjs', `setInterval(() => {}, 1000);`));
     await assert.rejects(
-      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, 250),
+      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, { timeoutMs: 250 }),
       /prompt timed out/,
     );
+  });
+
+  it('forwards a tee to the session', async () => {
+    const { spec } = specFor(script('teed.mjs', AGENT));
+    const seen: string[] = [];
+    const text = await runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, {
+      tee: (dir_) => seen.push(dir_),
+    });
+    assert.equal(text, 'local ok');
+    assert.ok(seen.includes('out') && seen.includes('in'), 'both directions teed');
   });
 
   after(() => rmSync(dir, { recursive: true, force: true }));
