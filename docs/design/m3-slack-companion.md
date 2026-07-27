@@ -547,8 +547,9 @@ where all three depend on it equally.
 @symma/gateway     relay, journal store, viewer, HTTP API, tenancy   → protocol
 @symma/companion   attach loop, agent detection, checkout *mechanism*,
                    local spawn/lifecycle, self-update                → protocol
-@symma/client      dial a gateway: config, readiness, SSE transport,
-                   runRemotePrompt                                   → protocol
+@symma/client      drive an ACP prompt: local spawn/lifecycle, plus a gateway
+                   transport — config, readiness, SSE, runRemotePrompt
+                                                                     → protocol
 @symma/slack       the bot — dials the gateway like any other client
                                                         → client, protocol
 jbot-review        ReviewBackend adapters + routing policy   → protocol, client
@@ -584,7 +585,7 @@ instead — which works because **the tests travel with the code**: 12 files
 3. **Do the `acp.ts` / `acp-remote.ts` split there, not here.** symma takes only
    the generic halves — local spawn/lifecycle, transport, readiness. The
    `ReviewBackend` wrappers and routing policy never leave jbot-review, so this
-   is an extraction, not a migration.
+   is an extraction, not a migration. **Done** except `observer.ts`.
 4. **Publish `@symma/* 0.1.0`**, exact-pinned.
 5. **Only now touch jbot-review:** swap imports to the packages, keeping the
    local files in place. If the suite goes red, revert one import line.
@@ -596,7 +597,8 @@ so treat jbot-review's copies as frozen for that window. A fix that cannot wait
 lands in symma first and is re-copied — never the reverse, or the extraction
 starts inheriting drift.
 
-Step 3 is the whole risk. Everything else is mechanical once it passes.
+Step 3 was expected to be the whole risk. It was not — see the status note
+below. `observer.ts` is the piece that still needs design rather than a copy.
 
 **Status — 2026-07-27. Step 2 is complete.** `@symma/protocol` (#1), then
 `@symma/gateway` and `@symma/companion` (#2), 43 tests green. `viewer.ts` copied
@@ -609,13 +611,29 @@ The runtime graph holds: companion depends on protocol alone. It reaches
 `@symma/gateway` only as a devDependency, because its end-to-end test spawns a
 real gateway and reads back what was journaled.
 
-**`observer.ts` and `observer.test.ts` defer to step 3**, not the gateway. The
-tee is an env-gated client that POSTs to `/api/ingest`; it belongs to
-`@symma/client`, and pulling it into the gateway would have inverted the graph a
-second time.
+**Step 3 is done as of #3** — `@symma/client`, 48 tests green. `runLocalAcpPrompt`
+and the remote transport moved; every `ReviewBackend` factory, `gatewayRoutedModels`,
+`remoteAcpConfigFromEnv` and `localRunId` stayed, exactly as this section drew the
+line. `EndpointPresence` moved to protocol on the way out: the gateway builds it
+and the client reads it, so it was a wire type inside one consumer, like the relay
+controls and the observer envelope before it.
 
-Next is step 3 — the `acp.ts` / `acp-remote.ts` split, and the only step whose
-outcome is not already known.
+**Step 3 was not the risk this section expected, and the reason matters.** The
+"whole risk" verdict was measured at file level — `acp.ts` imports five
+review-specific modules. At symbol level the generic half uses exactly one of the
+fifteen names they contribute (`truncateForLog`, already in protocol),
+`session-concurrency` is a type-only import used solely by the factories that
+stay, and `acp-remote` needs `acp.ts` only for the factory that stays. The seam
+was drawn correctly when the code was written; cutting it was mechanical.
+
+**`observer.ts` is now the remaining piece of step 3.** The tee is an env-gated
+client that POSTs to `/api/ingest`, so it belongs to `@symma/client` — but it
+reads `JBOT_OBSERVER_URL` at module scope, which is why its test drives it
+through a child process. Extracting it means parameterising import-time config,
+and that is real design rather than a copy. It was kept out of #3 so the one
+risky piece would not ride inside the one mechanical one.
+
+Next is step 4 — publish `@symma/* 0.1.0` — with `observer.ts` alongside it.
 
 ### Repo, domains, and the name
 
