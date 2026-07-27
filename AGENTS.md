@@ -1,0 +1,125 @@
+# symma — agent guide
+
+Platform for connecting a chat surface to a coding agent running on the user's
+own machine, with their own credentials. Being extracted from
+[pgup-ai/jbot-review](https://github.com/pgup-ai/jbot-review), which stays put
+as its first downstream client. This file is the single source of truth for
+agents working in this repo; `CLAUDE.md` just points here.
+
+Full design: [`docs/design/m3-slack-companion.md`](docs/design/m3-slack-companion.md).
+Section references below (§N) are to that document.
+
+## Commands
+
+- `npm test` — all tests (node:test via tsx); single file:
+  `node --import tsx --test packages/protocol/test/<file>.test.ts`
+- `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`
+  — tsc, oxlint (deny-warnings), prettier (owns formatting)
+- **No build step.** `tsconfig.json` is `noEmit` + `allowImportingTsExtensions`,
+  so sources import each other as `./foo.ts` and everything runs under tsx. A
+  build arrives with the publish milestone (§8, step 4); until then every
+  package is `private` and consumable only inside the workspace.
+
+## Packages
+
+§8 "Package graph". Only `@symma/protocol` exists today.
+
+| package                        | what it is                                                                                                                                           | depends on       |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `@symma/protocol`              | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, relay control, ndjson | —                |
+| `@symma/gateway` _(planned)_   | relay, journal store, viewer, HTTP API, tenancy                                                                                                      | protocol         |
+| `@symma/companion` _(planned)_ | attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update                                                                 | protocol         |
+| `@symma/client` _(planned)_    | dial a gateway: config, readiness, SSE transport                                                                                                     | protocol         |
+| `@symma/slack` _(planned)_     | the bot — dials the gateway like any other client                                                                                                    | client, protocol |
+
+`@symma/client` is what jbot-review consumes at runtime. It exists so the
+reviewer never imports gateway internals to dial a gateway — the inversion this
+extraction fixes, prevented from recurring.
+
+## Invariants — do not break these
+
+1. **Read-only enforced in three layers.** On the ACP path: the client-side
+   permission floor (`respondToPermissionRequest` — mutating tool kinds
+   rejected, `*_once` preferred so no grant outlives a single call), the
+   agent-side sandbox (codex's OS sandbox), and plan mode (the behavioural
+   read-only layer for agents with no sandbox; `requirePlanMode` fails closed).
+   Bash stays allowed for git diff/log/grep — command-level policing belongs to
+   the agent-side layers, not the floor, which is deliberately kind-based and
+   allow-by-default for unknown kinds.
+
+   _Copied code cites this as "invariant #8", its number in jbot-review's
+   AGENTS.md. Those references point across repos until the originals are
+   deleted (§8, step 6), when they get renumbered._
+
+2. **Auxiliary sessions fail open.** A broken precision filter must never
+   become a recall hole.
+
+3. **Compromise means shutdown, not mitigation.** Components never try to keep
+   operating across a compromised peer — it is shut down and its tokens
+   rotated. In-band attestation points only downward in the trust chain: a
+   viewer served by the gateway can never audit the gateway.
+
+4. **Mechanism moves, policy stays.** symma owns the capability, the caller
+   owns the decision. The companion learns _how_ to clone a ref into a temp
+   dir; it never learns _which_ ref or why. Review-specific repo/ref choice,
+   the three-dot rule and the throwaway-checkout policy stay in jbot-review.
+
+5. **`@symma/protocol` imports nothing review- or gateway-specific.** That
+   boundary is why the package extracts at all; an import crossing it is the
+   bug, not the boundary. Timeouts and retry policy are caller concerns —
+   the protocol surfaces transport facts and lets the caller set deadlines.
+
+6. **Fixes flow symma → jbot-review, never the reverse** (§8). Two copies exist
+   until the originals are deleted, and jbot-review's are frozen for that
+   window. A fix that cannot wait lands here first and is re-copied; the other
+   direction makes the extraction inherit drift.
+
+## Conventions
+
+- TypeScript ESM with `.ts` import specifiers (run via tsx); no new
+  dependencies without clear need.
+- Tests: node:test + `node:assert/strict`; pin invariants, not incidental prose.
+- Prettier owns formatting. Never hand-format, and never reformat a file you did
+  not otherwise change — copied files must stay byte-identical to their origin
+  until the originals are deleted, so a stray formatter run is a real
+  regression, not cosmetic noise. Pin the prettier version when a copy has to
+  match jbot-review exactly.
+
+## Code hygiene
+
+Ship the smallest change that does the job. If a reviewer can delete a line
+without losing behavior, it should not have been written.
+
+- **Comments earn their place** by explaining the non-obvious WHY. Delete any
+  comment that restates the code; one line beats three. Don't narrate the
+  size/layer of a change.
+- **No dead surface.** No field, parameter, option, generic, or exported helper
+  without a caller. Inline a helper used once; don't add speculative generality
+  or "flexibility" nobody asked for.
+- **No defensive cruft.** No null checks for values a caller already guards, no
+  `catch` that only rethrows, no fallbacks for states that cannot occur.
+  Validate once at the trust boundary and let real bugs throw. (The required
+  auxiliary-session fail-open — see the Invariants — is the one exception.)
+- **Reuse before adding.** Search for an existing helper before writing one;
+  extend it rather than fork a parallel copy.
+- **Match the surrounding code** — its density, naming, and idiom. No ceremony,
+  no names spelled longer than their neighbours.
+
+## Extraction status
+
+§8 sequence, current position marked:
+
+1. Create `pgup-ai/symma` — README, workspaces, design doc. **done**
+2. Copy the self-contained components in, with their tests. **`@symma/protocol` done**
+3. Split `acp.ts` / `acp-remote.ts` **here, not there** — symma takes only the
+   generic halves; `ReviewBackend` wrappers and routing policy never leave
+   jbot-review. _This step is the whole risk; everything else is mechanical._
+4. Publish `@symma/* 0.1.0`, exact-pinned.
+5. Only now touch jbot-review: swap imports, keeping the local files in place.
+   If the suite goes red, revert one import line.
+6. Cross-repo green → delete the originals. Deleting earlier turns a packaging
+   mistake into a bisect across two repositories.
+
+jbot-review is not touched until symma is fully tested. It runs reviews daily
+and has a deployed App; destabilising it for a refactor that serves a _different_
+product is risk with no upside for it.
