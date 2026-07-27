@@ -1,7 +1,16 @@
 {
   "name": "@symma/protocol",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ACP framing, session driving, agent specs and signed envelopes",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pgup-ai/symma.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/pgup-ai/symma/tree/main/packages/protocol",
+  "bugs": {
+    "url": "https://github.com/pgup-ai/symma/issues"
+  },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -12,7 +21,8 @@
       "symma-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"

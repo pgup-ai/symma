@@ -636,14 +636,17 @@ instead — which works because **the tests travel with the code**: 12 files
    the generic halves — local spawn/lifecycle, transport, readiness. The
    `ReviewBackend` wrappers and routing policy never leave jbot-review, so this
    is an extraction, not a migration. **Done.**
-4. **Publish `@symma/* 0.1.0`**, exact-pinned. Narrowed on contact: only
+4. **Publish `@symma/*`**, exact-pinned. Shipped as 0.1.0, then 0.1.1 once
+   the barrel was completed. Narrowed on contact: only
    `protocol` and `client` are libraries and publish. `gateway` and `companion`
    stay `private` and publish nothing at this step; they are applications, and
    they ship by other routes later — the gateway as an image, the companion as
    unscoped `symma`. `gateway`'s sole export today is a test seam, which is not
    an API worth freezing at 0.1.0.
 5. **Only now touch jbot-review:** swap imports to the packages, keeping the
-   local files in place. If the suite goes red, revert one import line.
+   local files in place. If the suite goes red, revert one import line. See
+   "Step 5 readiness" for the two contract gaps — the observer tee is silent and
+   must be wired in the same commit as the swap.
 6. **Cross-repo compatibility green → delete the originals.** Deleting earlier
    turns a packaging mistake into a bisect across two repositories.
 
@@ -697,9 +700,50 @@ Nothing in the Slack↔companion path tees to that endpoint; its senders are
 jbot-review's tee and the demo feeder. Step 5 settles it, when the import swap
 shows what the reviewer actually wants from symma — plausibly nothing here.
 
-Step 3 is therefore complete. Next is step 4 — publish `@symma/* 0.1.0` — which
-is also when the `private: true` on every package comes due: registry, git
-dependency, or one workspace.
+Step 3 is therefore complete.
+
+**Step 4 is done as of #5.** `@symma/protocol` and `@symma/client` are on the
+public npm registry under the `symma` org, MIT, installable. `gateway` and
+`companion` stay private. `tsc` emits JS and `.d.ts`; sources import each other
+as `./foo.js`, and the workspace resolves to source through the `symma-source`
+export condition while consumers get `dist`. `npm run verify:pack` is the only
+check that loads the packages the way a consumer does — everything else runs
+inside the workspace, where source resolution hides packaging faults.
+
+### Step 5 readiness
+
+Reviewed before starting, by checking every symbol jbot-review imports from a
+module that moved against what the package actually exports. Three gaps, one
+of them silent.
+
+- **The observer tee is the dangerous one.** jbot-review builds it _inside_
+  `acp-protocol.ts` (`options.relayed ? undefined : makeSessionTee(...)`), while
+  the package takes an injected `tee` and builds nothing. Swapping the import
+  therefore stops teeing local ACP reviews to the observer — with no type error
+  and no failing test, because the tee is env-gated and off in CI. **Step 5 must
+  pass `tee: makeSessionTee(...)` at `acp.ts`'s call site in the same commit as
+  the import swap.** Nothing will catch forgetting it.
+- **`relayed: true` fails loudly, which is fine.** `acp-remote.ts` passes it and
+  the package has no such option, so the swap is a typecheck error. Delete the
+  line: a relayed caller now passes no tee, which is what the flag encoded.
+- **28 exported symbols were unreachable through the package**, taking the
+  barrel from 34 names to 62. They are the per-agent provider ids, CLI binaries
+  and credential helpers, and the consumers are production code rather than a
+  corner: `backend-selection.ts` for the `is*Provider` predicates, `runner.ts`
+  for `writeCodexAuth`/`writeDevinCredentials`/`assertValidKiloAuth`/the model
+  listers, `companion/index.ts` for several more, plus `local/index.ts` and four
+  tests. Exported in 0.1.1. A symbol exported from its module but absent from
+  `index.ts` is invisible to consumers however public it looks in source, and
+  nothing but a consumer-shaped check finds it.
+- **`model.ts` moved in part, by design.** Only `parseModelName` is generic and
+  it is byte-identical; `resolveModelName`, `resolveAuxModelName` and
+  `formatModelName` are review policy and stay. Step 5 imports the first from the
+  package and leaves the rest local.
+
+Intra-workspace pins must track the workspace version exactly. `*` resolves to
+the registry copy instead of the local one, which silently tests a published
+package against workspace source — the failure surfaces as a missing `src/`,
+since tarballs ship only `dist`.
 
 ### Repo, domains, and the name
 

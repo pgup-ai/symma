@@ -86,12 +86,12 @@ export function createNdjsonReader(
   };
 }
 
-interface PermissionRequestParams {
+export interface PermissionRequestParams {
   toolCall?: { kind?: string; title?: string };
   options?: { optionId?: string; kind?: string }[];
 }
 
-type PermissionResponse = {
+export type PermissionResponse = {
   outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' };
 };
 
@@ -138,7 +138,7 @@ interface JsonRpcMessage extends Record<string, unknown> {
   error?: { code?: number; message?: string; data?: unknown };
 }
 
-interface AcpSessionIo {
+export interface AcpSessionIo {
   input: Writable;
   output: Readable;
 }
@@ -255,7 +255,7 @@ class AcpConnection {
   }
 }
 
-interface AcpSessionOptions {
+export interface AcpSessionOptions {
   cwd: string;
   prompt: string;
   agent: string;
@@ -277,7 +277,7 @@ interface AcpSessionOptions {
   tee?: (dir: 'out' | 'in', frame: Record<string, unknown>) => void;
 }
 
-interface ModelOptionCandidate {
+export interface ModelOptionCandidate {
   value?: string;
   name?: string;
   /** Present on SessionConfigSelectGroup entries (grouped option lists). */
@@ -304,7 +304,7 @@ export function matchModelOptionValue(
   return match?.value;
 }
 
-interface AcpSessionResult {
+export interface AcpSessionResult {
   text: string;
   stopReason: string;
 }
