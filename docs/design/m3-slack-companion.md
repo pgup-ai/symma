@@ -497,9 +497,13 @@ Why each number matters:
    companion runs on someone else's laptop. M2d is the cautionary example —
    signing needed both sides, and we simply deployed both.
 2. **Owner binding** established during pairing and stored server-side.
-3. **Relay control types move** into the shared protocol package. Today
-   `src/companion/` and `src/shared/acp-remote.ts` both import from
-   `src/gateway/` — the wire protocol lives inside one of its three consumers.
+3. **Relay control types move** into the shared protocol package — **done**,
+   `@symma/protocol` `relay-control.ts`. Today `src/companion/` and
+   `src/shared/acp-remote.ts` both import from `src/gateway/` — the wire
+   protocol lives inside one of its three consumers. The observer envelope
+   (`ObserverEnvelope`, `parseEnvelope`) proved to be the same defect one file
+   over, in `journal.ts`, with consumers in the gateway, the companion and the
+   client; it moved to `@symma/protocol` `envelope.ts` for the same reason.
 
 ## 8. Extraction — what moves, and how
 
@@ -539,7 +543,7 @@ where all three depend on it equally.
 ```
 @symma/protocol    framing, JSON-RPC peer, driveAcpSession, agent specs +
                    credential helpers, read-only permission floor, envelope
-                   signing, relay control types, ndjson
+                   signing, observer envelope, relay control types, ndjson
 @symma/gateway     relay, journal store, viewer, HTTP API, tenancy   → protocol
 @symma/companion   attach loop, agent detection, checkout *mechanism*,
                    local spawn/lifecycle, self-update                → protocol
@@ -573,9 +577,10 @@ instead — which works because **the tests travel with the code**: 12 files
 `viewer-*`) already cover everything that moves.
 
 1. **Create `pgup-ai/symma`** — README, workspaces, this design doc. Nothing in
-   jbot-review changes.
+   jbot-review changes. **Done.**
 2. **Copy the self-contained components in, with their tests.** Green in the new
-   repo before anything else happens.
+   repo before anything else happens. **`@symma/protocol` and `@symma/gateway`
+   done; `@symma/companion` remains.**
 3. **Do the `acp.ts` / `acp-remote.ts` split there, not here.** symma takes only
    the generic halves — local spawn/lifecycle, transport, readiness. The
    `ReviewBackend` wrappers and routing policy never leave jbot-review, so this
@@ -592,6 +597,22 @@ lands in symma first and is re-copied — never the reverse, or the extraction
 starts inheriting drift.
 
 Step 3 is the whole risk. Everything else is mechanical once it passes.
+
+**Status — 2026-07-27.** `@symma/protocol` (#1) and `@symma/gateway` (#2) are in,
+37 tests green; `viewer.ts` copied byte-identical, and every other copied file
+differs from its origin only by an import line.
+
+- **`@symma/companion` is the rest of step 2.** Its only remaining cross-package
+  dependency was `ObserverEnvelope`, now in protocol, so it should land
+  protocol-only as the graph requires.
+- **`observer.ts` and `observer.test.ts` defer to step 3**, not the gateway. The
+  tee is an env-gated client that POSTs to `/api/ingest`; it belongs to
+  `@symma/client`, and pulling it into the gateway would have inverted the graph
+  a second time.
+- **The M2 gateway spec did not travel with its code.** `relay.ts` still points
+  at `docs/superpowers/specs/2026-07-24-acp-gateway-m2-design.md`, which exists
+  only in jbot-review. Copy it here before step 6 deletes the originals, or the
+  reference dies with them.
 
 ### Repo, domains, and the name
 
