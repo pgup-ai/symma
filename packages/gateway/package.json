@@ -1,0 +1,14 @@
+{
+  "name": "@symma/gateway",
+  "version": "0.1.0",
+  "description": "Relay, journal store, viewer and HTTP API for observed ACP sessions",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@symma/protocol": "0.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
