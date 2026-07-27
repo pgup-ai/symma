@@ -22,15 +22,16 @@ Section references below (§N) are to that document.
 
 ## Packages
 
-§8 "Package graph". Only `@symma/protocol` exists today.
+§8 "Package graph". `@symma/protocol`, `@symma/gateway` and `@symma/companion`
+exist today; `client` and `slack` arrive with step 3 and M3.
 
-| package                        | what it is                                                                                                                                           | depends on       |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| `@symma/protocol`              | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, relay control, ndjson | —                |
-| `@symma/gateway` _(planned)_   | relay, journal store, viewer, HTTP API, tenancy                                                                                                      | protocol         |
-| `@symma/companion` _(planned)_ | attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update                                                                 | protocol         |
-| `@symma/client` _(planned)_    | dial a gateway: config, readiness, SSE transport                                                                                                     | protocol         |
-| `@symma/slack` _(planned)_     | the bot — dials the gateway like any other client                                                                                                    | client, protocol |
+| package                     | what it is                                                                                                                                                              | depends on       |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `@symma/protocol`           | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control, ndjson | —                |
+| `@symma/gateway`            | relay, journal store, viewer, HTTP API, tenancy                                                                                                                         | protocol         |
+| `@symma/companion`          | attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update                                                                                    | protocol         |
+| `@symma/client` _(planned)_ | dial a gateway: config, readiness, SSE transport                                                                                                                        | protocol         |
+| `@symma/slack` _(planned)_  | the bot — dials the gateway like any other client                                                                                                                       | client, protocol |
 
 `@symma/client` is what jbot-review consumes at runtime. It exists so the
 reviewer never imports gateway internals to dial a gateway — the inversion this
@@ -110,7 +111,8 @@ without losing behavior, it should not have been written.
 §8 sequence, current position marked:
 
 1. Create `pgup-ai/symma` — README, workspaces, design doc. **done**
-2. Copy the self-contained components in, with their tests. **`@symma/protocol` done**
+2. Copy the self-contained components in, with their tests. **done** — protocol,
+   gateway, companion
 3. Split `acp.ts` / `acp-remote.ts` **here, not there** — symma takes only the
    generic halves; `ReviewBackend` wrappers and routing policy never leave
    jbot-review. _This step is the whole risk; everything else is mechanical._

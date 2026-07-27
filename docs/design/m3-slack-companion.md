@@ -598,21 +598,24 @@ starts inheriting drift.
 
 Step 3 is the whole risk. Everything else is mechanical once it passes.
 
-**Status — 2026-07-27.** `@symma/protocol` (#1) and `@symma/gateway` (#2) are in,
-37 tests green; `viewer.ts` copied byte-identical, and every other copied file
-differs from its origin only by an import line.
+**Status — 2026-07-27. Step 2 is complete.** `@symma/protocol` (#1), then
+`@symma/gateway` and `@symma/companion` (#2), 43 tests green. `viewer.ts` copied
+byte-identical; every other copied file differs from its origin only by an
+import line, plus the spawn paths the new layout requires. The M2 gateway design
+now lives here too, as [`m2-acp-gateway.md`](m2-acp-gateway.md) — a spec that
+stays behind dies when step 6 deletes the code it describes.
 
-- **`@symma/companion` is the rest of step 2.** Its only remaining cross-package
-  dependency was `ObserverEnvelope`, now in protocol, so it should land
-  protocol-only as the graph requires.
-- **`observer.ts` and `observer.test.ts` defer to step 3**, not the gateway. The
-  tee is an env-gated client that POSTs to `/api/ingest`; it belongs to
-  `@symma/client`, and pulling it into the gateway would have inverted the graph
-  a second time.
-- **The M2 gateway spec did not travel with its code.** `relay.ts` still points
-  at `docs/superpowers/specs/2026-07-24-acp-gateway-m2-design.md`, which exists
-  only in jbot-review. Copy it here before step 6 deletes the originals, or the
-  reference dies with them.
+The runtime graph holds: companion depends on protocol alone. It reaches
+`@symma/gateway` only as a devDependency, because its end-to-end test spawns a
+real gateway and reads back what was journaled.
+
+**`observer.ts` and `observer.test.ts` defer to step 3**, not the gateway. The
+tee is an env-gated client that POSTs to `/api/ingest`; it belongs to
+`@symma/client`, and pulling it into the gateway would have inverted the graph a
+second time.
+
+Next is step 3 — the `acp.ts` / `acp-remote.ts` split, and the only step whose
+outcome is not already known.
 
 ### Repo, domains, and the name
 
