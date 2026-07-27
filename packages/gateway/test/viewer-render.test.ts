@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { VIEWER_HTML } from '../src/viewer.ts';
+import { VIEWER_HTML } from '../src/viewer.js';
 
 describe('viewer render batching', () => {
   it('applies a replay burst once per animation frame, not once per frame', () => {

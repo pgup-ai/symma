@@ -40,7 +40,7 @@ import {
   type RelayControl,
 } from '@symma/protocol';
 
-import { fetchWorkspace } from './workspace.ts';
+import { fetchWorkspace } from './workspace.js';
 
 const KILL_GRACE_MS = 2_000;
 const BACKOFF_MIN_MS = 1_000;

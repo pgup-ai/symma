@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { spawnWithTimeout } from './cli-process.ts';
-import { truncateForLog } from './text.ts';
+import { spawnWithTimeout } from './cli-process.js';
+import { truncateForLog } from './text.js';
 
 const KILO_MODEL_LIST_TIMEOUT_MS = 60_000;
 

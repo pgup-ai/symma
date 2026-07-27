@@ -1,2 +1,2 @@
-export { runLocalAcpPrompt } from './local.ts';
-export { checkEndpointReady, runRemotePrompt, type RemoteAcpConfig } from './remote.ts';
+export { runLocalAcpPrompt } from './local.js';
+export { checkEndpointReady, runRemotePrompt, type RemoteAcpConfig } from './remote.js';

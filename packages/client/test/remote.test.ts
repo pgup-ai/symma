@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 
 import { readJournalLines } from '@symma/gateway';
 
-import { checkEndpointReady, runRemotePrompt } from '../src/remote.ts';
+import { checkEndpointReady, runRemotePrompt } from '../src/remote.js';
 
 const noLog = (): void => undefined;
 
@@ -58,19 +58,30 @@ describe('remote acp prompt', () => {
     let gateway: ChildProcess | undefined;
     let companion: ChildProcess | undefined;
     try {
-      gateway = spawn(process.execPath, ['--import', 'tsx', 'packages/gateway/src/server.ts'], {
-        env: {
-          ...process.env,
-          JBOT_GATEWAY_PORT: String(port),
-          JBOT_GATEWAY_DATA: dataDir,
-          JBOT_GATEWAY_TOKEN: 'client-tok',
-          JBOT_GATEWAY_HOST: '127.0.0.1',
-          JBOT_GATEWAY_ENDPOINTS: 'box:endpoint-tok',
+      gateway = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/gateway/src/server.ts'],
+        {
+          env: {
+            ...process.env,
+            JBOT_GATEWAY_PORT: String(port),
+            JBOT_GATEWAY_DATA: dataDir,
+            JBOT_GATEWAY_TOKEN: 'client-tok',
+            JBOT_GATEWAY_HOST: '127.0.0.1',
+            JBOT_GATEWAY_ENDPOINTS: 'box:endpoint-tok',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      );
+      let startupErr = '';
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('gateway did not start')), 15_000);
+        const timer = setTimeout(
+          () => reject(new Error(`gateway did not start: ${startupErr.trim() || 'no stderr'}`)),
+          15_000,
+        );
+        gateway?.stderr?.on('data', (chunk: Buffer) => {
+          startupErr += String(chunk);
+        });
         gateway?.stdout?.on('data', (chunk: Buffer) => {
           if (String(chunk).includes('listening')) {
             clearTimeout(timer);
@@ -78,16 +89,20 @@ describe('remote acp prompt', () => {
           }
         });
       });
-      companion = spawn(process.execPath, ['--import', 'tsx', 'packages/companion/src/index.ts'], {
-        env: {
-          ...process.env,
-          JBOT_COMPANION_GATEWAY: base,
-          JBOT_COMPANION_TOKEN: 'endpoint-tok',
-          JBOT_COMPANION_ENDPOINT: 'box',
-          JBOT_COMPANION_AGENTS: `probe=${process.execPath} ${agentPath}`,
+      companion = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        {
+          env: {
+            ...process.env,
+            JBOT_COMPANION_GATEWAY: base,
+            JBOT_COMPANION_TOKEN: 'endpoint-tok',
+            JBOT_COMPANION_ENDPOINT: 'box',
+            JBOT_COMPANION_AGENTS: `probe=${process.execPath} ${agentPath}`,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      );
       await waitFor(async () => {
         const listed = (await (
           await fetch(`${base}/api/endpoints`, { headers: { authorization: 'Bearer client-tok' } })

@@ -7,13 +7,15 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test packages/*/test/*.test.ts",
+    "test": "node --conditions=symma-source --import tsx --test packages/*/test/*.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "oxlint --deny-warnings",
-    "gateway": "tsx packages/gateway/src/server.ts",
-    "gateway:demo": "tsx packages/gateway/src/demo.ts",
-    "companion": "tsx packages/companion/src/index.ts"
+    "gateway": "node --conditions=symma-source --import tsx packages/gateway/src/server.ts",
+    "gateway:demo": "node --conditions=symma-source --import tsx packages/gateway/src/demo.ts",
+    "companion": "node --conditions=symma-source --import tsx packages/companion/src/index.ts",
+    "build": "npm run build --workspaces --if-present",
+    "verify:pack": "bash scripts/verify-pack.sh"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

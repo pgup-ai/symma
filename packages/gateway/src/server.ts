@@ -20,9 +20,9 @@ import {
   readRunStatus,
   writeRunStatus,
   type RunControl,
-} from './journal.ts';
-import { createRelay, parseEndpointTokens } from './relay.ts';
-import { VIEWER_HTML } from './viewer.ts';
+} from './journal.js';
+import { createRelay, parseEndpointTokens } from './relay.js';
+import { VIEWER_HTML } from './viewer.js';
 
 // SSE comment ping; keeps idle viewer connections alive through proxies.
 const HEARTBEAT_MS = 25_000;

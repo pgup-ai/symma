@@ -1,5 +1,5 @@
-import { spawnWithTimeout } from './cli-process.ts';
-import { truncateForLog } from './text.ts';
+import { spawnWithTimeout } from './cli-process.js';
+import { truncateForLog } from './text.js';
 
 const CURSOR_MODEL_LIST_TIMEOUT_MS = 60_000;
 

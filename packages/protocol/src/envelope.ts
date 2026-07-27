@@ -4,7 +4,7 @@
  * the client tees them, and the gateway stores them — a shape with three
  * consumers belongs to none of them.
  */
-import { isSafeId } from './ids.ts';
+import { isSafeId } from './ids.js';
 
 /**
  * One observed ACP frame, as sent by the jbot-side tee (or the demo feeder).

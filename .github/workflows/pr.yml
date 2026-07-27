@@ -28,4 +28,6 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck
+      # Before the build, so a fresh clone is what gets tested.
       - run: npm test
+      - run: npm run verify:pack

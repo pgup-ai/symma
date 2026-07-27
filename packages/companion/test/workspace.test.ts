@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { deepenUntilBase, fetchWorkspace } from '../src/workspace.ts';
+import { deepenUntilBase, fetchWorkspace } from '../src/workspace.js';
 
 describe('deepenUntilBase', () => {
   it('stops at the first depth that reaches the base', async () => {
