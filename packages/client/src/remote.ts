@@ -257,8 +257,13 @@ export async function runRemotePrompt(
     // is covered by the gateway's resume window, so never block the return.
     void post({ kind: 'close', sessionId, reason: 'prompt complete' }).catch(() => {});
     stream.abort();
-    output.end();
+    // End only once the pump is provably done. Aborting does not stop a read
+    // that already resolved, so ending first let a late frame write into a
+    // closed stream — and on a path that never reached driveAcpSession, that
+    // 'error' has no listener and takes the process down. `reading` was always
+    // awaited here, so this reorders teardown rather than blocking it.
     await reading;
+    output.end();
   }
 }
 
