@@ -29,8 +29,14 @@ for pkg in protocol client; do
   # npm ships LICENSE, README and package.json whatever `files` says, so a
   # dist-less pack still produces a plausible-looking tarball. The entry point
   # is the only thing worth asserting.
-  tar tzf "$work/$tgz" | grep -qx "package/dist/index.js" \
-    || { echo "FAIL: $tgz has no dist/index.js"; exit 1; }
+  if ! tar tzf "$work/$tgz" | grep -qx "package/dist/index.js"; then
+    echo "FAIL: $tgz has no dist/index.js"
+    echo "  dist on disk: $(ls "$root/packages/$pkg/dist" 2>&1 | head -3 | tr '\n' ' ')"
+    echo "  tarball holds:"; tar tzf "$work/$tgz" | sed 's/^/    /' | head -8
+    echo "  npm pack --dry-run says:"
+    (cd "$root/packages/$pkg" && npm pack --dry-run 2>&1 | tail -12 | sed 's/^/    /')
+    exit 1
+  fi
   tarballs+=("./$tgz")
   echo "    @symma/$pkg@$ver: $files files"
 done
