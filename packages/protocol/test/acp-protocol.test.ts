@@ -149,6 +149,49 @@ describe('acp', () => {
     assert.deepEqual(oneShot, []);
   });
 
+  it('caps frames by UTF-8 bytes, not UTF-16 code units', () => {
+    // Same code-unit length, different verdict: 13 ASCII chars are 13 bytes
+    // and fit a 16-byte budget, while 13 code units of CJK are 23 bytes and
+    // must not. Counting `.length` would admit both.
+    const seen: unknown[] = [];
+    const reader = createNdjsonReader((message) => seen.push(message), 16);
+    assert.equal(reader('{"a":"bcdef"}\n'), true);
+    assert.deepEqual(seen, [{ a: 'bcdef' }]);
+    assert.equal(reader('{"a":"日本語日本"}\n'), false);
+    // Latches off, and the multibyte frame never reached the callback.
+    assert.deepEqual(seen, [{ a: 'bcdef' }]);
+
+    // The unterminated-buffer path is measured the same way.
+    const buffered = createNdjsonReader(() => undefined, 16);
+    assert.equal(buffered('{"a":"日本語日本"'), false);
+  });
+
+  it('fails pending requests when the transport dies instead of hanging', async () => {
+    const options = { cwd: '/x', prompt: 'p', agent: 'fake', label: 'review', log: noLog };
+    // Nothing answers `initialize`; ending stdout must reject, not hang. The
+    // caller's own deadline is policy on top of this, not a substitute for it.
+    const output = new PassThrough();
+    const pending = driveAcpSession({ input: new PassThrough(), output }, options);
+    output.end();
+    await assert.rejects(pending, /agent stdout (ended|closed) mid-request/);
+
+    // A stream fault rejects the session rather than throwing an unhandled
+    // 'error' event at the process.
+    const faulted = new PassThrough();
+    const onFault = driveAcpSession({ input: new PassThrough(), output: faulted }, options);
+    faulted.destroy(new Error('pipe reset'));
+    await assert.rejects(onFault, /agent stdout (failed|closed) mid-request/);
+
+    // An unwritable stdin drops the frame, so the request it belongs to can
+    // never be answered — reject at send time.
+    const input = new PassThrough();
+    input.destroy();
+    await assert.rejects(
+      driveAcpSession({ input, output: new PassThrough() }, options),
+      /agent stdin is not writable; initialize was not sent/,
+    );
+  });
+
   // execute-allow and unknown-kind-allow are the DESIGNED policy (invariant
   // #8: bash stays allowed; agent-side sandbox/plan layers police commands),
   // so this test pins them on purpose.

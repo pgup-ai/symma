@@ -30,6 +30,19 @@ const ACP_POST_TURN_DRAIN_MS = 300;
 export const CODEX_ACP_BIN = 'codex-acp';
 
 /**
+ * Byte-exact budget test that skips the UTF-8 scan for all but near-cap
+ * frames. UTF-8 never exceeds 3 bytes per UTF-16 code unit (astral chars cost
+ * 4 bytes but span a 2-unit surrogate pair), so anything under a third of the
+ * budget is provably inside it — and every real frame is. Counting `.length`
+ * alone would let multibyte output overrun a cap named in bytes by up to 3x,
+ * while `ndjson.ts` measures the same kind of cap exactly.
+ */
+function exceedsFrameBudget(text: string, maxFrameBytes: number): boolean {
+  if (text.length * 3 <= maxFrameBytes) return false;
+  return Buffer.byteLength(text) > maxFrameBytes;
+}
+
+/**
  * ACP frames are newline-delimited JSON (no Content-Length headers). Tolerates
  * frames split across chunks and skips non-JSON lines — some CLIs print
  * banners on stdout before the protocol stream starts.
@@ -51,7 +64,7 @@ export function createNdjsonReader(
       if (!line) continue;
       // A newline arriving in the same chunk as an oversized frame would
       // otherwise reach JSON.parse before the post-loop budget check.
-      if (line.length > maxFrameBytes) {
+      if (exceedsFrameBudget(line, maxFrameBytes)) {
         overflowed = true;
         buffer = '';
         return false;
@@ -64,7 +77,7 @@ export function createNdjsonReader(
       }
       if (message && typeof message === 'object') onMessage(message as Record<string, unknown>);
     }
-    if (buffer.length > maxFrameBytes) {
+    if (exceedsFrameBudget(buffer, maxFrameBytes)) {
       overflowed = true;
       buffer = '';
       return false;
@@ -157,6 +170,18 @@ class AcpConnection {
         );
       }
     });
+    // A closed transport can never answer, so pending requests fail here
+    // rather than waiting out the caller's deadline — and a consumer that
+    // sets no deadline gets a rejection instead of a hang. `error` also needs
+    // a listener in its own right: unhandled, it would take down the process.
+    // These fire BEFORE a child process's own 'close', so a caller racing an
+    // exit handler to attach stderr should expect this terser error to win;
+    // the guarantee here is a rejection, not the most descriptive one.
+    io.output.on('end', () => this.failAllPending(new Error('agent stdout ended mid-request')));
+    io.output.on('close', () => this.failAllPending(new Error('agent stdout closed mid-request')));
+    io.output.on('error', (error: Error) =>
+      this.failAllPending(new Error(`agent stdout failed mid-request: ${error.message}`)),
+    );
   }
 
   private failAllPending(error: Error): void {
@@ -169,14 +194,23 @@ class AcpConnection {
     const promise = new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
-    this.write({ jsonrpc: '2.0', id, method, params });
+    // An unwritable stdin drops the frame, so nothing will ever answer this
+    // id; reject now instead of leaving the entry pending forever.
+    if (!this.write({ jsonrpc: '2.0', id, method, params })) {
+      const entry = this.pending.get(id);
+      this.pending.delete(id);
+      entry?.reject(new Error(`agent stdin is not writable; ${method} was not sent`));
+    }
     return promise;
   }
 
-  private write(message: Record<string, unknown>): void {
-    if (!this.io.input.writable) return;
+  /** Returns whether the frame reached the stream. Responses to agent-initiated
+   * requests ignore this — a dead stdin has no one left to inform. */
+  private write(message: Record<string, unknown>): boolean {
+    if (!this.io.input.writable) return false;
     this.io.input.write(`${JSON.stringify(message)}\n`);
     this.tee?.('out', message);
+    return true;
   }
 
   private dispatch(message: JsonRpcMessage): void {

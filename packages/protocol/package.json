@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "ACP framing, session driving, agent specs and signed envelopes",
   "license": "MIT",
+  "private": true,
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
