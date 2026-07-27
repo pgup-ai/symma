@@ -16,12 +16,21 @@ Section references below (§N) are to that document.
   (the condition is what resolves `@symma/*` to source)
 - `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`
   — tsc, oxlint (deny-warnings), prettier (owns formatting)
-- `npm run build` — `tsc` emits JS + `.d.ts` into each package's `dist/`.
-  Sources import each other as `./foo.js` (NodeNext convention: write `.js`,
-  TypeScript and tsx both resolve `.ts`). `@symma/protocol` and `@symma/client`
-  publish; `gateway` and `companion` stay `private` — they are applications, not
-  libraries. Workspace resolution uses the `symma-source` export condition, so
-  tests run against `src` and consumers get `dist`.
+- `npm run build` — `tsc` emits JS + `.d.ts` into `dist/` for the two packages
+  that publish, `@symma/protocol` and `@symma/client`. `gateway` and `companion`
+  are private applications: they run from source under tsx and build nothing.
+- `npm run verify:pack` — packs both packages and loads them as a consumer
+  would. Nothing else does: the suite runs under `--conditions=symma-source` and
+  `tsc` resolves `@symma/*` to source, so the `dist` entry, the published types
+  and the tarball's contents are exercised only here.
+- Sources import each other as `./foo.js` — NodeNext convention: write the
+  extension the output will have, and `tsc` and tsx both resolve the `.ts`.
+  Writing `.ts` breaks the emit.
+- The two published packages resolve to `src` in the workspace through the
+  `symma-source` export condition, and to `dist` everywhere else. Any process
+  that runs from source needs `--conditions=symma-source`, including ones a test
+  spawns — a child does not inherit the flag. `@symma/gateway` is private and
+  maps straight to source with no condition.
 
 ## Packages
 

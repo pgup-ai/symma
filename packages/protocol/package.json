@@ -19,7 +19,10 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "npm run build"
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@types/node": "^22.10.0"
   },
   "engines": {
     "node": ">=20"

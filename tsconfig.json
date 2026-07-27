@@ -10,5 +10,5 @@
     "types": ["node"],
     "customConditions": ["symma-source"]
   },
-  "include": ["packages/*/src"]
+  "include": ["packages/*/src", "packages/*/test"]
 }

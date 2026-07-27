@@ -63,6 +63,7 @@ describe('relay e2e', () => {
     const base = `http://127.0.0.1:${port}`;
     let gateway: ChildProcess | undefined;
     let companion: ChildProcess | undefined;
+    let tornDown = false;
     try {
       gateway = spawn(
         process.execPath,
@@ -80,8 +81,15 @@ describe('relay e2e', () => {
           stdio: ['ignore', 'pipe', 'pipe'],
         },
       );
+      let startupErr = '';
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('gateway did not start')), 15_000);
+        const timer = setTimeout(
+          () => reject(new Error(`gateway did not start: ${startupErr.trim() || 'no stderr'}`)),
+          15_000,
+        );
+        gateway?.stderr?.on('data', (chunk: Buffer) => {
+          startupErr += String(chunk);
+        });
         gateway?.stdout?.on('data', (chunk: Buffer) => {
           if (String(chunk).includes('listening')) {
             clearTimeout(timer);
@@ -147,9 +155,11 @@ describe('relay e2e', () => {
           }
         }
       })().catch((error: unknown) => {
-        // Nothing awaits this reader, and the assertions below wait on `lines`
-        // — so without this the real cause is lost and the failure arrives as
-        // a timeout naming a frame that never came.
+        // Nothing awaits this reader and the assertions below wait on `lines`,
+        // so a silent failure would arrive as a timeout naming a frame that
+        // never came. Teardown always kills the stream, and reporting that
+        // would cry wolf on every green run.
+        if (tornDown) return;
         console.error(`SSE reader failed: ${error instanceof Error ? error.message : error}`);
       });
 
@@ -230,6 +240,7 @@ describe('relay e2e', () => {
         return closed ? true : undefined;
       }, 'loud close after resume window');
     } finally {
+      tornDown = true;
       companion?.kill('SIGKILL');
       gateway?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });

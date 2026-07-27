@@ -19,10 +19,11 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "prepublishOnly": "npm run build"
+    "prepack": "npm run build"
   },
   "dependencies": {
-    "@symma/protocol": "0.1.0"
+    "@symma/protocol": "0.1.0",
+    "@types/node": "^22.10.0"
   },
   "devDependencies": {
     "@symma/gateway": "0.1.0"

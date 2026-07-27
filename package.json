@@ -14,7 +14,8 @@
     "gateway": "node --conditions=symma-source --import tsx packages/gateway/src/server.ts",
     "gateway:demo": "node --conditions=symma-source --import tsx packages/gateway/src/demo.ts",
     "companion": "node --conditions=symma-source --import tsx packages/companion/src/index.ts",
-    "build": "npm run build --workspaces --if-present"
+    "build": "npm run build --workspaces --if-present",
+    "verify:pack": "bash scripts/verify-pack.sh"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -97,8 +97,15 @@ describe('gateway', () => {
       // Accumulate stdout: chunk boundaries are arbitrary, so never assert
       // against a single data event.
       let startupLog = '';
+      let startupErr = '';
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('gateway did not start')), 15_000);
+        const timer = setTimeout(
+          () => reject(new Error(`gateway did not start: ${startupErr.trim() || 'no stderr'}`)),
+          15_000,
+        );
+        child?.stderr?.on('data', (chunk: Buffer) => {
+          startupErr += String(chunk);
+        });
         child?.stdout?.on('data', (chunk: Buffer) => {
           startupLog += String(chunk);
           if (startupLog.includes('listening')) {
@@ -106,7 +113,9 @@ describe('gateway', () => {
             resolve();
           }
         });
-        child?.on('exit', (code) => reject(new Error(`gateway exited ${code}`)));
+        child?.on('exit', (code) =>
+          reject(new Error(`gateway exited ${code}: ${startupErr.trim() || 'no stderr'}`)),
+        );
       });
       assert.ok(startupLog.includes('http://127.0.0.1:'), `host override ignored: ${startupLog}`);
 

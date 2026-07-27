@@ -73,8 +73,15 @@ describe('remote acp prompt', () => {
           stdio: ['ignore', 'pipe', 'pipe'],
         },
       );
+      let startupErr = '';
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('gateway did not start')), 15_000);
+        const timer = setTimeout(
+          () => reject(new Error(`gateway did not start: ${startupErr.trim() || 'no stderr'}`)),
+          15_000,
+        );
+        gateway?.stderr?.on('data', (chunk: Buffer) => {
+          startupErr += String(chunk);
+        });
         gateway?.stdout?.on('data', (chunk: Buffer) => {
           if (String(chunk).includes('listening')) {
             clearTimeout(timer);
