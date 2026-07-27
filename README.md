@@ -5,10 +5,10 @@ your own credentials.
 
 Every comparable project is one deployment that owns the agent, its login and its
 working directory — users get separate conversations against a shared machine.
-symma routes each chat user to *their* laptop instead: their agent, their
+symma routes each chat user to _their_ laptop instead: their agent, their
 subscription, their keys. The hosted service never holds a provider credential.
 
-> Named after the Greek *symmachia*, alliance. Pronounced **SIM-uh**.
+> Named after the Greek _symmachia_, alliance. Pronounced **SIM-uh**.
 
 ## Status
 
@@ -19,13 +19,13 @@ companion, signed envelopes and viewer have been running and dogfooded since
 
 ## Planned packages
 
-| package | what it is |
-| --- | --- |
-| `@symma/protocol` | ACP framing, JSON-RPC peer, session driver, agent specs, envelope signing, relay control types |
-| `@symma/gateway` | relay, journal store, viewer, tenancy |
-| `@symma/companion` | attach loop, agent detection, local spawn/lifecycle, self-update |
-| `@symma/client` | dial a gateway: config, readiness, transport |
-| `@symma/slack` | the Slack bot |
+| package            | what it is                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| `@symma/protocol`  | ACP framing, JSON-RPC peer, session driver, agent specs, envelope signing, relay control types |
+| `@symma/gateway`   | relay, journal store, viewer, tenancy                                                          |
+| `@symma/companion` | attach loop, agent detection, local spawn/lifecycle, self-update                               |
+| `@symma/client`    | dial a gateway: config, readiness, transport                                                   |
+| `@symma/slack`     | the Slack bot                                                                                  |
 
 `symma` (unscoped) is the companion's install path.
 

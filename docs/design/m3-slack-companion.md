@@ -11,23 +11,23 @@ to **their** agent, with **their** credentials, on **their** machine.
 
 ### The category exists; the identity model does not
 
-Surveyed **2026-07-26**. Every project below connects Slack to *an* ACP agent.
+Surveyed **2026-07-26**. Every project below connects Slack to _an_ ACP agent.
 None routes each Slack actor to that person's separately authenticated machine.
 
 Star counts and repo status drift, so treat them as a snapshot of that date, not
 a fact. Before citing this table again, re-check the repos and record URLs and
 commit SHAs alongside the claims.
 
-| project | what matches | how it differs |
-| --- | --- | --- |
-| **cc-connect** (~14.4k★) | most mature local bridge: Socket Mode, any ACP agent, local credentials, streaming, permissions, per-user session keys | one deployment owns the machine, working directory, agent login and credentials. Private session state, **not** personal agent ownership |
-| **OpenAB** (~712★) | Rust ACP broker, native Slack, thread-per-session, many agent adapters, uses Slack's native agent streaming | deployment-owned: one config + credential set per bot/pod. "Multiple agents" means multiple deployments |
-| **OpenACP** (~427★) | self-hosted Slack/Discord/Telegram bridge, native ACP, approval buttons | explicitly single-user; repo status uncertain (404s during the check) |
-| **slack-acp** | thread → ACP session, local stdio agent, throttled streaming; actively updated | single deployment. Permissions auto-approved behind allowlists |
-| **Hoomanity** | ACP relay for Slack/Telegram/WhatsApp, in-chat tool approvals | conversation-centric, single installation |
-| **seam-acp** | architecturally closest: ACP over authenticated WebSockets to a pre-authenticated remote machine, outbound-only tunnels, session restoration | Discord only so far; remote profiles are operator-configured, not bound to chat identities |
-| **OpenHands Agent Canvas** (~225★) | local agent server, Claude Code/Codex over ACP | its Slack path is a cron automation that posts a final result, not a live client |
-| **Juan** | "Slack as ACP Client", Socket Mode | archived March 2026, single machine |
+| project                            | what matches                                                                                                                                 | how it differs                                                                                                                           |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **cc-connect** (~14.4k★)           | most mature local bridge: Socket Mode, any ACP agent, local credentials, streaming, permissions, per-user session keys                       | one deployment owns the machine, working directory, agent login and credentials. Private session state, **not** personal agent ownership |
+| **OpenAB** (~712★)                 | Rust ACP broker, native Slack, thread-per-session, many agent adapters, uses Slack's native agent streaming                                  | deployment-owned: one config + credential set per bot/pod. "Multiple agents" means multiple deployments                                  |
+| **OpenACP** (~427★)                | self-hosted Slack/Discord/Telegram bridge, native ACP, approval buttons                                                                      | explicitly single-user; repo status uncertain (404s during the check)                                                                    |
+| **slack-acp**                      | thread → ACP session, local stdio agent, throttled streaming; actively updated                                                               | single deployment. Permissions auto-approved behind allowlists                                                                           |
+| **Hoomanity**                      | ACP relay for Slack/Telegram/WhatsApp, in-chat tool approvals                                                                                | conversation-centric, single installation                                                                                                |
+| **seam-acp**                       | architecturally closest: ACP over authenticated WebSockets to a pre-authenticated remote machine, outbound-only tunnels, session restoration | Discord only so far; remote profiles are operator-configured, not bound to chat identities                                               |
+| **OpenHands Agent Canvas** (~225★) | local agent server, Claude Code/Codex over ACP                                                                                               | its Slack path is a cron automation that posts a final result, not a live client                                                         |
+| **Juan**                           | "Slack as ACP Client", Socket Mode                                                                                                           | archived March 2026, single machine                                                                                                      |
 
 The shape they share: **one shared agent identity, machine, credentials and
 workspace — with isolated conversations per user.** A shared Mac mini is the
@@ -43,7 +43,7 @@ That has been built several times. It is:
 
 What that buys, which none of the above can express:
 
-- Alice and Bob invoke *different* personal agents in the same thread.
+- Alice and Bob invoke _different_ personal agents in the same thread.
 - No workspace-wide shared agent credentials.
 - **Provider credentials and local auth files never leave the companion.**
 - Presence and capacity are per user.
@@ -80,11 +80,11 @@ in-band attestation only points downward.
 
 ### Today it is single-tenant by construction
 
-| | today | why it breaks with two users |
-| --- | --- | --- |
-| client auth | one shared `JBOT_GATEWAY_TOKEN` | any client can open a session on **anyone's** companion |
-| endpoint auth | per-endpoint tokens from `JBOT_GATEWAY_ENDPOINTS` env | cannot issue per user without editing the box |
-| viewer auth | same shared token | anyone with the link reads every journal — code and full agent reasoning |
+|               | today                                                 | why it breaks with two users                                             |
+| ------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| client auth   | one shared `JBOT_GATEWAY_TOKEN`                       | any client can open a session on **anyone's** companion                  |
+| endpoint auth | per-endpoint tokens from `JBOT_GATEWAY_ENDPOINTS` env | cannot issue per user without editing the box                            |
+| viewer auth   | same shared token                                     | anyone with the link reads every journal — code and full agent reasoning |
 
 The sharp one: `relay.openSession` checks the endpoint is online, has capacity,
 and offers the agent. **It never checks the caller is entitled to that
@@ -154,22 +154,22 @@ The service processes and stores selected Slack context, prompts, agent output
 and reasoning — which can contain source code. That has to be stated, defaulted,
 and enforced:
 
-| | position |
-| --- | --- |
-| retention | frames expire on a default window (start at 30 days); the row is the unit, so this is a delete query |
-| deletion | a user can delete a conversation and its frames from the DM |
-| uninstall | removing the Slack app deletes that workspace's conversations, turns, tokens and frames |
-| user removal | deactivating a Slack user revokes their tokens and unpairs their endpoints |
-| encryption | at rest via the database; secrets (tokens, pairing codes) stored hashed, never plaintext |
-| logs | redact prompts, output and tokens — logs carry ids and outcomes, not content |
-| training | never. No model training, no fine-tuning, no human review of customer content |
+|              | position                                                                                             |
+| ------------ | ---------------------------------------------------------------------------------------------------- |
+| retention    | frames expire on a default window (start at 30 days); the row is the unit, so this is a delete query |
+| deletion     | a user can delete a conversation and its frames from the DM                                          |
+| uninstall    | removing the Slack app deletes that workspace's conversations, turns, tokens and frames              |
+| user removal | deactivating a Slack user revokes their tokens and unpairs their endpoints                           |
+| encryption   | at rest via the database; secrets (tokens, pairing codes) stored hashed, never plaintext             |
+| logs         | redact prompts, output and tokens — logs carry ids and outcomes, not content                         |
+| training     | never. No model training, no fine-tuning, no human review of customer content                        |
 
 M2 deferred retention on a files-and-cron argument. In a store it stops being an
 ops chore and starts being a product promise, so it lands with M3a.
 
 ## 2. Pairing and onboarding — the product
 
-The beta targets non-technical people, so this flow *is* the product. Every
+The beta targets non-technical people, so this flow _is_ the product. Every
 surveyed competitor requires building a Slack app, copying tokens, editing
 config, and keeping a daemon alive. cc-connect has the best of them and still
 needs: create app → scopes → enable Socket Mode → app token → event subscriptions
@@ -221,13 +221,13 @@ reconnect — it never runs the request on someone else's machine.
 
 ### Failure modes, all of which need words not stack traces
 
-| case | behaviour |
-| --- | --- |
-| code expired / already used | "That code expired — run **Connect my agent** for a new one." |
-| no agents detected | install links for supported agents; do not attach an endpoint with zero agents |
-| laptop sleeps or closes | bot says the companion is offline and offers to retry — never a silent hang. **Expect this to be the top support issue.** |
-| companion killed | same as offline; the login service restarts it at next boot |
-| two devices | both attach; member picks a default, per-session override available |
+| case                        | behaviour                                                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| code expired / already used | "That code expired — run **Connect my agent** for a new one."                                                             |
+| no agents detected          | install links for supported agents; do not attach an endpoint with zero agents                                            |
+| laptop sleeps or closes     | bot says the companion is offline and offers to retry — never a silent hang. **Expect this to be the top support issue.** |
+| companion killed            | same as offline; the login service restarts it at next boot                                                               |
+| two devices                 | both attach; member picks a default, per-session override available                                                       |
 
 ## 3. Companion
 
@@ -237,7 +237,7 @@ reconnect — it never runs the request on someone else's machine.
 - **Two distribution paths, both supported.** `curl | sh` is primary because 3
   of 4 agent CLIs already install that way (devin via Homebrew, cursor-agent and
   codex via their own installers); those users may have no Node at all. `npx
-  symma` is secondary for the Node crowd and nearly free from the same codebase.
+symma` is secondary for the Node crowd and nearly free from the same codebase.
 - **`versions/<v>/` + `current` symlink**, copying codex and cursor-agent. Gives
   atomic upgrade and rollback.
 - **Self-update on start.** Not a nicety: external companions cannot be upgraded
@@ -285,7 +285,7 @@ conversation, matching the model users already know from agent apps.
   as every other injected block): keep the root plus the most recent/relevant
   replies and **state exactly what was omitted**.
 - **Slack limits how much of the thread we can even read, and it depends on the
-  install phase.** Since 2025-05-29, commercially distributed apps *not* approved
+  install phase.** Since 2025-05-29, commercially distributed apps _not_ approved
   for the Marketplace get `conversations.replies` at **1 request/minute and 15
   messages**; internal custom apps keep 1,000 messages at 50+ req/min, and
   Marketplace apps are unaffected. So the pilot reads threads properly and the
@@ -294,7 +294,7 @@ conversation, matching the model users already know from agent apps.
   pilot, bounded on-demand fetching with an honest "I could only see the last N
   replies", or event-fed caching. **Do not cache whole workspaces to dodge a rate
   limit** — that inflates the data-lifecycle surface for a quota workaround.
-- Reading a private channel's thread needs the bot to be *in* it. When it is not,
+- Reading a private channel's thread needs the bot to be _in_ it. When it is not,
   or scopes are missing, say so rather than answering from a partial snapshot.
 - Later source-thread messages never silently join a running task. Tagging again
   creates another conversation with a fresh snapshot.
@@ -346,13 +346,13 @@ follow-up, no chance to catch a weak first draft.
 
 > **Invoking the agent is not consent to publish its response.**
 
-A public thread supplies *context* and a *destination*. The work happens
+A public thread supplies _context_ and a _destination_. The work happens
 privately. Immediately after creating the DM conversation the bot offers two
 buttons **while the agent already starts working**:
 
 - **Keep private** — the default. Completion produces a private draft for
   review, follow-ups, and an optional **Share to thread**.
-- **Post when ready** — a one-turn authorization for the next *successful* final
+- **Post when ready** — a one-turn authorization for the next _successful_ final
   answer to go straight to the source thread. Thinking, tool output, permission
   prompts and partial responses stay private regardless.
 
@@ -406,11 +406,11 @@ and sits beside the gateway. Nearly every local competitor works this way.
 The catch is that Socket Mode apps **cannot be listed in the Slack Marketplace**,
 which splits the launch into three phases:
 
-| phase | install | needs | thread reads |
-| --- | --- | --- | --- |
-| **1. internal pilot** | operator installs one custom Socket Mode app | no OAuth, no public endpoint | full (1,000/req, 50+/min) |
-| **2. multi-workspace beta** | OAuth + **Add to Slack** | OAuth infra; distribution policy settled first | **degraded** — 15 messages, 1 req/min |
-| **3. public scale** | Marketplace listing | HTTP event + interactivity endpoints (Socket Mode cannot be listed), Marketplace review | full |
+| phase                       | install                                      | needs                                                                                   | thread reads                          |
+| --------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------- |
+| **1. internal pilot**       | operator installs one custom Socket Mode app | no OAuth, no public endpoint                                                            | full (1,000/req, 50+/min)             |
+| **2. multi-workspace beta** | OAuth + **Add to Slack**                     | OAuth infra; distribution policy settled first                                          | **degraded** — 15 messages, 1 req/min |
+| **3. public scale**         | Marketplace listing                          | HTTP event + interactivity endpoints (Socket Mode cannot be listed), Marketplace review | full                                  |
 
 Phase 2 is the awkward one: it needs the most new infrastructure and gets the
 worst thread access. That is an argument for staying in phase 1 until the
@@ -479,7 +479,7 @@ Consequences:
 
 Why each number matters:
 
-- **①** the mention carries thread context into a *new private* conversation —
+- **①** the mention carries thread context into a _new private_ conversation —
   it is not permission to answer in the channel.
 - **②** the actor→owner→endpoint resolution is the entire security model. This is
   the check `relay.openSession` does not do today.
@@ -508,12 +508,12 @@ Why each number matters:
 Measured 2026-07-27 across the 4,353 lines that would move. Every internal
 import the candidate set makes, classified:
 
-| import | verdict |
-| --- | --- |
+| import                                                                                                                | verdict                             |
+| --------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
 | `acp-protocol.ts`, `envelope-signature.ts`, `relay.ts`, `journal.ts`, `ndjson.ts`, `observer.ts`, `signal-cleanup.ts` | already self-contained — move as-is |
-| `cli-process.ts` (process-tree kill), `model.ts` (`parseModelName`) | generic — move |
-| `devin.ts`, `codex.ts`, `cursor.ts`, `kilo.ts` (credential paths) | belong with the agent specs — move |
-| `prompt.ts`, `opencode.ts`, `types.ts`, `text.ts`, `session-concurrency.ts` | review-specific — **stay** |
+| `cli-process.ts` (process-tree kill), `model.ts` (`parseModelName`)                                                   | generic — move                      |
+| `devin.ts`, `codex.ts`, `cursor.ts`, `kilo.ts` (credential paths)                                                     | belong with the agent specs — move  |
+| `prompt.ts`, `opencode.ts`, `types.ts`, `text.ts`, `session-concurrency.ts`                                           | review-specific — **stay**          |
 
 **Only `acp.ts` imports the review-specific ones.** That is by design —
 `acp-protocol.ts` was written to import nothing review-related, and it held.
@@ -554,8 +554,8 @@ jbot-review        ReviewBackend adapters + routing policy   → protocol, clien
 the reviewer never imports gateway internals to dial a gateway — the inversion
 being fixed above, prevented from recurring.
 
-**Mechanism moves, policy stays.** The companion learns *how* to clone a ref into
-a temp dir; it never learns *which* ref or why. Review-specific repo/ref choice,
+**Mechanism moves, policy stays.** The companion learns _how_ to clone a ref into
+a temp dir; it never learns _which_ ref or why. Review-specific repo/ref choice,
 the three-dot rule, and the throwaway-checkout policy stay in jbot-review, which
 already supplies them as `OpenControl.repo/ref/base`. Same split as the agent
 specs: symma owns the capability, the client owns the decision.
@@ -564,7 +564,7 @@ specs: symma owns the capability, the client owns the decision.
 
 **Principle: jbot-review is not touched until symma is fully tested.** It runs
 reviews daily and has a deployed App; destabilising it for a refactor that serves
-a *different* product is risk with no upside for it.
+a _different_ product is risk with no upside for it.
 
 That rules out splitting in place, so the boundary gets validated in symma
 instead — which works because **the tests travel with the code**: 12 files
@@ -600,13 +600,13 @@ put as its first downstream client and reference consumer.
 
 **Domains** — reserve the root for the product, not the gateway:
 
-| host | serves |
-| --- | --- |
-| `symma.dev` | product, install script, docs |
-| `app.symma.dev` | devices, agents, conversations, viewer |
-| `api.symma.dev` | OAuth and product API (phase 2+) |
-| `gateway.symma.dev` | companion connections |
-| `status.symma.dev` | service health — the M2 outage was silent for two hours |
+| host                | serves                                                  |
+| ------------------- | ------------------------------------------------------- |
+| `symma.dev`         | product, install script, docs                           |
+| `app.symma.dev`     | devices, agents, conversations, viewer                  |
+| `api.symma.dev`     | OAuth and product API (phase 2+)                        |
+| `gateway.symma.dev` | companion connections                                   |
+| `status.symma.dev`  | service health — the M2 outage was silent for two hours |
 
 The M2 gateway currently answers on the apex of another domain; splitting it out
 now costs a DNS record, later it costs a migration of every paired companion.
@@ -616,9 +616,9 @@ software consultancy of the same name (checked 2026-07-27); decided 2026-07-27
 that this is not a concern and needs no clearance — noted so it is not
 rediscovered and re-raised later.
 
-In copy, write "inspired by the Greek *symmachia*, meaning alliance" —
+In copy, write "inspired by the Greek _symmachia_, meaning alliance" —
 `symma` is a coined shortening rather than the Greek word itself. Pronounced
-*SIM-uh*; put that in the README.
+_SIM-uh_; put that in the README.
 
 ### Copy, do not `filter-repo`
 
@@ -629,12 +629,12 @@ names the origin SHA keeps the provenance without dragging that along.
 
 ## 9. Milestones
 
-| | scope | done when |
-| --- | --- | --- |
-| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession` |
-| **M3b** | pairing: codes, `/connect`, token exchange | a fresh laptop pairs from one command with no config file |
-| **M3c** | companion: auto-detect, dual distribution, self-update, login service | survives reboot; upgrades itself; reports which agents it found and why it skipped others |
-| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging | a non-technical tester completes a task from Slack without help |
+|         | scope                                                                                                                                                | done when                                                                                                                                                                |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle                                                                                  | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession` |
+| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                           | a fresh laptop pairs from one command with no config file                                                                                                                |
+| **M3c** | companion: auto-detect, dual distribution, self-update, login service                                                                                | survives reboot; upgrades itself; reports which agents it found and why it skipped others                                                                                |
+| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging | a non-technical tester completes a task from Slack without help                                                                                                          |
 
 M3d's bar is a person, not a passing test. If a tester needs a hand, the
 milestone is not done.
