@@ -13,17 +13,22 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 echo "==> packing"
+tarballs=()
 for pkg in protocol client; do
+  ver=$(node -p "require('$root/packages/$pkg/package.json').version")
   (cd "$root/packages/$pkg" && npm pack --silent --pack-destination "$work" >/dev/null)
-  files=$(tar tzf "$work/symma-$pkg-0.1.0.tgz" | wc -l | tr -d ' ')
+  tgz="symma-$pkg-$ver.tgz"
+  files=$(tar tzf "$work/$tgz" | wc -l | tr -d ' ')
   # `npm pack` happily emits a package.json-only tarball when dist is missing.
-  [ "$files" -gt 1 ] || { echo "FAIL: symma-$pkg tarball holds $files file(s)"; exit 1; }
-  echo "    @symma/$pkg: $files files"
+  [ "$files" -gt 1 ] || { echo "FAIL: $tgz holds $files file(s)"; exit 1; }
+  tarballs+=("./$tgz")
+  echo "    @symma/$pkg@$ver: $files files"
 done
 
 cd "$work"
 printf '{"name":"consumer","type":"module","private":true}\n' > package.json
-npm install --silent ./symma-protocol-0.1.0.tgz ./symma-client-0.1.0.tgz
+# Both together: client pins an exact protocol version that may not be published yet.
+npm install --silent "${tarballs[@]}"
 
 echo "==> importing from plain node (no tsx, no conditions)"
 node --input-type=module -e '
@@ -46,7 +51,6 @@ printf 'import { parseEnvelope } from "@symma/protocol";\nimport { checkEndpoint
 "$root/node_modules/.bin/tsc" -p tsconfig.json
 
 echo "==> publint"
-npx --yes publint@latest ./symma-protocol-0.1.0.tgz
-npx --yes publint@latest ./symma-client-0.1.0.tgz
+for tgz in "${tarballs[@]}"; do npx --yes publint@latest "$tgz"; done
 
 echo "OK: both packages install, import and typecheck as a consumer"

@@ -1,6 +1,6 @@
 {
   "name": "@symma/protocol",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ACP framing, session driving, agent specs and signed envelopes",
   "license": "MIT",
   "publishConfig": {
@@ -12,7 +12,8 @@
       "symma-source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"

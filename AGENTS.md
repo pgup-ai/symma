@@ -20,7 +20,8 @@ Section references below (§N) are to that document.
   that publish, `@symma/protocol` and `@symma/client`. `gateway` and `companion`
   are private applications: they run from source under tsx and build nothing.
 - `npm run verify:pack` — packs both packages and loads them as a consumer
-  would. Nothing else does: the suite runs under `--conditions=symma-source` and
+  would, and is the gate for any change to `exports`, `files` or the emitted
+  types. Nothing else does: the suite runs under `--conditions=symma-source` and
   `tsc` resolves `@symma/*` to source, so the `dist` entry, the published types
   and the tarball's contents are exercised only here.
 - Sources import each other as `./foo.js` — NodeNext convention: write the
@@ -135,9 +136,14 @@ without losing behavior, it should not have been written.
    generic halves; `ReviewBackend` wrappers and routing policy never leave
    jbot-review. **done** — `observer.ts` stays behind: every caller of it is
    review-side, so it is not symma's to hold.
-4. Publish `@symma/* 0.1.0`, exact-pinned.
+4. Publish `@symma/* 0.1.0`, exact-pinned. **done** — `@symma/protocol` and
+   `@symma/client` are on npm; `gateway` and `companion` stay private. Intra-
+   workspace pins must equal the workspace version exactly; `*` resolves to the
+   registry copy instead of the local one.
 5. Only now touch jbot-review: swap imports, keeping the local files in place.
-   If the suite goes red, revert one import line.
+   If the suite goes red, revert one import line. Read §8 "Step 5 readiness"
+   first — swapping `acp-protocol` silently stops the observer tee unless the
+   call site passes `tee:` in the same commit.
 6. Cross-repo green → delete the originals. Deleting earlier turns a packaging
    mistake into a bisect across two repositories.
 
