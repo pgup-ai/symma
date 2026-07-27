@@ -48,6 +48,12 @@ extraction fixes, prevented from recurring.
    the agent-side layers, not the floor, which is deliberately kind-based and
    allow-by-default for unknown kinds.
 
+   **Scoped to the review path.** M3's DM path inverts the caller — the
+   endpoint's owner, on their own machine — and allows writes inside an
+   allowlisted workspace root (§4, "Read-only ends where the caller changes").
+   That path does not exist in code yet, so this invariant is unconditional
+   today; whoever builds it amends this entry in the same commit.
+
    _Copied code cites this as "invariant #8", its number in jbot-review's
    AGENTS.md. Those references point across repos until the originals are
    deleted (§8, step 6), when they get renumbered._

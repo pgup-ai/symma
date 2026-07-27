@@ -72,9 +72,11 @@ Not restating M2; this is what M3 inherits and must not break.
   credential path and returns a per-agent reason when it is absent.
 - Dogfooded end to end 2026-07-27 (run 30235271632).
 
-**Invariants that carry over unchanged:** read-only enforced in three layers;
-auxiliary sessions fail open; compromise means shutdown, not mitigation;
-in-band attestation only points downward.
+**Invariants that carry over unchanged:** auxiliary sessions fail open;
+compromise means shutdown, not mitigation; in-band attestation only points
+downward. The read-only floor carries over for the review path and is
+deliberately lifted for the DM path — §4, "Read-only ends where the caller
+changes".
 
 ## 1. Tenancy — the load-bearing change
 
@@ -338,6 +340,49 @@ The rule: **the companion advertises, the gateway selects.**
 This is one decision doing two jobs: the picker is the UX, and the allowlist is
 the local-filesystem security boundary.
 
+### Read-only ends where the caller changes
+
+M2's floor exists because of _who calls_, not because agents are dangerous: the
+reviewer points an agent at an arbitrary PR's code, so mutating tool kinds are
+denied, the workspace is a throwaway clone, and credentials are copied into a
+per-spawn temp `HOME` that is deleted afterwards. That posture is right for
+review and does not change.
+
+The DM path inverts the premise. The caller is the endpoint's own owner, asking
+about their own project, on their own machine — and an agent that cannot edit
+the file it is discussing is the wrong tool for it.
+
+**The floor is a property of the path, not of the protocol.**
+
+- **Review path** — unchanged: deny `edit`/`delete`/`move`/`write`/`switch_mode`,
+  throwaway clone, relocated credentials, `requirePlanMode` failing closed.
+- **DM path** — writes allowed, **inside an allowlisted workspace root and
+  nowhere else**. The allowlist above is already the local-filesystem boundary;
+  write mode reuses it rather than adding a second one. No-workspace mode stays
+  read-only — there is nothing there worth writing to.
+
+**The agent runs as itself.** No temp `HOME`, no credential copy. A session
+started from Slack lands in the agent's own history (`codex`, `kilo`), so its
+owner can resume it locally — and that history is the record of what the agent
+did, which a discarded home destroys.
+
+Two consequences to design for rather than around:
+
+- **Sessions serialize per agent.** The temp `HOME` was also what made
+  concurrent spawns safe; a shared real home races the agent's own session state
+  (kilo keeps a SQLite dir there). Write-mode agents run one session at a time
+  until a specific agent is shown to tolerate more.
+- **Invocation is not content.** §5's rule has a mirror here: the owner
+  authorising a session is not the owner authorising whatever a public thread
+  told the agent to do. Only the owner may invoke, but thread contents are
+  untrusted input now reaching an agent that can write. The workspace allowlist
+  is what bounds that — it is why writes are confined rather than ambient — and
+  the agent's own history is what makes them visible afterwards.
+
+Write mode is configured by the companion's owner, per endpoint, in the same
+local file as the workspace allowlist. It is never a remote setting, and never
+something an `OpenControl` can ask for.
+
 ## 5. Approval and delivery — invocation is not consent
 
 The gap in every shipped Slack agent bot, including Codex's and Claude's: tag it
@@ -374,10 +419,14 @@ This keeps the review gate for substantive work without adding friction to quick
 questions.
 
 slack-acp, OpenAB and OpenHands auto-approve permissions behind allowlists —
-permissive precisely because their agents can write. Ours cannot, so v1 has
-nothing to approve. If write mode ever lands, consequential requests route to the
-**endpoint owner** as signed, expiring decisions, and the read-only floor stays
-the default.
+permissive precisely because their agents can write. On the review path ours
+cannot, so nothing there needs approving. The DM path does write (§4), and the
+difference from those projects is where the allowlist lives: theirs is a
+permission list configured in the bot, ours is the workspace allowlist held by
+the companion's owner, so no approval can widen the filesystem an agent reaches.
+Requests that would escape it — a write outside an allowlisted root, anything
+touching credentials — route to the **endpoint owner** as signed, expiring
+decisions instead of being auto-approved.
 
 ### Streaming and the Slack surface
 
@@ -483,8 +532,9 @@ Why each number matters:
   it is not permission to answer in the channel.
 - **②** the actor→owner→endpoint resolution is the entire security model. This is
   the check `relay.openSession` does not do today.
-- **③** unchanged from M2: outbound-dial companion, signed frames, read-only
-  floor. The bot holds no agent credentials and spawns nothing.
+- **③** unchanged from M2 in shape: outbound-dial companion, signed frames. The
+  bot holds no agent credentials and spawns nothing. The floor is the one thing
+  that differs — writes are allowed inside an allowlisted workspace root (§4).
 - **④+⑤** two private writes, so there is no dead air while reasoning stays in
   the owner-scoped viewer — now a privacy choice, not a rate-limit workaround.
 - **⑥** requires an explicit grant: **Post when ready** before completion, or
@@ -702,7 +752,10 @@ to anyone outside the operator.
 ## 10. Open / deferred
 
 - **Model enumeration** in Slack — deferred; needs a `models` control.
-- **Write mode + approvals** — out of scope; the read-only floor stays.
+- **Write-mode approvals** — the DM path writes inside an allowlisted workspace
+  root (§4); what stays open is the escape case, where a request that would
+  leave that root becomes a signed, expiring decision for the endpoint owner
+  (§5). Not needed for the pilot, since the allowlist already refuses it.
 - **Multi-workspace billing** — not modelled.
 - **Slack Marketplace listing** — blocked pending written clarification that a
   downloadable companion does not fall under "remote execution on a server via a
