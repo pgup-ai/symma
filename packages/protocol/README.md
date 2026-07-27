@@ -11,11 +11,21 @@ npm i @symma/protocol
 ```
 
 ```ts
-import { driveAcpSession, respondToPermissionRequest } from '@symma/protocol';
+import { driveAcpSession, kiloAcpSpec } from '@symma/protocol';
 
+const spec = kiloAcpSpec(auth);
 const { text, stopReason } = await driveAcpSession(
   { input: child.stdin, output: child.stdout },
-  { cwd, prompt, agent: 'kilo', label: 'review', log: console.log },
+  {
+    cwd,
+    prompt,
+    agent: spec.id,
+    label: 'review',
+    log: console.log,
+    // Carry the spec's policy through. kilo has no OS sandbox, so plan mode is
+    // its read-only layer, and this makes the session refuse to run without it.
+    requirePlanMode: spec.requirePlanMode,
+  },
 );
 ```
 
@@ -23,5 +33,12 @@ const { text, stopReason } = await driveAcpSession(
 assistant message. It sets no deadline of its own: transport death rejects, and
 the caller owns timeouts. Pass `tee` to observe every frame in both directions.
 
-Mutating tool kinds are rejected by `respondToPermissionRequest`, the
-client-side layer of symma's read-only floor.
+Read-only rests on three layers, and only the first is unconditional here:
+`respondToPermissionRequest` rejects mutating tool kinds, an agent-side sandbox
+covers agents that have one, and plan mode covers those that do not. Bash stays
+allowed by design, so **an agent without a sandbox is only read-only inside plan
+mode** — pass `requirePlanMode` from its spec rather than hardcoding options.
+
+`@symma/client`'s `runLocalAcpPrompt` does all of this for you, including the
+process lifecycle; reach for the raw session driver only when you own the
+transport.
