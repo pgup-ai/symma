@@ -41,6 +41,17 @@ const log = (msg: string): void => {
   console.log(`[jbot-gateway] ${msg}`);
 };
 
+/** Journaling is observability: a write failure (ENOSPC, EACCES) must never
+ * break the live relay, nor abort an in-flight review's remaining frames and
+ * its terminal run status. Both write paths fail open through here. */
+const journalWrite = (write: () => void): void => {
+  try {
+    write();
+  } catch (error) {
+    log(`journal write failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
 const subscribers = new Map<string, Set<ServerResponse>>();
 const journalKey = (runId: string, sessionId: string): string => `${runId}/${sessionId}`;
 
@@ -54,17 +65,18 @@ const relay = createRelay({
     Number(process.env.JBOT_GATEWAY_RESUME_MS) > 0
       ? Number(process.env.JBOT_GATEWAY_RESUME_MS)
       : undefined,
-  onLine: (_sessionId, _runId, _dir, line) => {
+  onLine: (sessionId, runId, _dir, line) => {
     const envelope = parseEnvelope(line);
     if (!envelope) return;
-    fanOut(envelope, line);
-    // Journaling is observability — a write failure (ENOSPC, EACCES) must
-    // never break the live relay.
-    try {
-      appendEnvelope(dataDir, envelope);
-    } catch (error) {
-      log(`journal write failed: ${error instanceof Error ? error.message : String(error)}`);
+    // The relay knows which session a line arrived on; the line only claims.
+    // Taking the claim would let either peer of one session write into another
+    // run's journal and fan frames to its viewers, so the relay's ids win.
+    if (envelope.runId !== runId || envelope.sessionId !== sessionId) {
+      log(`dropped frame on ${sessionId}: claimed ${envelope.runId}/${envelope.sessionId}`);
+      return;
     }
+    fanOut(envelope, line);
+    journalWrite(() => appendEnvelope(dataDir, envelope));
   },
 });
 const sendToEndpoint =
@@ -138,13 +150,13 @@ function fanRunControl(control: RunControl, line: string): void {
 function acceptLine(line: string): boolean {
   const control = parseRunControl(line);
   if (control) {
-    writeRunStatus(dataDir, control);
+    journalWrite(() => writeRunStatus(dataDir, control));
     fanRunControl(control, JSON.stringify(control));
     return true;
   }
   const envelope = parseEnvelope(line);
   if (!envelope) return false;
-  appendEnvelope(dataDir, envelope);
+  journalWrite(() => appendEnvelope(dataDir, envelope));
   fanOut(envelope, JSON.stringify(envelope));
   return true;
 }

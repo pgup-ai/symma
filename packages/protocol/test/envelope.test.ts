@@ -31,4 +31,22 @@ describe('observer envelope', () => {
     assert.equal(parseEnvelope('not json'), undefined);
     assert.equal(parseEnvelope(JSON.stringify(envelope({ v: 2 as unknown as 1 }))), undefined);
   });
+
+  it('rejects a seq that would poison the rest of the session', () => {
+    // Raw text on purpose: JSON.stringify turns Infinity into null, so building
+    // these through the fixture would pass for the wrong reason.
+    const line = (seq: string, ts = '1'): string =>
+      `{"v":1,"runId":"r","sessionId":"s","seq":${seq},"ts":${ts},` +
+      `"agent":"a","label":"l","dir":"in","frame":{}}`;
+    // Past the double range JSON parses to Infinity; the viewer drops anything
+    // with `seq <= lastSeq`, so one such line blanks the rest of the session.
+    assert.equal(parseEnvelope(line('1e400')), undefined);
+    assert.equal(parseEnvelope(line('-1e400')), undefined);
+    for (const seq of ['1.5', '-1', '9007199254740992']) {
+      assert.equal(parseEnvelope(line(seq)), undefined, seq);
+    }
+    assert.equal(parseEnvelope(line('0'))?.seq, 0);
+    // ts only has to be finite — it is a clock reading, not a cursor.
+    assert.equal(parseEnvelope(line('1', '1e400')), undefined);
+  });
 });

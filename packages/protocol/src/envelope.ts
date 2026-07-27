@@ -40,7 +40,12 @@ export function parseEnvelope(line: string): ObserverEnvelope | undefined {
   const e = value as Record<string, unknown>;
   if (e.v !== 1) return undefined;
   if (!isSafeId(e.runId) || !isSafeId(e.sessionId)) return undefined;
-  if (typeof e.seq !== 'number' || typeof e.ts !== 'number') return undefined;
+  // A non-finite seq is contagious, not merely invalid: JSON numbers past the
+  // double range parse to Infinity, the viewer keeps a monotonic high-water
+  // mark (`seq <= lastSeq` drops), so one such line blanks the rest of the
+  // session — and JSON.stringify writes it back to the journal as null.
+  if (typeof e.seq !== 'number' || !Number.isSafeInteger(e.seq) || e.seq < 0) return undefined;
+  if (typeof e.ts !== 'number' || !Number.isFinite(e.ts)) return undefined;
   if (typeof e.agent !== 'string' || typeof e.label !== 'string') return undefined;
   if (e.dir !== 'out' && e.dir !== 'in') return undefined;
   if (typeof e.frame !== 'object' || e.frame === null) return undefined;

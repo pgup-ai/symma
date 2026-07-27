@@ -198,6 +198,18 @@ describe('relay e2e', () => {
       const stranger = generateSigningKeys().publicKey;
       assert.equal(verifyEnvelope(signed[0]!, stranger), false);
 
+      // A frame claiming another run must not reach that run's journal: the
+      // session it arrived on is authoritative, not the ids inside the line.
+      await fetch(`${base}/api/sessions/sid-e2e/ingest`, {
+        method: 'POST',
+        headers: auth,
+        body: `${JSON.stringify({
+          ...(JSON.parse(envelope('sid-e2e', 99, { spoofed: true })) as ObserverEnvelope),
+          runId: 'run-victim',
+        })}\n`,
+      });
+      assert.deepEqual(readJournalLines(dataDir, 'run-victim', 'sid-e2e'), []);
+
       // Companion death fails the session loudly within the resume window.
       companion.kill('SIGKILL');
       await waitFor(async () => {
