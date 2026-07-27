@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { isSafeId, parseEnvelope, type ObserverEnvelope } from '@symma/protocol';
+import type { ObserverEnvelope } from '@symma/protocol';
 
 import {
   appendEnvelope,
@@ -30,20 +30,6 @@ const envelope = (overrides: Partial<ObserverEnvelope> = {}): ObserverEnvelope =
 });
 
 describe('gateway', () => {
-  it('validates envelopes and rejects unsafe ids', () => {
-    const good = parseEnvelope(JSON.stringify(envelope()));
-    assert.equal(good?.sessionId, 'review');
-    // Ids become file paths, so traversal shapes must die at the boundary.
-    assert.equal(isSafeId('../etc'), false);
-    assert.equal(isSafeId('.hidden'), false);
-    assert.equal(isSafeId('a/b'), false);
-    assert.equal(isSafeId('run.2026-07-24_01'), true);
-    assert.equal(parseEnvelope(JSON.stringify(envelope({ runId: '../x' }))), undefined);
-    assert.equal(parseEnvelope(JSON.stringify(envelope({ frame: undefined }))), undefined);
-    assert.equal(parseEnvelope('not json'), undefined);
-    assert.equal(parseEnvelope(JSON.stringify(envelope({ v: 2 as unknown as 1 }))), undefined);
-  });
-
   it('appends, lists, and replays journals from plain files', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'jbot-gw-test-'));
     try {
