@@ -20,8 +20,10 @@ Section references below (§N) are to that document.
   that publish, `@symma/protocol` and `@symma/client`. `gateway` and `companion`
   are private applications: they run from source under tsx and build nothing.
 - `npm run verify:pack` — packs both packages and loads them as a consumer
-  would, and is the gate for any change to `exports`, `files` or the emitted
-  types. Nothing else does: the suite runs under `--conditions=symma-source` and
+  would: resolution, the tarball's contents and the types, none of which
+  anything else covers. It does not check the barrel is complete — it imports a
+  handful of symbols, so a missing export still passes. Run it for any change to
+  `exports`, `files` or the emitted types. the suite runs under `--conditions=symma-source` and
   `tsc` resolves `@symma/*` to source, so the `dist` entry, the published types
   and the tarball's contents are exercised only here.
 - Sources import each other as `./foo.js` — NodeNext convention: write the
@@ -136,8 +138,9 @@ without losing behavior, it should not have been written.
    generic halves; `ReviewBackend` wrappers and routing policy never leave
    jbot-review. **done** — `observer.ts` stays behind: every caller of it is
    review-side, so it is not symma's to hold.
-4. Publish `@symma/* 0.1.0`, exact-pinned. **done** — `@symma/protocol` and
-   `@symma/client` are on npm; `gateway` and `companion` stay private. Intra-
+4. Publish `@symma/*`, exact-pinned — 0.1.0, then 0.1.1. **done** —
+   `@symma/protocol` and `@symma/client` are on npm; `gateway` and `companion`
+   stay private. Intra-
    workspace pins must equal the workspace version exactly; `*` resolves to the
    registry copy instead of the local one.
 5. Only now touch jbot-review: swap imports, keeping the local files in place.

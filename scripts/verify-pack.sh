@@ -19,8 +19,11 @@ for pkg in protocol client; do
   (cd "$root/packages/$pkg" && npm pack --silent --pack-destination "$work" >/dev/null)
   tgz="symma-$pkg-$ver.tgz"
   files=$(tar tzf "$work/$tgz" | wc -l | tr -d ' ')
-  # `npm pack` happily emits a package.json-only tarball when dist is missing.
-  [ "$files" -gt 1 ] || { echo "FAIL: $tgz holds $files file(s)"; exit 1; }
+  # npm ships LICENSE, README and package.json whatever `files` says, so a
+  # dist-less pack still produces a plausible-looking tarball. The entry point
+  # is the only thing worth asserting.
+  tar tzf "$work/$tgz" | grep -qx "package/dist/index.js" \
+    || { echo "FAIL: $tgz has no dist/index.js"; exit 1; }
   tarballs+=("./$tgz")
   echo "    @symma/$pkg@$ver: $files files"
 done

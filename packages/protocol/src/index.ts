@@ -1,6 +1,5 @@
-// The package's whole public surface. Anything a consumer needs must be listed
-// here — a symbol exported from its module but missing from this file is
-// unreachable through the package, however public it looks in source.
+// The package's whole public surface, by module then name. A type that appears
+// in an exported signature is exported too, so a consumer can name it.
 export {
   CODEX_ACP_BIN,
   codexAcpSpec,
@@ -12,6 +11,12 @@ export {
   matchModelOptionValue,
   respondToPermissionRequest,
   type AcpAgentSpec,
+  type AcpSessionIo,
+  type AcpSessionOptions,
+  type AcpSessionResult,
+  type ModelOptionCandidate,
+  type PermissionRequestParams,
+  type PermissionResponse,
 } from './acp-protocol.js';
 
 export {
@@ -48,6 +53,17 @@ export {
   type DevinCliConfig,
 } from './devin.js';
 
+export { parseEnvelope, type ObserverEnvelope } from './envelope.js';
+
+export {
+  generateSigningKeys,
+  publicKeyFrom,
+  signEnvelope,
+  verifyEnvelope,
+  verifyJournalLines,
+} from './envelope-signature.js';
+
+export { isSafeId } from './ids.js';
 export {
   assertValidKiloAuth,
   isKiloProvider,
@@ -59,20 +75,8 @@ export {
   parseKiloModelList,
 } from './kilo.js';
 
-export {
-  generateSigningKeys,
-  publicKeyFrom,
-  signEnvelope,
-  verifyEnvelope,
-  verifyJournalLines,
-} from './envelope-signature.js';
-
-export { parseEnvelope, type ObserverEnvelope } from './envelope.js';
-export { readNdjsonBody } from './ndjson.js';
-export { isSafeId } from './ids.js';
 export { parseModelName, type ParsedModel } from './model.js';
-export { truncateForLog } from './text.js';
-export { onFatalSignal } from './signal-cleanup.js';
+export { readNdjsonBody } from './ndjson.js';
 
 export {
   parseRelayControl,
@@ -85,3 +89,6 @@ export {
   type RelayControl,
   type SendLine,
 } from './relay-control.js';
+
+export { onFatalSignal } from './signal-cleanup.js';
+export { truncateForLog } from './text.js';

@@ -636,7 +636,8 @@ instead — which works because **the tests travel with the code**: 12 files
    the generic halves — local spawn/lifecycle, transport, readiness. The
    `ReviewBackend` wrappers and routing policy never leave jbot-review, so this
    is an extraction, not a migration. **Done.**
-4. **Publish `@symma/* 0.1.0`**, exact-pinned. Narrowed on contact: only
+4. **Publish `@symma/*`**, exact-pinned. Shipped as 0.1.0, then 0.1.1 once
+   the barrel was completed. Narrowed on contact: only
    `protocol` and `client` are libraries and publish. `gateway` and `companion`
    stay `private` and publish nothing at this step; they are applications, and
    they ship by other routes later — the gateway as an image, the companion as
@@ -699,7 +700,9 @@ Nothing in the Slack↔companion path tees to that endpoint; its senders are
 jbot-review's tee and the demo feeder. Step 5 settles it, when the import swap
 shows what the reviewer actually wants from symma — plausibly nothing here.
 
-Step 3 is therefore complete. **Step 4 is done as of #5.** `@symma/protocol` and `@symma/client` are on the
+Step 3 is therefore complete.
+
+**Step 4 is done as of #5.** `@symma/protocol` and `@symma/client` are on the
 public npm registry under the `symma` org, MIT, installable. `gateway` and
 `companion` stay private. `tsc` emits JS and `.d.ts`; sources import each other
 as `./foo.js`, and the workspace resolves to source through the `symma-source`
@@ -710,8 +713,8 @@ inside the workspace, where source resolution hides packaging faults.
 ### Step 5 readiness
 
 Reviewed before starting, by checking every symbol jbot-review imports from a
-module that moved against what the package actually exports. Two contract gaps,
-one of them silent.
+module that moved against what the package actually exports. Three gaps, one
+of them silent.
 
 - **The observer tee is the dangerous one.** jbot-review builds it _inside_
   `acp-protocol.ts` (`options.relayed ? undefined : makeSessionTee(...)`), while
@@ -723,11 +726,15 @@ one of them silent.
 - **`relayed: true` fails loudly, which is fine.** `acp-remote.ts` passes it and
   the package has no such option, so the swap is a typecheck error. Delete the
   line: a relayed caller now passes no tee, which is what the flag encoded.
-- **25 exported symbols were unreachable through the package** — the per-agent
-  provider ids, CLI binaries and credential helpers that `src/local/index.ts`
-  and four jbot-review tests import. Exported in 0.1.1. A symbol exported from
-  its module but absent from `index.ts` is invisible to consumers however public
-  it looks in source, and only a consumer-shaped check finds that.
+- **28 exported symbols were unreachable through the package**, taking the
+  barrel from 34 names to 62. They are the per-agent provider ids, CLI binaries
+  and credential helpers, and the consumers are production code rather than a
+  corner: `backend-selection.ts` for the `is*Provider` predicates, `runner.ts`
+  for `writeCodexAuth`/`writeDevinCredentials`/`assertValidKiloAuth`/the model
+  listers, `companion/index.ts` for several more, plus `local/index.ts` and four
+  tests. Exported in 0.1.1. A symbol exported from its module but absent from
+  `index.ts` is invisible to consumers however public it looks in source, and
+  nothing but a consumer-shaped check finds it.
 - **`model.ts` moved in part, by design.** Only `parseModelName` is generic and
   it is byte-identical; `resolveModelName`, `resolveAuxModelName` and
   `formatModelName` are review policy and stay. Step 5 imports the first from the
