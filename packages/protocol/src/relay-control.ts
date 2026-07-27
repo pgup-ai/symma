@@ -6,6 +6,20 @@ export interface EndpointAgent {
   agent: string;
 }
 
+/** What `GET /api/endpoints` serves: the gateway builds it, a client reads it
+ * to decide whether an endpoint can take the session. Lives here for the same
+ * reason the controls do — neither side of a wire owns its shape. */
+export interface EndpointPresence {
+  endpoint: string;
+  device: string;
+  agents: EndpointAgent[];
+  maxSessions: number;
+  activeSessions: number;
+  online: boolean;
+  /** Verify this endpoint's envelopes against it; absent means it signs none. */
+  publicKey?: string;
+}
+
 export interface HelloControl {
   kind: 'hello';
   endpoint: string;

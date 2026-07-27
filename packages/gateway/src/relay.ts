@@ -8,8 +8,8 @@
 import {
   isSafeId,
   type AckControl,
+  type EndpointPresence,
   type CloseControl,
-  type EndpointAgent,
   type HelloControl,
   type OpenControl,
   type SendLine,
@@ -53,17 +53,6 @@ export interface RelayOptions {
   /** Both directions of every relayed line, for journaling. */
   onLine?: (sessionId: string, runId: string, dir: 'in' | 'out', line: string) => void;
   onSessionFailed?: (sessionId: string, reason: string) => void;
-}
-
-export interface EndpointPresence {
-  endpoint: string;
-  device: string;
-  agents: EndpointAgent[];
-  maxSessions: number;
-  activeSessions: number;
-  online: boolean;
-  /** Verify this endpoint's envelopes against it; absent means it signs none. */
-  publicKey?: string;
 }
 
 export function createRelay(options: RelayOptions = {}) {

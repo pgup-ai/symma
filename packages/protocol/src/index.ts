@@ -15,6 +15,7 @@ export type {
   AckControl,
   CloseControl,
   EndpointAgent,
+  EndpointPresence,
   HelloControl,
   OpenControl,
   RelayControl,

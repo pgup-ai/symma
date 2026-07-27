@@ -1,0 +1,20 @@
+{
+  "name": "@symma/client",
+  "version": "0.1.0",
+  "description": "Drive an ACP prompt against a local agent or one hosted by a remote companion",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@symma/protocol": "0.1.0"
+  },
+  "devDependencies": {
+    "@symma/gateway": "0.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
