@@ -29,12 +29,15 @@ for pkg in protocol client; do
   # npm ships LICENSE, README and package.json whatever `files` says, so a
   # dist-less pack still produces a plausible-looking tarball. The entry point
   # is the only thing worth asserting.
-  if ! tar tzf "$work/$tgz" | grep -qx "package/dist/index.js"; then
+  # Read the listing once and match it as a string. `tar … | grep -q` looks
+  # equivalent but is not: grep exits at the first match, the producer takes
+  # SIGPIPE, and `pipefail` turns that into a failed pipeline — so the guard
+  # fires precisely when the file it wants IS present. It survived locally and
+  # failed every CI run, which is the timing difference that decides it.
+  listing=$(tar tzf "$work/$tgz")
+  if ! grep -qx "package/dist/index.js" <<<"$listing"; then
     echo "FAIL: $tgz has no dist/index.js"
-    echo "  dist on disk: $(ls "$root/packages/$pkg/dist" 2>&1 | head -3 | tr '\n' ' ')"
-    echo "  tarball holds:"; tar tzf "$work/$tgz" | sed 's/^/    /' | head -8
-    echo "  npm pack --dry-run says:"
-    (cd "$root/packages/$pkg" && npm pack --dry-run 2>&1 | tail -12 | sed 's/^/    /')
+    printf '%s\n' "$listing" | sed 's/^/    /'
     exit 1
   fi
   tarballs+=("./$tgz")
