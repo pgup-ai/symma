@@ -3,7 +3,7 @@
  * companion endpoints. Pure state machine — transports inject `send`
  * callbacks, storage stays in server.ts — so pairing, presence, capacity, and
  * resume decisions are unit-testable without sockets.
- * Spec: docs/superpowers/specs/2026-07-24-acp-gateway-m2-design.md.
+ * Spec: docs/design/m2-acp-gateway.md.
  */
 import {
   isSafeId,
