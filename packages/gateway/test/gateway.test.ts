@@ -154,6 +154,17 @@ describe('gateway', () => {
         runId: string;
       }[];
       assert.equal(runs[0].runId, 'run-1');
+
+      // `q=0` is a refusal, not a mention (RFC 9110 §12.5.3).
+      const journalUrl = `${base}/api/runs/run-1/sessions/review/journal?token=${token}`;
+      const encodingFor = async (accept: string): Promise<string | null> =>
+        (await fetch(journalUrl, { headers: { 'accept-encoding': accept } })).headers.get(
+          'content-encoding',
+        );
+      assert.equal(await encodingFor('gzip'), 'gzip');
+      assert.equal(await encodingFor('gzip;q=0.5'), 'gzip');
+      assert.equal(await encodingFor('gzip;q=0'), null);
+      assert.equal(await encodingFor('identity'), null);
     } finally {
       child?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });

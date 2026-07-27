@@ -138,7 +138,12 @@ describe('relay e2e', () => {
             nl = buffer.indexOf('\n');
           }
         }
-      })().catch(() => {});
+      })().catch((error: unknown) => {
+        // Nothing awaits this reader, and the assertions below wait on `lines`
+        // — so without this the real cause is lost and the failure arrives as
+        // a timeout naming a frame that never came.
+        console.error(`SSE reader failed: ${error instanceof Error ? error.message : error}`);
+      });
 
       const body = [
         JSON.stringify({

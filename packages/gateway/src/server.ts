@@ -52,6 +52,19 @@ const journalWrite = (write: () => void): void => {
   }
 };
 
+/** `gzip;q=0` is a refusal (RFC 9110 §12.5.3), so a bare substring test would
+ * hand a client the one encoding it just declined. The accepted set is
+ * unchanged — `gzip` and the legacy `x-gzip` — only the weight is now read. A
+ * malformed weight reads as a refusal: uncompressed is always safe to send. */
+function acceptsGzip(header: string): boolean {
+  const token = header
+    .split(',')
+    .map((part) => part.trim())
+    .find((part) => /^(x-)?gzip\s*(;|$)/i.test(part));
+  const q = token?.match(/;\s*q=([\d.]+)/i);
+  return Boolean(token) && (!q || Number(q[1]) > 0);
+}
+
 const subscribers = new Map<string, Set<ServerResponse>>();
 const journalKey = (runId: string, sessionId: string): string => `${runId}/${sessionId}`;
 
@@ -334,7 +347,7 @@ function handleJournal(
   // Compressed here rather than at the proxy: a journal is ~34x smaller gzipped,
   // and making that depend on external config would leave a standalone gateway
   // shipping megabytes. A proxy that sees content-encoding set passes it through.
-  const gzipped = /\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''));
+  const gzipped = acceptsGzip(String(req.headers['accept-encoding'] ?? ''));
   res.writeHead(200, {
     'content-type': 'application/x-ndjson',
     etag,
