@@ -1,0 +1,17 @@
+{
+  "name": "@symma/companion",
+  "version": "0.1.0",
+  "description": "Outbound-dialing companion: attach loop, agent detection, workspace checkout, local agent lifecycle",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@symma/protocol": "0.1.0"
+  },
+  "devDependencies": {
+    "@symma/gateway": "0.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

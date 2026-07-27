@@ -10,7 +10,10 @@
     "test": "node --import tsx --test packages/*/test/*.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "oxlint --deny-warnings"
+    "lint": "oxlint --deny-warnings",
+    "gateway": "tsx packages/gateway/src/server.ts",
+    "gateway:demo": "tsx packages/gateway/src/demo.ts",
+    "companion": "tsx packages/companion/src/index.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
