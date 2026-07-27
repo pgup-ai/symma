@@ -7,6 +7,7 @@ export {
   verifyEnvelope,
 } from './envelope-signature.ts';
 export { verifyJournalLines } from './envelope-signature.ts';
+export { parseEnvelope, type ObserverEnvelope } from './envelope.ts';
 export { parseRelayControl } from './relay-control.ts';
 export type {
   AckControl,
