@@ -64,18 +64,22 @@ describe('relay e2e', () => {
     let gateway: ChildProcess | undefined;
     let companion: ChildProcess | undefined;
     try {
-      gateway = spawn(process.execPath, ['--import', 'tsx', 'packages/gateway/src/server.ts'], {
-        env: {
-          ...process.env,
-          JBOT_GATEWAY_PORT: String(port),
-          JBOT_GATEWAY_DATA: dataDir,
-          JBOT_GATEWAY_TOKEN: 'client-tok',
-          JBOT_GATEWAY_HOST: '127.0.0.1',
-          JBOT_GATEWAY_ENDPOINTS: 'e2e:endpoint-tok',
-          JBOT_GATEWAY_RESUME_MS: '400',
+      gateway = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/gateway/src/server.ts'],
+        {
+          env: {
+            ...process.env,
+            JBOT_GATEWAY_PORT: String(port),
+            JBOT_GATEWAY_DATA: dataDir,
+            JBOT_GATEWAY_TOKEN: 'client-tok',
+            JBOT_GATEWAY_HOST: '127.0.0.1',
+            JBOT_GATEWAY_ENDPOINTS: 'e2e:endpoint-tok',
+            JBOT_GATEWAY_RESUME_MS: '400',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      );
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('gateway did not start')), 15_000);
         gateway?.stdout?.on('data', (chunk: Buffer) => {
@@ -91,17 +95,21 @@ describe('relay e2e', () => {
       assert.equal(bad.status, 401);
       await bad.body?.cancel();
 
-      companion = spawn(process.execPath, ['--import', 'tsx', 'packages/companion/src/index.ts'], {
-        env: {
-          ...process.env,
-          JBOT_COMPANION_GATEWAY: base,
-          JBOT_COMPANION_TOKEN: 'endpoint-tok',
-          JBOT_COMPANION_ENDPOINT: 'e2e',
-          JBOT_COMPANION_DEVICE: 'test-box',
-          JBOT_COMPANION_AGENTS: `echo=${process.execPath} ${agentPath}`,
+      companion = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        {
+          env: {
+            ...process.env,
+            JBOT_COMPANION_GATEWAY: base,
+            JBOT_COMPANION_TOKEN: 'endpoint-tok',
+            JBOT_COMPANION_ENDPOINT: 'e2e',
+            JBOT_COMPANION_DEVICE: 'test-box',
+            JBOT_COMPANION_AGENTS: `echo=${process.execPath} ${agentPath}`,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      );
 
       const auth = { authorization: 'Bearer client-tok' };
       const presence = await waitFor(async () => {

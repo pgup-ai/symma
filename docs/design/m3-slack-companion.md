@@ -638,9 +638,10 @@ instead — which works because **the tests travel with the code**: 12 files
    is an extraction, not a migration. **Done.**
 4. **Publish `@symma/* 0.1.0`**, exact-pinned. Narrowed on contact: only
    `protocol` and `client` are libraries and publish. `gateway` and `companion`
-   are applications — the gateway ships as an image, the companion as unscoped
-   `symma` — and `gateway`'s sole export today is a test seam, which is not an
-   API worth freezing at 0.1.0.
+   stay `private` and publish nothing at this step; they are applications, and
+   they ship by other routes later — the gateway as an image, the companion as
+   unscoped `symma`. `gateway`'s sole export today is a test seam, which is not
+   an API worth freezing at 0.1.0.
 5. **Only now touch jbot-review:** swap imports to the packages, keeping the
    local files in place. If the suite goes red, revert one import line.
 6. **Cross-repo compatibility green → delete the originals.** Deleting earlier
