@@ -55,8 +55,9 @@ describe('runLocalAcpPrompt', () => {
     };
   };
 
-  it('drives a prompt to its final message and tears the agent down', async () => {
+  it('drives a prompt to its final message, forwards the tee, and tears down', async () => {
     const { spec, cleanedUp } = specFor(script('ok.mjs', AGENT));
+    const teed: string[] = [];
     const text = await runLocalAcpPrompt(
       spec,
       dir,
@@ -64,8 +65,12 @@ describe('runLocalAcpPrompt', () => {
       'review this',
       'review',
       noLog,
+      { tee: (direction) => teed.push(direction) },
     );
     assert.equal(text, 'local ok');
+    // Only that it is forwarded — which frames reach it is driveAcpSession's
+    // contract, pinned in the protocol suite.
+    assert.ok(teed.length > 0, 'tee reached the session');
     assert.ok(cleanedUp(), 'temp home reclaimed');
   });
 
@@ -87,16 +92,6 @@ describe('runLocalAcpPrompt', () => {
       runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, { timeoutMs: 250 }),
       /prompt timed out/,
     );
-  });
-
-  it('forwards a tee to the session', async () => {
-    const { spec } = specFor(script('teed.mjs', AGENT));
-    const seen: string[] = [];
-    const text = await runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, {
-      tee: (dir_) => seen.push(dir_),
-    });
-    assert.equal(text, 'local ok');
-    assert.ok(seen.includes('out') && seen.includes('in'), 'both directions teed');
   });
 
   after(() => rmSync(dir, { recursive: true, force: true }));

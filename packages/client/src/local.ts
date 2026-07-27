@@ -39,8 +39,7 @@ function exitWithin(child: ChildProcess, ms: number): Promise<number | string | 
 export interface LocalAcpPromptOptions {
   /** Wall-clock budget for the whole prompt. */
   timeoutMs?: number;
-  /** Observe every frame in both directions — the same tee `driveAcpSession`
-   * takes. A caller whose frames are already journaled elsewhere passes none. */
+  /** Observe every frame in both directions — the same tee `driveAcpSession` takes. */
   tee?: AcpSessionOptions['tee'];
 }
 

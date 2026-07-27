@@ -6,6 +6,10 @@ only the transport differs.
 
 Part of [symma](https://github.com/pgup-ai/symma). Node 20+, ESM only.
 
+**0.2.0 breaks `runLocalAcpPrompt`.** Its trailing `timeoutMs` became an options
+bag, `{ timeoutMs, tee }`. TypeScript callers get a compile error; a JavaScript
+caller still passing a bare number gets the default timeout and no warning.
+
 ```bash
 npm i @symma/client @symma/protocol
 ```
