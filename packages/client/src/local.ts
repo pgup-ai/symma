@@ -121,15 +121,7 @@ export async function runLocalAcpPrompt(
     }
     // Wait (bounded) for the exit before removing the temp home: a dying
     // agent still writing there (kilo's SQLite) races rmSync into ENOTEMPTY.
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null || child.signalCode !== null) return resolve();
-      const grace = setTimeout(resolve, ACP_KILL_GRACE_MS + 500);
-      grace.unref();
-      child.once('close', () => {
-        clearTimeout(grace);
-        resolve();
-      });
-    });
+    await exitWithin(child, ACP_KILL_GRACE_MS + 500);
     try {
       cleanup?.();
     } catch {

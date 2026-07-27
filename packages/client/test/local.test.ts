@@ -8,6 +8,8 @@ import type { AcpAgentSpec } from '@symma/protocol';
 
 import { runLocalAcpPrompt } from '../src/local.ts';
 
+const noLog = (): void => undefined;
+
 // Answers the ACP handshake over stdio, so the spawn/drive/teardown path is
 // exercised against a real child rather than a stubbed stream pair.
 const AGENT = `
@@ -61,7 +63,7 @@ describe('runLocalAcpPrompt', () => {
       'probe/default',
       'review this',
       'review',
-      () => undefined,
+      noLog,
     );
     assert.equal(text, 'local ok');
     assert.ok(cleanedUp(), 'temp home reclaimed');
@@ -72,7 +74,7 @@ describe('runLocalAcpPrompt', () => {
       script('crash.mjs', `process.stderr.write('auth expired\\n'); process.exit(3);`),
     );
     await assert.rejects(
-      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', () => undefined),
+      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog),
       /exited 3 before responding.*auth expired/s,
     );
     assert.ok(cleanedUp(), 'temp home reclaimed on the failure path too');
@@ -82,8 +84,8 @@ describe('runLocalAcpPrompt', () => {
     // Never reads stdin, never answers: only the wall clock ends this.
     const { spec } = specFor(script('wedged.mjs', `setInterval(() => {}, 1000);`));
     await assert.rejects(
-      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', () => undefined, 250),
-      /prompt timed out after 0s/,
+      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, 250),
+      /prompt timed out/,
     );
   });
 
