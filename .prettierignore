@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Untracked local agent settings (git-ignored globally); not the repo's to format.
+.claude/
