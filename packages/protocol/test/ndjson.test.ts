@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { readNdjsonBody } from '../src/ndjson.ts';
+import { readNdjsonBody } from '../src/ndjson.js';
 
 function fakeReq(chunks: string[]): Parameters<typeof readNdjsonBody>[0] {
   return {

@@ -1,4 +1,4 @@
-import { isSafeId } from './ids.ts';
+import { isSafeId } from './ids.js';
 
 export type SendLine = (line: string) => void;
 

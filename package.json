@@ -7,13 +7,14 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test packages/*/test/*.test.ts",
+    "test": "node --conditions=development --import tsx --test packages/*/test/*.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "oxlint --deny-warnings",
     "gateway": "tsx packages/gateway/src/server.ts",
     "gateway:demo": "tsx packages/gateway/src/demo.ts",
-    "companion": "tsx packages/companion/src/index.ts"
+    "companion": "tsx packages/companion/src/index.ts",
+    "build": "npm run build --workspaces --if-present"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

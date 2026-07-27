@@ -9,16 +9,16 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 
-import { codexAuthPath, codexEnvForHome } from './codex.ts';
-import { CURSOR_CLI_BIN, cursorEnvForKey } from './cursor.ts';
+import { codexAuthPath, codexEnvForHome } from './codex.js';
+import { CURSOR_CLI_BIN, cursorEnvForKey } from './cursor.js';
 import {
   buildDevinReadOnlyConfig,
   DEVIN_CLI_BIN,
   devinCredentialsPath,
   tomlString,
-} from './devin.ts';
-import { KILO_CLI_BIN, KILO_GATEWAY_FREE_MODEL, KILO_PROVIDER_ID, kiloEnvForAuth } from './kilo.ts';
-import { parseModelName } from './model.ts';
+} from './devin.js';
+import { KILO_CLI_BIN, KILO_GATEWAY_FREE_MODEL, KILO_PROVIDER_ID, kiloEnvForAuth } from './kilo.js';
+import { parseModelName } from './model.js';
 
 const ACP_PROTOCOL_VERSION = 1;
 // One JSON-RPC frame far above any real message; growth past it means a

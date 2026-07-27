@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 
 import { readJournalLines } from '@symma/gateway';
 
-import { checkEndpointReady, runRemotePrompt } from '../src/remote.ts';
+import { checkEndpointReady, runRemotePrompt } from '../src/remote.js';
 
 const noLog = (): void => undefined;
 

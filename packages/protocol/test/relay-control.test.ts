@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { parseRelayControl, type HelloControl, type OpenControl } from '../src/relay-control.ts';
+import { parseRelayControl, type HelloControl, type OpenControl } from '../src/relay-control.js';
 
 const hello = (overrides: Partial<HelloControl> = {}): HelloControl => ({
   kind: 'hello',

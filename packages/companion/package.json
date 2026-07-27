@@ -5,6 +5,9 @@
   "license": "MIT",
   "private": true,
   "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
   "dependencies": {
     "@symma/protocol": "0.1.0"
   },

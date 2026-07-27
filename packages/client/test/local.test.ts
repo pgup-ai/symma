@@ -6,7 +6,7 @@ import { after, describe, it } from 'node:test';
 
 import type { AcpAgentSpec } from '@symma/protocol';
 
-import { runLocalAcpPrompt } from '../src/local.ts';
+import { runLocalAcpPrompt } from '../src/local.js';
 
 const noLog = (): void => undefined;
 

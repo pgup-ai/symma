@@ -22,9 +22,9 @@ import {
   kiloAcpSpec,
   matchModelOptionValue,
   respondToPermissionRequest,
-} from '../src/acp-protocol.ts';
-import { codexAuthPath } from '../src/codex.ts';
-import { devinCredentialsPath } from '../src/devin.ts';
+} from '../src/acp-protocol.js';
+import { codexAuthPath } from '../src/codex.js';
+import { devinCredentialsPath } from '../src/devin.js';
 
 const noLog = (): void => undefined;
 

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { parseEnvelope, type ObserverEnvelope } from '../src/envelope.ts';
-import { isSafeId } from '../src/ids.ts';
+import { parseEnvelope, type ObserverEnvelope } from '../src/envelope.js';
+import { isSafeId } from '../src/ids.js';
 
 const envelope = (overrides: Partial<ObserverEnvelope> = {}): ObserverEnvelope => ({
   v: 1,

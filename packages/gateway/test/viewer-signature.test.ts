@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { VIEWER_HTML } from '../src/viewer.ts';
+import { VIEWER_HTML } from '../src/viewer.js';
 import { generateSigningKeys, signEnvelope } from '@symma/protocol';
 
 describe('viewer signature check', () => {

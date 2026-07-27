@@ -6,7 +6,7 @@ import {
   signEnvelope,
   verifyEnvelope,
   verifyJournalLines,
-} from '../src/envelope-signature.ts';
+} from '../src/envelope-signature.js';
 
 const envelope = {
   v: 1,

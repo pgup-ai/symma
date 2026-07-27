@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { VIEWER_HTML } from '../src/viewer.ts';
+import { VIEWER_HTML } from '../src/viewer.js';
 
 const VIEWER_SRC = join(dirname(fileURLToPath(import.meta.url)), '../src/viewer.ts');
 

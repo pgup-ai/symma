@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import type { HelloControl, OpenControl } from '@symma/protocol';
 
-import { createRelay, parseEndpointTokens } from '../src/relay.ts';
+import { createRelay, parseEndpointTokens } from '../src/relay.js';
 
 const hello = (overrides: Partial<HelloControl> = {}): HelloControl => ({
   kind: 'hello',

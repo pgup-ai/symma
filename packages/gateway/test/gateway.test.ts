@@ -14,7 +14,7 @@ import {
   parseRunControl,
   readJournalLines,
   writeRunStatus,
-} from '../src/journal.ts';
+} from '../src/journal.js';
 
 const envelope = (overrides: Partial<ObserverEnvelope> = {}): ObserverEnvelope => ({
   v: 1,

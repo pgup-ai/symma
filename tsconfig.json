@@ -3,12 +3,12 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "types": ["node"]
+    "types": ["node"],
+    "customConditions": ["development"]
   },
   "include": ["packages/*/src"]
 }

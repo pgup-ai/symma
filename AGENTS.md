@@ -12,13 +12,16 @@ Section references below (§N) are to that document.
 ## Commands
 
 - `npm test` — all tests (node:test via tsx); single file:
-  `node --import tsx --test packages/protocol/test/<file>.test.ts`
+  `node --conditions=development --import tsx --test packages/<pkg>/test/<file>.test.ts`
+  (the condition is what resolves `@symma/*` to source)
 - `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`
   — tsc, oxlint (deny-warnings), prettier (owns formatting)
-- **No build step.** `tsconfig.json` is `noEmit` + `allowImportingTsExtensions`,
-  so sources import each other as `./foo.ts` and everything runs under tsx. A
-  build arrives with the publish milestone (§8, step 4); until then every
-  package is `private` and consumable only inside the workspace.
+- `npm run build` — `tsc` emits JS + `.d.ts` into each package's `dist/`.
+  Sources import each other as `./foo.js` (NodeNext convention: write `.js`,
+  TypeScript and tsx both resolve `.ts`). `@symma/protocol` and `@symma/client`
+  publish; `gateway` and `companion` stay `private` — they are applications, not
+  libraries. Workspace resolution uses the `development` export condition, so
+  tests run against `src` and consumers get `dist`.
 
 ## Packages
 
@@ -83,8 +86,8 @@ extraction fixes, prevented from recurring.
 
 ## Conventions
 
-- TypeScript ESM with `.ts` import specifiers (run via tsx); no new
-  dependencies without clear need.
+- TypeScript ESM. Import specifiers end in `.js` and resolve to `.ts` — writing
+  `.ts` breaks the emit. No new dependencies without clear need.
 - Tests: node:test + `node:assert/strict`; pin invariants, not incidental prose.
 - Prettier owns formatting. Never hand-format, and never reformat a file you did
   not otherwise change — copied files must stay byte-identical to their origin

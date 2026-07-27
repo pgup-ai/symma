@@ -3,10 +3,23 @@
   "version": "0.1.0",
   "description": "Drive an ACP prompt against a local agent or one hosted by a remote companion",
   "license": "MIT",
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@symma/protocol": "0.1.0"
