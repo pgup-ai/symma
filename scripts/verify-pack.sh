@@ -12,6 +12,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# Build explicitly rather than leaning on `prepack`. The hook fires for a real
+# `npm publish`, but relying on it here made this script's result depend on
+# whether a lifecycle script ran — and in CI it did not, so the tarball had no
+# dist and the guard below was the only thing that noticed.
+echo "==> building"
+(cd "$root" && npm run build --silent)
+
 echo "==> packing"
 tarballs=()
 for pkg in protocol client; do

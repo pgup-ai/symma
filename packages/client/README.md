@@ -13,6 +13,8 @@ npm i @symma/client @symma/protocol
 The agent spec comes from `@symma/protocol`, which is why both are installed.
 
 ```ts
+import { readFile } from 'node:fs/promises';
+
 import { kiloAcpSpec } from '@symma/protocol';
 import { checkEndpointReady, runLocalAcpPrompt, runRemotePrompt } from '@symma/client';
 
