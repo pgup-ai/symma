@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --conditions=development --import tsx --test packages/*/test/*.test.ts",
+    "test": "node --conditions=symma-source --import tsx --test packages/*/test/*.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "oxlint --deny-warnings",

@@ -8,7 +8,7 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "types": ["node"],
-    "customConditions": ["development"]
+    "customConditions": ["symma-source"]
   },
   "include": ["packages/*/src"]
 }

@@ -12,7 +12,7 @@ Section references below (§N) are to that document.
 ## Commands
 
 - `npm test` — all tests (node:test via tsx); single file:
-  `node --conditions=development --import tsx --test packages/<pkg>/test/<file>.test.ts`
+  `node --conditions=symma-source --import tsx --test packages/<pkg>/test/<file>.test.ts`
   (the condition is what resolves `@symma/*` to source)
 - `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`
   — tsc, oxlint (deny-warnings), prettier (owns formatting)
@@ -20,7 +20,7 @@ Section references below (§N) are to that document.
   Sources import each other as `./foo.js` (NodeNext convention: write `.js`,
   TypeScript and tsx both resolve `.ts`). `@symma/protocol` and `@symma/client`
   publish; `gateway` and `companion` stay `private` — they are applications, not
-  libraries. Workspace resolution uses the `development` export condition, so
+  libraries. Workspace resolution uses the `symma-source` export condition, so
   tests run against `src` and consumers get `dist`.
 
 ## Packages
