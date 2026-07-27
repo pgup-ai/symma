@@ -64,7 +64,7 @@ export async function checkEndpointReady(
   }
   if (!response.ok) {
     throw new Error(
-      `ACP gateway rejected the endpoint listing (${response.status}); check JBOT_ACP_GATEWAY_TOKEN.`,
+      `ACP gateway rejected the endpoint listing (${response.status}); check the gateway token.`,
     );
   }
   const endpoints = (await response.json()) as EndpointPresence[];
