@@ -2,6 +2,15 @@
   "name": "@symma/client",
   "version": "0.1.1",
   "description": "Drive an ACP prompt against a local agent or one hosted by a remote companion",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pgup-ai/symma.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/pgup-ai/symma/tree/main/packages/client",
+  "bugs": {
+    "url": "https://github.com/pgup-ai/symma/issues"
+  },
   "license": "MIT",
   "publishConfig": {
     "access": "public"
