@@ -585,7 +585,7 @@ instead — which works because **the tests travel with the code**: 12 files
 3. **Do the `acp.ts` / `acp-remote.ts` split there, not here.** symma takes only
    the generic halves — local spawn/lifecycle, transport, readiness. The
    `ReviewBackend` wrappers and routing policy never leave jbot-review, so this
-   is an extraction, not a migration. **Done** except `observer.ts`.
+   is an extraction, not a migration. **Done.**
 4. **Publish `@symma/* 0.1.0`**, exact-pinned.
 5. **Only now touch jbot-review:** swap imports to the packages, keeping the
    local files in place. If the suite goes red, revert one import line.
@@ -598,7 +598,7 @@ lands in symma first and is re-copied — never the reverse, or the extraction
 starts inheriting drift.
 
 Step 3 was expected to be the whole risk. It was not — see the status note
-below. `observer.ts` is the piece that still needs design rather than a copy.
+below.
 
 **Status — 2026-07-27. Step 2 is complete.** `@symma/protocol` (#1), then
 `@symma/gateway` and `@symma/companion` (#2), 43 tests green. `viewer.ts` copied
@@ -626,14 +626,25 @@ fifteen names they contribute (`truncateForLog`, already in protocol),
 stay, and `acp-remote` needs `acp.ts` only for the factory that stays. The seam
 was drawn correctly when the code was written; cutting it was mechanical.
 
-**`observer.ts` is now the remaining piece of step 3.** The tee is an env-gated
-client that POSTs to `/api/ingest`, so it belongs to `@symma/client` — but it
-reads `JBOT_OBSERVER_URL` at module scope, which is why its test drives it
-through a child process. Extracting it means parameterising import-time config,
-and that is real design rather than a copy. It was kept out of #3 so the one
-risky piece would not ride inside the one mechanical one.
+**`observer.ts` probably does not belong here at all.** The table above lists it
+as "move as-is", but that table classifies files by what they _import_, and
+observer.ts imports nothing — which is exactly why it looks portable. Its
+callers tell the opposite story, and they are all review-side: `runner.ts` takes
+`setRunName`/`reportRun`/`closeObserver`, and `reportRun` is the jbot verdict
+rather than a protocol event; `local/index.ts` takes `observerEnabled` and
+`setRunName`. The one caller that could have moved — `makeSessionTee` inside
+`driveAcpSession` — was deleted in #1 when the tee became injectable, so
+protocol's `tee` parameter has no caller in symma today.
 
-Next is step 4 — publish `@symma/* 0.1.0` — with `observer.ts` alongside it.
+Nor does the product need it: the gateway _receives_ `/api/ingest`, and the
+companion sends over its relay leg, which the gateway journals directly.
+Nothing in the Slack↔companion path tees to that endpoint; its senders are
+jbot-review's tee and the demo feeder. Step 5 settles it, when the import swap
+shows what the reviewer actually wants from symma — plausibly nothing here.
+
+Step 3 is therefore complete. Next is step 4 — publish `@symma/* 0.1.0` — which
+is also when the `private: true` on every package comes due: registry, git
+dependency, or one workspace.
 
 ### Repo, domains, and the name
 

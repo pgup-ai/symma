@@ -115,8 +115,8 @@ without losing behavior, it should not have been written.
    gateway, companion
 3. Split `acp.ts` / `acp-remote.ts` **here, not there** — symma takes only the
    generic halves; `ReviewBackend` wrappers and routing policy never leave
-   jbot-review. **done** except `observer.ts`, which needs its import-time
-   config parameterised before it can move.
+   jbot-review. **done** — `observer.ts` stays behind: every caller of it is
+   review-side, so it is not symma's to hold.
 4. Publish `@symma/* 0.1.0`, exact-pinned.
 5. Only now touch jbot-review: swap imports, keeping the local files in place.
    If the suite goes red, revert one import line.
