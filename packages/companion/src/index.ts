@@ -6,8 +6,10 @@
  * never authorize writes on this machine.
  * Spec: docs/design/m2-acp-gateway.md (M2a).
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
+  accessSync,
+  constants,
   existsSync,
   linkSync,
   mkdirSync,
@@ -134,6 +136,42 @@ const signingKeys = loadSigningKeys();
 
 /** Built-ins use the machine's ambient auth; `name=cmd arg…` entries add any
  * ACP binary (also the test seam). Returns an error string when auth is absent. */
+/**
+ * Absolute path for a command, or undefined. Agent specs name bare binaries
+ * (`kilo`, `codex-acp`), which resolve fine from a terminal and not at all from
+ * a login service: launchd hands an agent a minimal PATH, so anything under
+ * nvm, `/opt/homebrew/bin` or `~/.local/bin` is simply absent. The login-shell
+ * fallback is how those get found — it is where the user's PATH is actually
+ * written — and it costs a subprocess, so it only runs when the cheap lookup
+ * has already failed.
+ */
+function resolveBin(bin: string): string | undefined {
+  const runnable = (path: string): boolean => {
+    try {
+      accessSync(path, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (bin.includes('/')) return runnable(bin) ? bin : undefined;
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (dir && runnable(join(dir, bin))) return join(dir, bin);
+  }
+  const shell = process.env.SHELL;
+  if (!shell) return undefined;
+  // Interactive as well as login: nvm and friends are sourced from .zshrc, not
+  // .zprofile. The name travels as an argument, never interpolated into the
+  // script, so a custom agent entry cannot smuggle shell syntax in here.
+  const found = spawnSync(shell, ['-lic', 'command -v -- "$1"', shell, bin], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const path = found.stdout?.trim().split('\n').pop()?.trim();
+  return path && path.startsWith('/') && runnable(path) ? path : undefined;
+}
+
 function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | string {
   const eq = entry.indexOf('=');
   if (eq !== -1) {
@@ -177,8 +215,19 @@ function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | str
 const agents = new Map<string, AcpAgentSpec>();
 for (const entry of agentNames) {
   const resolved = resolveAgent(entry);
-  if (typeof resolved === 'string') log(`skipping agent — ${resolved}`);
-  else agents.set(resolved.name, resolved.spec);
+  if (typeof resolved === 'string') {
+    log(`skipping agent — ${resolved}`);
+    continue;
+  }
+  // Credentials were checked above; the binary was not. Detecting on auth alone
+  // reports an agent as ready and then fails at spawn time, which is the worst
+  // shape available — it passes onboarding and breaks on first use.
+  const bin = resolveBin(resolved.spec.bin);
+  if (!bin) {
+    log(`skipping agent — ${resolved.name}: ${resolved.spec.bin} not found on PATH`);
+    continue;
+  }
+  agents.set(resolved.name, { ...resolved.spec, bin });
 }
 if (agents.size === 0) {
   console.error('No usable agents; check SYMMA_COMPANION_AGENTS and local auth.');

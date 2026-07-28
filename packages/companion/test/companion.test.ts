@@ -330,4 +330,76 @@ describe('relay e2e', () => {
       rmSync(companionHome, { recursive: true, force: true });
     }
   });
+
+  it('skips an agent whose binary is missing, and finds one PATH hides', async () => {
+    // Detection checked credentials and never the binary, so an agent could
+    // report ready and then ENOENT at spawn — past onboarding, on first use.
+    // The second half is why a plain PATH walk is not enough: a login service
+    // gets a minimal PATH, and the binary lives where the login shell says.
+    const bin = mkdtempSync(join(tmpdir(), 'symma-bin-'));
+    const shim = join(bin, 'ghost-agent');
+    writeFileSync(shim, '#!/bin/sh\nexec sleep 30\n', { mode: 0o755 });
+    const fakeShell = join(bin, 'fake-login-shell');
+    // Stands in for the user's shell: answers `command -v` from a PATH the
+    // companion's own environment does not have.
+    // Invoked as `<shell> -lic <script> <argv0> <name>`, so the name is $4 here;
+    // inside a real shell's -c script that same name arrives as "$1".
+    writeFileSync(fakeShell, `#!/bin/sh\n[ "$4" = ghost-agent ] && echo ${shim}\n`, {
+      mode: 0o755,
+    });
+
+    // Resolution is logged before the first dial, so read until the outcome is
+    // decided rather than waiting out a companion that reconnects forever.
+    const run = async (agents: string, env: Record<string, string> = {}): Promise<string> => {
+      const child = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        {
+          env: {
+            ...process.env,
+            HOME: bin,
+            PATH: '/usr/bin:/bin',
+            SYMMA_COMPANION_GATEWAY: 'http://127.0.0.1:1',
+            SYMMA_COMPANION_TOKEN: 'tok',
+            SYMMA_COMPANION_ENDPOINT: 'probe',
+            SYMMA_COMPANION_AGENTS: agents,
+            ...env,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let out = '';
+      try {
+        await new Promise<void>((resolve) => {
+          // Only terminal signals settle this: with no usable agent the
+          // companion exits on its own, and `connect failed` means one resolved
+          // and it went looking for the gateway. Matching the skip line instead
+          // would race the very next line it prints.
+          const settle = (chunk: unknown): void => {
+            out += String(chunk);
+            if (out.includes('connect failed')) resolve();
+          };
+          child.stdout?.on('data', settle);
+          child.stderr?.on('data', settle);
+          child.on('close', () => resolve());
+        });
+      } finally {
+        child.kill('SIGKILL');
+      }
+      return out;
+    };
+
+    // No such binary anywhere: skipped with a reason, and with nothing left the
+    // companion refuses to attach rather than offering an agent it cannot run.
+    const missing = await run(`ghost=ghost-agent`, { SHELL: '' });
+    assert.match(missing, /ghost-agent not found on PATH/);
+    assert.match(missing, /No usable agents/);
+
+    // Same PATH, but now the login shell knows where it lives.
+    const found = await run(`ghost=ghost-agent`, { SHELL: fakeShell });
+    assert.doesNotMatch(found, /not found on PATH/);
+    assert.doesNotMatch(found, /No usable agents/);
+
+    rmSync(bin, { recursive: true, force: true });
+  });
 });
