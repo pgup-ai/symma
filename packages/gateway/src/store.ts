@@ -31,10 +31,9 @@ export interface Store {
   /** Spends a code. Two redeems of one code cannot both come back `ok`. */
   redeemPairingCode(code: string): Promise<PairingResult>;
   /** The other half of pairing: an endpoint for this member and the token it
-   * will present, both returned once. The id is assigned here rather than taken
-   * from the request — the pair route is unauthenticated, so an id in its body
-   * would be a valid code away from claiming an endpoint the caller does not
-   * own (§2). Throws if they are not a member here any more. */
+   * presents, both returned once. The id is assigned, not taken from an
+   * unauthenticated request body, where it would be a valid code away from
+   * someone else's endpoint (§2). Throws if the member is gone. */
   claimEndpoint(owner: Owner, device: string): Promise<{ endpoint: string; token: string }>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;

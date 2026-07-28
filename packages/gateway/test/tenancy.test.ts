@@ -896,7 +896,7 @@ describe('tenancy', () => {
       const paired = (await res.json()) as { endpoint: string; token: string };
       // Assigned, not asked for: the request named no id, so there was none to
       // point at somebody else's endpoint.
-      assert.match(paired.endpoint, /^[0-9a-f-]{36}$/);
+      assert.match(paired.endpoint, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
 
       const named = await pool.query(`SELECT device_name FROM endpoints WHERE id = $1`, [
         paired.endpoint,
@@ -947,9 +947,7 @@ describe('tenancy', () => {
   });
 
   it('throttles pairing by where it came from', async () => {
-    // No token to scope it by — the code is the credential — so the limit is on
-    // the caller's address. Bounds the work, rather than the guessing: 80 bits
-    // answers that.
+    // No token to scope it by, so the limit is on the caller's address.
     for (let i = 0; i < 20; i++) {
       const res = await pair({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ', agents: ['kilo'] });
       if (res.status === 429) {

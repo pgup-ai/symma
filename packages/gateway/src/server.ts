@@ -565,17 +565,13 @@ function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<bo
 }
 
 /**
- * A pair request carries a member's code and no token, so what it is limited by
- * is where it came from. Behind the TLS proxy §6 puts in front every peer is the
- * proxy, so only a configured one is allowed to name the caller — and only by
- * the last hop it appended, since anything earlier in X-Forwarded-For was
- * written by whoever it was talking to and is theirs to forge. Trusting the
- * header from any peer would be worse than not throttling: it would look like a
- * limit while a fresh value per request walked around it.
+ * Only a configured proxy may name the caller, and only by the last hop it
+ * appended: anything earlier in X-Forwarded-For is the caller's to forge, so
+ * honouring it from any peer would look like a limit while a fresh value per
+ * request walked around it. Matched verbatim, so mind that an IPv4 peer on a
+ * dual-stack socket is `::ffff:127.0.0.1` — a value that never matches costs
+ * reach, not safety.
  */
-// Compared verbatim, so it has to be the address Node reports — an IPv4 peer on
-// a dual-stack socket is `::ffff:127.0.0.1`, not `127.0.0.1`. A value that never
-// matches costs reach, not safety: every caller shares the proxy's bucket.
 const trustedProxy = process.env.SYMMA_GATEWAY_TRUSTED_PROXY?.trim() || '';
 function callerIp(req: IncomingMessage): string {
   const peer = req.socket.remoteAddress ?? '';
@@ -607,9 +603,8 @@ setInterval(() => {
   for (const [ip, seen] of pairTries) if (seen.resetAt <= now) pairTries.delete(ip);
 }, PAIR_WINDOW_MS).unref();
 
-/** Small whole-body JSON, for the one route that takes an object rather than a
- * stream. Undefined covers both an oversized body and unparseable one — the
- * caller answers the same way for either. */
+/** Whole-body JSON, for the one route that takes an object and not a stream.
+ * Undefined for oversized and unparseable alike; one answer covers both. */
 const MAX_PAIR_BYTES = 4096;
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   let body = '';
@@ -669,12 +664,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // no token until this call gives them one.
   if (req.method === 'POST' && url.pathname === '/api/pair') {
     // Nobody to pair without a store: M2's single-tenant gateway has one member
-    // and they configured its token themselves.
-    if (!databaseUrl) {
-      res.writeHead(404, { 'content-type': 'text/plain' });
-      res.end('not found');
-      return;
-    }
+    // and they configured its token themselves. JSON like the rest of this
+    // route, since what reads it is a program.
+    if (!databaseUrl) return sendJson(res, 404, { error: 'unsupported' });
     if (pairThrottled(callerIp(req))) return sendJson(res, 429, { error: 'throttled' });
     const body = await readJsonBody(req);
     if (typeof body !== 'object' || body === null) return sendJson(res, 400, { error: 'request' });
@@ -684,10 +676,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       agents?: unknown;
     };
     if (typeof code !== 'string') return sendJson(res, 400, { error: 'request' });
-    // §2: never attach an endpoint with no agents. The member is told which to
-    // log into instead, and a companion that can run nothing is not a device.
-    // `length` first: every() on an empty array is true, which is the whole
-    // case this rule exists for.
+    // §2: never attach an endpoint with no agents. `length` first — every() on
+    // an empty array is true, which is the whole case the rule exists for.
     if (!Array.isArray(agents) || agents.length === 0)
       return sendJson(res, 400, { error: 'agents' });
     if (!agents.every((a) => typeof a === 'string' && a))
