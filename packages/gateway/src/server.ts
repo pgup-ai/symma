@@ -55,6 +55,8 @@ let store: Store;
 // §1: "frames expire on a default window (start at 30 days)". 0 disables.
 const retentionDays = Number(process.env.SYMMA_GATEWAY_RETENTION_DAYS ?? 30);
 const RETENTION_SWEEP_MS = 60 * 60 * 1000;
+// Tighter than retention: this is how long a revoked companion keeps working.
+const REVOCATION_SWEEP_MS = 30 * 1000;
 
 const log = (msg: string): void => {
   console.log(`[symma-gateway] ${msg}`);
@@ -791,6 +793,31 @@ function forgetSessions(doomed: SessionRef[]): void {
 store = databaseUrl
   ? await openStore(databaseUrl, fileURLToPath(new URL('./schema.sql', import.meta.url)))
   : localStore(token, endpointTokens, () => listJournals(dataDir));
+
+/**
+ * Every other authorization check runs per request, but a companion's SSE leg is
+ * admitted once and then lives for hours — so revoking its token, deactivating
+ * its owner or uninstalling the workspace left it delivering opens. Invariant 3
+ * says compromise means shutdown, which a revocation that only reaches the next
+ * request does not deliver.
+ */
+function dropRevokedEndpoints(): void {
+  void (async () => {
+    const attached = relay.attachedEndpoints();
+    if (attached.length === 0) return;
+    const live = await store.stillAuthorized(attached);
+    for (const endpoint of attached) {
+      if (live.has(endpoint)) continue;
+      log(`endpoint ${endpoint} is no longer authorized; dropping`);
+      relay.detachEndpoint(endpoint);
+      endpointStreams.get(endpoint)?.end();
+      endpointStreams.delete(endpoint);
+    }
+  })().catch((error: unknown) =>
+    log(`revocation sweep failed: ${error instanceof Error ? error.message : String(error)}`),
+  );
+}
+setInterval(dropRevokedEndpoints, REVOCATION_SWEEP_MS).unref();
 
 if (retentionDays > 0) {
   // A sweep that fails is a promise unkept, not a reason to stop serving — same

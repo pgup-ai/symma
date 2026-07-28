@@ -142,6 +142,10 @@ export function createRelay(options: RelayOptions = {}) {
       if (session) disarm(session, 'clientResume');
     },
 
+    attachedEndpoints(): string[] {
+      return [...endpoints.keys()];
+    },
+
     /** Who an attached endpoint belongs to; undefined if it is not attached. */
     endpointOwner(endpoint: string): string | undefined {
       return endpoints.get(endpoint)?.owner;

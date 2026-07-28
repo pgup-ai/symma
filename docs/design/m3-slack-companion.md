@@ -204,6 +204,17 @@ directory anyone could enumerate by probing.
 **Owner is assigned at pairing, never declared by the companion.** A
 companion-declared owner is attacker-controlled input — the same mistake as
 trusting `dir` or `endpoint` on an envelope, which M2d already had to unlearn.
+The owner **id** is assigned too, not spelled from the team and user: composing
+`u-${team}-${user}` makes the separator a boundary the caller picks, and two
+tenants whose values differ only in where the hyphen falls end up as one.
+
+**Authorization is re-checked, not just admitted.** Every route resolves its
+caller per request, but a companion's SSE leg is admitted once and lives for
+hours — so a revoked token, a deactivated member or an uninstalled workspace
+reached it only on the next request it happened to make, which for a listener is
+never. A sweep drops attachments the store no longer authorizes, because
+invariant 3 says compromise means shutdown and a revocation that waits is not
+one.
 
 ### Store
 

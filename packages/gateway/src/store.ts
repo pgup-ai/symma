@@ -20,6 +20,10 @@ export interface LiveSession extends SessionRef {
 
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
+  /** Still-authorized endpoints from the given set. Every other check here runs
+   * per request, but an attached SSE leg outlives the one that admitted it —
+   * this is what lets a revocation reach a connection already open. */
+  stillAuthorized(endpoints: string[]): Promise<Set<string>>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   /** The authorization question itself, not the owner to compare outside: with
@@ -77,6 +81,20 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [hashToken(token)],
       );
       return row?.subject_id;
+    },
+    async stillAuthorized(endpoints) {
+      const { rows } = await pool.query(
+        // Existence covers uninstall and deactivation, which both take the
+        // endpoint row with them; the token check is what a plain revoke uses.
+        `SELECT e.id FROM endpoints e
+          WHERE e.id = ANY($1)
+            AND EXISTS (SELECT 1 FROM tokens t
+                         WHERE t.subject_kind = 'endpoint' AND t.subject_id = e.id
+                           AND t.revoked_at IS NULL
+                           AND (t.expires_at IS NULL OR t.expires_at > now()))`,
+        [endpoints],
+      );
+      return new Set(rows.map((r: { id: string }) => r.id));
     },
     async endpointForToken(token) {
       const row = await one<{ subject_id: string; user_id: string }>(
@@ -179,6 +197,15 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        // Lock first: an insert into sessions takes a key-share lock on its
+        // endpoint, so holding these blocks an open in flight from landing a
+        // row after the delete below has taken its snapshot.
+        await client.query(
+          `SELECT e.id FROM endpoints e JOIN users u ON u.id = e.user_id
+            WHERE u.workspace_id = (SELECT id FROM workspaces WHERE slack_team_id = $1)
+            FOR UPDATE`,
+          [slackTeamId],
+        );
         // Deleted here rather than left to the cascade, so the rows reported
         // and the rows removed are one statement: a session committed between
         // a separate SELECT and the cascade would vanish unreported, stranding
@@ -227,6 +254,15 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        // Same lock, same reason as deleteWorkspace.
+        await client.query(
+          `SELECT e.id FROM endpoints e
+             JOIN users u ON u.id = e.user_id
+             JOIN workspaces w ON w.id = u.workspace_id
+            WHERE w.slack_team_id = $1 AND u.slack_user_id = $2
+            FOR UPDATE`,
+          [slackTeamId, slackUserId],
+        );
         const doomed = refs(
           await client.query(
             `DELETE FROM sessions s USING endpoints e, users u, workspaces w
@@ -275,18 +311,24 @@ export async function provision(
   const pool = new Pool({ connectionString: url });
   try {
     const workspace = `ws-${spec.team}`;
-    const owner = `u-${spec.team}-${spec.slackUser}`;
     const clientToken = randomUUID();
     const endpointToken = randomUUID();
     await pool.query(
       `INSERT INTO workspaces (id, slack_team_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
       [workspace, spec.team],
     );
-    await pool.query(
+    // Assigned, never derived. `u-${team}-${user}` made the hyphen a boundary
+    // the caller controls: ("a", "b-c") and ("a-b", "c") both spell u-a-b-c, so
+    // the second insert no-opped onto the first tenant's owner and handed it
+    // their endpoint and tokens.
+    const { rows } = await pool.query(
       `INSERT INTO users (id, workspace_id, slack_user_id) VALUES ($1, $2, $3)
-       ON CONFLICT DO NOTHING`,
-      [owner, workspace, spec.slackUser],
+       ON CONFLICT (workspace_id, slack_user_id)
+         DO UPDATE SET slack_user_id = EXCLUDED.slack_user_id
+       RETURNING id`,
+      [randomUUID(), workspace, spec.slackUser],
     );
+    const owner = (rows[0] as { id: string }).id;
     // Never reassign: the id is already on historical sessions, so moving it
     // would hand their journals to the new owner and leave the old owner's
     // endpoint token authenticating as them.
@@ -370,6 +412,8 @@ export function localStore(
       }
       return Promise.resolve(byRun);
     },
+    // One tenant with no revocation model, so nothing is ever de-authorized.
+    stillAuthorized: (endpoints) => Promise.resolve(new Set(endpoints)),
     // Ownership is universal here, so there is nothing to record or release.
     recordSession: () => Promise.resolve(),
     // Nothing is recorded here, so nothing is released — the journal is

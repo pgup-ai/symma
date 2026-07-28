@@ -580,6 +580,8 @@ describe('tenancy', () => {
     // collision a refusal rather than a leak: the wrong trade to reverse, and
     // the real fix is a server-assigned identity, not a looser key here.
     const url = pg.getConnectionUri();
+    const one = await provision(url, { team: 'uniq', slackUser: 'one', endpoint: 'one-box' });
+    const two = await provision(url, { team: 'uniq', slackUser: 'two', endpoint: 'two-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const session = (endpoint: string, runId: string) => ({
       id: 'sid-shared',
@@ -588,14 +590,14 @@ describe('tenancy', () => {
       agent: 'kilo',
     });
     try {
-      await store.recordSession(session('frank-laptop', 'run-same'));
-      await assert.rejects(store.recordSession(session('gina-box', 'run-same')));
-      await assert.rejects(store.recordSession(session('frank-laptop', 'run-other')));
-      assert.equal(await store.sessionBelongsTo('u-tee-frank', 'run-same', 'sid-shared'), true);
-      assert.equal(await store.sessionBelongsTo('u-shared-gina', 'run-same', 'sid-shared'), false);
+      await store.recordSession(session('one-box', 'run-same'));
+      await assert.rejects(store.recordSession(session('two-box', 'run-same')));
+      await assert.rejects(store.recordSession(session('one-box', 'run-other')));
+      assert.equal(await store.sessionBelongsTo(one.owner, 'run-same', 'sid-shared'), true);
+      assert.equal(await store.sessionBelongsTo(two.owner, 'run-same', 'sid-shared'), false);
 
-      await store.deleteSessionRow('sid-shared', 'run-same', 'frank-laptop');
-      assert.equal(await store.sessionBelongsTo('u-tee-frank', 'run-same', 'sid-shared'), false);
+      await store.deleteSessionRow('sid-shared', 'run-same', 'one-box');
+      assert.equal(await store.sessionBelongsTo(one.owner, 'run-same', 'sid-shared'), false);
     } finally {
       await store.close();
     }
@@ -755,6 +757,65 @@ describe('tenancy', () => {
       assert.deepEqual(released, [{ runId: 'run-refused', sessionId: 'sid-refused' }]);
       forget(released);
       assert.deepEqual(readJournalLines(dataDir, 'run-refused', 'sid-refused'), []);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('stops authorizing an endpoint once its owner or token is gone', async () => {
+    // Every other check runs per request, but a companion's SSE leg is admitted
+    // once and lives for hours. Without this, revocation only reached the next
+    // request the companion happened to make — which for a listener is never.
+    const url = pg.getConnectionUri();
+    const all = ['nia-box', 'omar-box', 'pia-box'];
+    for (const [slackUser, endpoint] of [
+      ['nia', 'nia-box'],
+      ['omar', 'omar-box'],
+      ['pia', 'pia-box'],
+    ] as const) {
+      await provision(url, { team: 'revoke', slackUser, endpoint });
+    }
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      assert.deepEqual([...(await store.stillAuthorized(all))].sort(), all);
+
+      // Deactivation takes the endpoint row with it.
+      await store.deactivateUser('revoke', 'omar');
+      // A plain revoke leaves the endpoint and kills only its token, which is
+      // the path §3's revoke-from-the-DM will use.
+      await pool.query(
+        `UPDATE tokens SET revoked_at = now() WHERE subject_kind = 'endpoint' AND subject_id = $1`,
+        ['pia-box'],
+      );
+
+      assert.deepEqual([...(await store.stillAuthorized(all))], ['nia-box']);
+      // And an endpoint nobody ever provisioned is not authorized either.
+      assert.deepEqual([...(await store.stillAuthorized(['ghost-box']))], []);
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('assigns owner ids rather than spelling them from caller strings', async () => {
+    // `u-${team}-${user}` made the hyphen a boundary the caller picks, so
+    // ("a", "b-c") and ("a-b", "c") collided — the second insert no-opped onto
+    // the first tenant's owner and handed it their endpoint and tokens.
+    const url = pg.getConnectionUri();
+    const first = await provision(url, { team: 'x', slackUser: 'y-z', endpoint: 'first-box' });
+    const second = await provision(url, { team: 'x-y', slackUser: 'z', endpoint: 'second-box' });
+    assert.notEqual(first.owner, second.owner);
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      assert.deepEqual(await store.endpointForToken(first.endpointToken), {
+        endpoint: 'first-box',
+        owner: first.owner,
+      });
+      assert.deepEqual(await store.endpointForToken(second.endpointToken), {
+        endpoint: 'second-box',
+        owner: second.owner,
+      });
     } finally {
       await store.close();
     }
