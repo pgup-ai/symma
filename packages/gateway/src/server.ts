@@ -267,6 +267,15 @@ async function handleEndpointIngest(
 
 // Client upstream: open pairs, frames relay, close tears down. The path sid
 // is the authority for every line.
+/** Postgres codes the reservation can answer instead of failing on: the id is
+ * already taken (23505), or the endpoint row went away under a concurrent
+ * delete (23503) — which is the fact the attachment check reports as offline,
+ * arriving one layer down because that check reads the relay, not the store. */
+const INSERT_REFUSALS: Record<string, [RefusalCode, string] | undefined> = {
+  23505: ['session_in_use', 'session id in use'],
+  23503: ['offline', 'endpoint offline'],
+};
+
 async function handleSessionIngest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -298,17 +307,17 @@ async function handleSessionIngest(
             model: control.model,
           });
         } catch (error) {
-          // Postgres 23505 is the id already existing — the caller's problem,
-          // and not retryable. Anything else is ours: answering `session_in_use`
-          // would tell them not to retry an outage that clears on its own.
-          const duplicate = (error as { code?: string }).code === '23505';
+          // Both are the caller's answer and neither is retryable. Anything
+          // else is our outage, and refusing would tell them not to retry
+          // something that clears on its own — so it throws.
+          const refusal = INSERT_REFUSALS[(error as { code?: string }).code ?? ''];
           log(
-            `recordSession ${sid} ${duplicate ? 'refused' : 'failed'}: ${
+            `recordSession ${sid} ${refusal ? 'refused' : 'failed'}: ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
-          if (!duplicate) throw error;
-          refuseToSender(sid, owner, 'session_in_use', 'session id in use');
+          if (!refusal) throw error;
+          refuseToSender(sid, owner, ...refusal);
           return;
         }
       }
