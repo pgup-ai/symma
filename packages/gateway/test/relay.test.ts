@@ -191,4 +191,21 @@ describe('relay', () => {
     await new Promise((resolve) => setTimeout(resolve, 70));
     assert.deepEqual(failed, ['sid-1']);
   });
+
+  it('forwards a companion refusal code untouched', () => {
+    // The relay does not author these — the companion does, and the ack is
+    // relayed verbatim — so the code has to survive the trip.
+    const relay = createRelay();
+    const toClient: string[] = [];
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    relay.openSession(open(), (line) => toClient.push(line), OWNER);
+    const ack = {
+      kind: 'refused' as const,
+      sessionId: 'sid-1',
+      code: 'no_such_agent' as const,
+      reason: 'agent kilo not offered',
+    };
+    relay.endpointAck('laptop', ack, JSON.stringify(ack));
+    assert.deepEqual(JSON.parse(toClient.at(-1)!), ack);
+  });
 });

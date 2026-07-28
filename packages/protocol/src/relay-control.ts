@@ -47,16 +47,9 @@ export interface OpenControl {
 
 /** Why an open was refused; `reason` stays the human sentence. Whether to retry
  * is the caller's decision, not ours. */
-export type RefusalCode =
-  'offline' | 'at_capacity' | 'no_such_agent' | 'session_in_use' | 'not_yours';
+export type RefusalCode = 'offline' | 'at_capacity' | 'no_such_agent' | 'session_in_use';
 
-const REFUSAL_CODES: RefusalCode[] = [
-  'offline',
-  'at_capacity',
-  'no_such_agent',
-  'session_in_use',
-  'not_yours',
-];
+const REFUSAL_CODES: RefusalCode[] = ['offline', 'at_capacity', 'no_such_agent', 'session_in_use'];
 
 export interface AckControl {
   kind: 'opened' | 'refused';

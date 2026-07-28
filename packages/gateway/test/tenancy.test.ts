@@ -153,6 +153,24 @@ describe('tenancy', () => {
       }[];
       assert.equal(opened[0]?.activeSessions, 0, "bob's open never reached alice's endpoint");
 
+      // Nor may the refusal leave a row. It would name ALICE's endpoint, and
+      // recordSession is ON CONFLICT DO NOTHING — so if bob later opened this
+      // id for real, the stale row would still say alice, handing her his
+      // journal.
+      const store = await openStore(
+        pg.getConnectionUri(),
+        join(import.meta.dirname, '../src/schema.sql'),
+      );
+      try {
+        assert.equal(
+          await store.ownerForSession('run-bob', 'sid-bob'),
+          undefined,
+          'a refused open records no session',
+        );
+      } finally {
+        await store.close();
+      }
+
       // 3. An unknown token is nobody.
       assert.equal((await as('not-a-token', '/api/endpoints')).status, 401);
       assert.equal((await as('not-a-token', '/api/runs')).status, 401);

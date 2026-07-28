@@ -14,11 +14,26 @@ import {
   parseRelayControl,
   type AckControl,
   type EndpointPresence,
+  type RefusalCode,
 } from '@symma/protocol';
 
 const REMOTE_PROMPT_TIMEOUT_MS = 20 * 60_000;
 /** Bounds every gateway round trip: POSTs, the SSE connect, and the open ack. */
 const GATEWAY_TIMEOUT_MS = 60_000;
+
+/** A refusal that reached us with a machine-readable cause. `offline` and
+ * `at_capacity` are worth retrying; the others are config or a caller bug.
+ * `code` is absent when the companion refused for a reason the set does not
+ * name — a spawn or setup failure on that machine. */
+export class RemoteRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly code?: RefusalCode,
+  ) {
+    super(message);
+    this.name = 'RemoteRefusedError';
+  }
+}
 
 export interface RemoteAcpConfig {
   gateway: string;
@@ -217,8 +232,9 @@ export async function runRemotePrompt(
       `${label}: endpoint ${config.endpoint} did not answer the open`,
     );
     if (ack.kind === 'refused') {
-      throw new Error(
+      throw new RemoteRefusedError(
         `${label}: endpoint ${config.endpoint} refused: ${ack.reason ?? 'no reason'}`,
+        ack.code,
       );
     }
     log(`Calling ${label} prompt (agent=${config.agent}@${config.endpoint}, model=${model})`);

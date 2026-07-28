@@ -51,6 +51,15 @@ const log = (msg: string): void => {
   console.log(`[symma-gateway] ${msg}`);
 };
 
+/** Same fail-open contract as journalWrite, for the store's fire-and-forget
+ * writes: a failed recordSession costs its owner the journal, so it must be
+ * loud in the log even though nothing here can retry it. */
+const storeWrite = (what: string, write: Promise<void> | undefined): void => {
+  void write?.catch((error: unknown) =>
+    log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`),
+  );
+};
+
 /** Journaling is observability: a write failure (ENOSPC, EACCES) must never
  * break the live relay, nor abort an in-flight review's remaining frames and
  * its terminal run status. Both write paths fail open through here. */
@@ -225,7 +234,7 @@ async function handleEndpointIngest(
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
         relay.attachEndpoint(control, sendToEndpoint(id), owner);
-        void store?.markSeen(id);
+        storeWrite(`markSeen ${id}`, store?.markSeen(id));
       } else if (control.kind === 'opened' || control.kind === 'refused') {
         relay.endpointAck(id, control, line);
       } else if (control.kind === 'close') {
@@ -251,13 +260,21 @@ async function handleSessionIngest(
     const control = parseRelayControl(line);
     if (control?.kind === 'open' && control.sessionId === sid) {
       relay.openSession(control, sendToSession(sid), owner);
-      void store?.recordSession({
-        id: sid,
-        runId: control.runId,
-        endpoint: control.endpoint,
-        agent: control.agent,
-        model: control.model,
-      });
+      // Only a session the relay accepted may leave a row. A refused open that
+      // recorded one would put a run in its owner's listing whose journal never
+      // existed, and every read of it 404s.
+      if (relay.sessionRun(sid)) {
+        storeWrite(
+          `recordSession ${sid}`,
+          store?.recordSession({
+            id: sid,
+            runId: control.runId,
+            endpoint: control.endpoint,
+            agent: control.agent,
+            model: control.model,
+          }),
+        );
+      }
     } else if (control?.kind === 'close' && control.sessionId === sid) {
       relay.closeSession(sid, control.reason ?? 'closed by client');
     } else if (!control) {
