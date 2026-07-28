@@ -13,6 +13,7 @@ import {
 
 import {
   appendEnvelope,
+  deleteJournal,
   journalPath,
   listRuns,
   parseRunControl,
@@ -22,7 +23,7 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
-import { openStore, type Owner, type Store } from './store.js';
+import { openStore, type Owner, type SessionRef, type Store } from './store.js';
 import { VIEWER_HTML } from './viewer.js';
 
 // SSE comment ping; keeps idle viewer connections alive through proxies.
@@ -42,6 +43,9 @@ const databaseUrl = process.env.SYMMA_GATEWAY_DATABASE_URL?.trim() || '';
 // below still runs; they all compare against this instead of a users row.
 const LOCAL_OWNER: Owner = 'local';
 let store: Store | undefined;
+// §1: "frames expire on a default window (start at 30 days)". 0 disables.
+const retentionDays = Number(process.env.SYMMA_GATEWAY_RETENTION_DAYS ?? 30);
+const RETENTION_SWEEP_MS = 60 * 60 * 1000;
 
 const log = (msg: string): void => {
   console.log(`[symma-gateway] ${msg}`);
@@ -527,6 +531,28 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     handleJournal(req, res, runId, sessionId);
     return;
   }
+  if (req.method === 'DELETE' && journal) {
+    const [, runId, sessionId] = journal;
+    if (!isSafeId(runId) || !isSafeId(sessionId)) {
+      res.writeHead(400, { 'content-type': 'text/plain' });
+      res.end('bad id');
+      return;
+    }
+    if (!store) {
+      forgetSessions([{ runId, sessionId }]);
+    } else {
+      const gone = await store.deleteSession(owner, runId, sessionId);
+      if (gone.length === 0) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end('not found');
+        return;
+      }
+      forgetSessions(gone);
+    }
+    res.writeHead(204);
+    res.end();
+    return;
+  }
   const stream = url.pathname.match(/^\/api\/runs\/([^/]+)\/sessions\/([^/]+)\/stream$/);
   if (req.method === 'GET' && stream) {
     const [, runId, sessionId] = stream;
@@ -581,10 +607,30 @@ process.on('SIGTERM', () => {
   setTimeout(() => process.exit(0), 3000).unref();
 });
 
+/** Frames and their row are one unit; deleting either alone leaves a journal
+ * nobody can reach or a row pointing at nothing. */
+function forgetSessions(doomed: SessionRef[]): void {
+  for (const { runId, sessionId } of doomed) deleteJournal(dataDir, runId, sessionId);
+}
+
 // Fail to start rather than start unscoped: a gateway that cannot reach its
 // store has no owners, and every check above would fall back to local mode.
 if (databaseUrl) {
   store = await openStore(databaseUrl, new URL('./schema.sql', import.meta.url).pathname);
+  if (retentionDays > 0) {
+    const sweep = async (): Promise<void> => {
+      const doomed = await store!.expireSessions(retentionDays);
+      forgetSessions(doomed);
+      if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+    };
+    // Retention is a promise, not an ops chore (§1), so it runs on startup as
+    // well as on the interval — a gateway that restarts often still forgets.
+    await sweep();
+    setInterval(
+      () => void sweep().catch((e: unknown) => log(`retention failed: ${String(e)}`)),
+      RETENTION_SWEEP_MS,
+    ).unref();
+  }
 }
 
 server.listen(port, host, () => {

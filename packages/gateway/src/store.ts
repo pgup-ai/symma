@@ -9,12 +9,15 @@ import { Pool } from 'pg';
 /** `(workspace_id, slack_user_id)` collapsed to the users row it names. */
 export type Owner = string;
 
+export interface SessionRef {
+  runId: string;
+  sessionId: string;
+}
+
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
-  ownerForEndpoint(endpoint: string): Promise<Owner | undefined>;
-  endpointsFor(owner: Owner): Promise<string[]>;
   ownerForSession(runId: string, sessionId: string): Promise<Owner | undefined>;
   runsFor(owner: Owner): Promise<Set<string>>;
   recordSession(session: {
@@ -25,12 +28,18 @@ export interface Store {
     model?: string;
   }): Promise<void>;
   markSeen(endpoint: string): Promise<void>;
+  /** §1 data lifecycle. Each returns the sessions whose frames the caller must
+   * now delete from disk — the row and the file are one unit, and only the
+   * caller knows where the files live. */
+  expireSessions(olderThanDays: number): Promise<SessionRef[]>;
+  deleteSession(owner: Owner, runId: string, sessionId: string): Promise<SessionRef[]>;
+  deleteWorkspace(slackTeamId: string): Promise<SessionRef[]>;
+  deactivateUser(slackTeamId: string, slackUserId: string): Promise<void>;
   close(): Promise<void>;
 }
 
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
-export const hashToken = (token: string): string =>
-  createHash('sha256').update(token).digest('hex');
+const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 export async function openStore(url: string, schemaPath: string): Promise<Store> {
   const pool = new Pool({ connectionString: url });
@@ -38,6 +47,8 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
 
   const one = async <T>(sql: string, params: unknown[]): Promise<T | undefined> =>
     (await pool.query(sql, params)).rows[0] as T | undefined;
+  const refs = (result: { rows: { id: string; run_id: string }[] }): SessionRef[] =>
+    result.rows.map((r) => ({ runId: r.run_id, sessionId: r.id }));
 
   return {
     async ownerForClientToken(token) {
@@ -58,15 +69,6 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [hashToken(token)],
       );
       return row && { endpoint: row.subject_id, owner: row.user_id };
-    },
-    async ownerForEndpoint(endpoint) {
-      return (
-        await one<{ user_id: string }>(`SELECT user_id FROM endpoints WHERE id = $1`, [endpoint])
-      )?.user_id;
-    },
-    async endpointsFor(owner) {
-      const { rows } = await pool.query(`SELECT id FROM endpoints WHERE user_id = $1`, [owner]);
-      return rows.map((r: { id: string }) => r.id);
     },
     async ownerForSession(runId, sessionId) {
       return (
@@ -94,6 +96,75 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async markSeen(endpoint) {
       await pool.query(`UPDATE endpoints SET last_seen_at = now() WHERE id = $1`, [endpoint]);
+    },
+    async expireSessions(olderThanDays) {
+      return refs(
+        await pool.query(
+          `DELETE FROM sessions WHERE started_at < now() - make_interval(days => $1)
+           RETURNING id, run_id`,
+          [olderThanDays],
+        ),
+      );
+    },
+    async deleteSession(owner, runId, sessionId) {
+      // Scoped in the WHERE clause, not by a check before it: a delete that
+      // authorizes separately is a delete that can race its own authorization.
+      return refs(
+        await pool.query(
+          `DELETE FROM sessions s USING endpoints e
+            WHERE s.endpoint_id = e.id AND s.id = $1 AND s.run_id = $2 AND e.user_id = $3
+           RETURNING s.id, s.run_id`,
+          [sessionId, runId, owner],
+        ),
+      );
+    },
+    async deleteWorkspace(slackTeamId) {
+      // Sessions come back before the cascade removes them, so the caller still
+      // learns which files to delete.
+      const doomed = refs(
+        await pool.query(
+          `SELECT s.id, s.run_id FROM sessions s
+             JOIN endpoints e ON e.id = s.endpoint_id
+             JOIN users u ON u.id = e.user_id
+            WHERE u.workspace_id = (SELECT id FROM workspaces WHERE slack_team_id = $1)`,
+          [slackTeamId],
+        ),
+      );
+      // `tokens.subject_id` points at a user or an endpoint, so it carries no
+      // foreign key and the cascade cannot reach it. Left alone, an uninstall
+      // leaves live credentials for a tenant that no longer exists.
+      await pool.query(
+        `WITH doomed_users AS (
+           SELECT u.id FROM users u JOIN workspaces w ON w.id = u.workspace_id
+            WHERE w.slack_team_id = $1
+         )
+         DELETE FROM tokens
+          WHERE subject_id IN (SELECT id FROM doomed_users)
+             OR subject_id IN (SELECT id FROM endpoints WHERE user_id IN (SELECT id FROM doomed_users))`,
+        [slackTeamId],
+      );
+      await pool.query(`DELETE FROM workspaces WHERE slack_team_id = $1`, [slackTeamId]);
+      return doomed;
+    },
+    async deactivateUser(slackTeamId, slackUserId) {
+      // Tokens revoked and endpoints unpaired, but their journals survive: a
+      // departing member's runs are still the workspace's record until
+      // retention or an uninstall takes them.
+      await pool.query(
+        `WITH target AS (
+           UPDATE users u SET deactivated_at = now()
+             FROM workspaces w
+            WHERE w.id = u.workspace_id AND w.slack_team_id = $1 AND u.slack_user_id = $2
+           RETURNING u.id
+         ), revoked AS (
+           UPDATE tokens SET revoked_at = now()
+            WHERE revoked_at IS NULL
+              AND (subject_id IN (SELECT id FROM target)
+                OR subject_id IN (SELECT id FROM endpoints WHERE user_id IN (SELECT id FROM target)))
+         )
+         DELETE FROM endpoints WHERE user_id IN (SELECT id FROM target)`,
+        [slackTeamId, slackUserId],
+      );
     },
     close: () => pool.end(),
   };

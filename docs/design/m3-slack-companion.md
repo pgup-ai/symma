@@ -267,18 +267,27 @@ The service processes and stores selected Slack context, prompts, agent output
 and reasoning — which can contain source code. That has to be stated, defaulted,
 and enforced:
 
-|              | position                                                                                             |
-| ------------ | ---------------------------------------------------------------------------------------------------- |
-| retention    | frames expire on a default window (start at 30 days); the row is the unit, so this is a delete query |
-| deletion     | a user can delete a conversation and its frames from the DM                                          |
-| uninstall    | removing the Slack app deletes that workspace's conversations, turns, tokens and frames              |
-| user removal | deactivating a Slack user revokes their tokens and unpairs their endpoints                           |
-| encryption   | at rest via the database; secrets (tokens, pairing codes) stored hashed, never plaintext             |
-| logs         | redact prompts, output and tokens — logs carry ids and outcomes, not content                         |
-| training     | never. No model training, no fine-tuning, no human review of customer content                        |
+|              | position                                                                                                                                  |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| retention    | **shipped** — `SYMMA_GATEWAY_RETENTION_DAYS`, 30 by default, swept hourly and once at boot so a gateway that restarts often still forgets |
+| deletion     | **shipped** for a session — `DELETE /api/runs/:run/sessions/:sid/journal`, owner-scoped inside the query. Conversations arrive with M3d   |
+| uninstall    | **shipped** — `deleteWorkspace` takes users, endpoints, sessions, frames and tokens; tokens need deleting explicitly, see below           |
+| user removal | **shipped** — `deactivateUser` revokes both token kinds and drops the endpoints; journals survive as the workspace's record               |
+| encryption   | at rest via the database; secrets (tokens, pairing codes) stored hashed, never plaintext                                                  |
+| logs         | holds — gateway logs carry ids, counts and outcomes; no path logs a frame, a prompt or a token                                            |
+| training     | never. No model training, no fine-tuning, no human review of customer content                                                             |
 
 M2 deferred retention on a files-and-cron argument. In a store it stops being an
 ops chore and starts being a product promise, so it lands with M3a.
+
+**A row and its frames are one unit.** Frames live on disk, so every delete path
+returns the sessions it removed and the caller unlinks their journals; deleting
+either side alone leaves a journal nobody can reach or a row pointing at nothing.
+
+**`tokens.subject_id` is polymorphic** — it names a user or an endpoint — so it
+carries no foreign key and no cascade reaches it. Uninstall deletes tokens
+explicitly. Without that, removing a workspace leaves live credentials for a
+tenant that no longer exists, which is how the test found it.
 
 ## 2. Pairing and onboarding — the product
 
@@ -1122,12 +1131,12 @@ names the origin SHA keeps the provenance without dragging that along.
 
 ## 9. Milestones
 
-|         | scope                                                                                                                                                                                               | done when                                                                                                                                                                 |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle — **the scoping half shipped 2026-07-28**; retention and the deletion/uninstall/user-removal rows of the lifecycle table remain | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
-| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                                                                          | a fresh laptop pairs from one command with no config file                                                                                                                 |
-| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                                                                              | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
-| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging                                                | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
+|         | scope                                                                                                                                                                                                      | done when                                                                                                                                                                 |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle — **shipped 2026-07-28**. `pairings`/`key_changes` go with M3b and `conversations`/`turns` with M3d, so those tables are not built yet | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
+| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                                                                                 | a fresh laptop pairs from one command with no config file                                                                                                                 |
+| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                                                                                     | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
+| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging                                                       | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
 
 M3d's bar is a person, not a passing test. If a tester needs a hand, the
 milestone is not done.

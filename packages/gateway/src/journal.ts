@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
   type Dirent,
@@ -87,6 +88,12 @@ export interface RunSummary {
   sessions: string[];
   updatedAt: number;
   status?: RunStatus;
+}
+
+/** Remove one session's frames. The row is deleted separately; a missing file
+ * is the expected case when a session never produced any. */
+export function deleteJournal(dataDir: string, runId: string, sessionId: string): void {
+  rmSync(journalPath(dataDir, runId, sessionId), { force: true });
 }
 
 /** Newest-first run listing from the plain directory layout — no index, no DB.

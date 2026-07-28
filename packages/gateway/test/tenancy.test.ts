@@ -7,7 +7,7 @@ import { after, before, describe, it } from 'node:test';
 
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 
-import { appendEnvelope } from '../src/journal.js';
+import { appendEnvelope, deleteJournal, readJournalLines } from '../src/journal.js';
 import { openStore, provision } from '../src/store.js';
 
 // M3a's bar: a second user can neither open a session on, nor list, nor read
@@ -70,6 +70,23 @@ after(async () => {
   rmSync(dataDir, { recursive: true, force: true });
   await pg?.stop();
 });
+
+/** Backdates a session so retention has something old to find. */
+const ageSession = async (url: string, sessionId: string, days: number): Promise<void> => {
+  const admin = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+  await admin.close();
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: url });
+  await pool.query(
+    `UPDATE sessions SET started_at = now() - make_interval(days => $2) WHERE id = $1`,
+    [sessionId, days],
+  );
+  await pool.end();
+};
+
+const forget = (refs: { runId: string; sessionId: string }[]): void => {
+  for (const { runId, sessionId } of refs) deleteJournal(dataDir, runId, sessionId);
+};
 
 const as = (token: string, path: string, init?: RequestInit): Promise<Response> =>
   fetch(`${base}${path}`, {
@@ -184,5 +201,92 @@ describe('tenancy', () => {
 
     const bobRuns = (await (await as(bob.clientToken, '/api/runs')).json()) as unknown[];
     assert.deepEqual(bobRuns, [], "bob's run listing is empty");
+  });
+
+  it('deletes, expires and uninstalls frames with their rows', async () => {
+    const url = pg.getConnectionUri();
+    const schema = join(import.meta.dirname, '../src/schema.sql');
+    const frame = (runId: string, sessionId: string): void =>
+      appendEnvelope(dataDir, {
+        v: 1,
+        runId,
+        sessionId,
+        seq: 1,
+        ts: 1,
+        agent: 'kilo',
+        label: 'review',
+        dir: 'out',
+        frame: {},
+      });
+    const store = await openStore(url, schema);
+    const seed = async (runId: string, sessionId: string, endpoint: string): Promise<void> => {
+      frame(runId, sessionId);
+      await store.recordSession({ id: sessionId, runId, endpoint, agent: 'kilo' });
+    };
+
+    try {
+      // Deleting your own takes the frames with it; someone else's is a 404 and
+      // leaves them alone.
+      await seed('run-del', 'sid-del', 'alice-laptop');
+      assert.equal(
+        (
+          await as(bob.clientToken, '/api/runs/run-del/sessions/sid-del/journal', {
+            method: 'DELETE',
+          })
+        ).status,
+        404,
+      );
+      assert.notDeepEqual(readJournalLines(dataDir, 'run-del', 'sid-del'), []);
+      assert.equal(
+        (
+          await as(alice.clientToken, '/api/runs/run-del/sessions/sid-del/journal', {
+            method: 'DELETE',
+          })
+        ).status,
+        204,
+      );
+      assert.deepEqual(readJournalLines(dataDir, 'run-del', 'sid-del'), []);
+
+      // Retention is by age, so a fresh session survives its own sweep.
+      await seed('run-old', 'sid-old', 'alice-laptop');
+      await seed('run-new', 'sid-new', 'alice-laptop');
+      await ageSession(url, 'sid-old', 40);
+      const expired = await store.expireSessions(30);
+      forget(expired);
+      assert.deepEqual(expired, [{ runId: 'run-old', sessionId: 'sid-old' }]);
+      assert.deepEqual(readJournalLines(dataDir, 'run-old', 'sid-old'), []);
+      assert.notDeepEqual(readJournalLines(dataDir, 'run-new', 'sid-new'), []);
+
+      // Uninstall reports the frames before the cascade removes the rows, or
+      // they would be unreachable and undeletable.
+      await seed('run-gone', 'sid-gone', 'bob-laptop');
+      forget(await store.deleteWorkspace('acme'));
+      assert.deepEqual(readJournalLines(dataDir, 'run-gone', 'sid-gone'), []);
+      // tokens.subject_id is polymorphic, so no cascade reaches it — an
+      // uninstall that skipped them would leave live credentials behind.
+      assert.equal(await store.ownerForClientToken(alice.clientToken), undefined);
+      assert.equal(await store.endpointForToken(alice.endpointToken), undefined);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('revokes tokens and unpairs endpoints when a member is deactivated', async () => {
+    const url = pg.getConnectionUri();
+    const schema = join(import.meta.dirname, '../src/schema.sql');
+    const carol = await provision(url, {
+      team: 'other',
+      slackUser: 'carol',
+      endpoint: 'carol-laptop',
+    });
+    const store = await openStore(url, schema);
+    try {
+      assert.equal(await store.ownerForClientToken(carol.clientToken), carol.owner);
+      await store.deactivateUser('other', 'carol');
+      assert.equal(await store.ownerForClientToken(carol.clientToken), undefined);
+      assert.equal(await store.endpointForToken(carol.endpointToken), undefined);
+    } finally {
+      await store.close();
+    }
   });
 });
