@@ -127,9 +127,9 @@ const onceOnStream = async (
   }
 };
 
-/** The store's own hashing, repeated rather than exported: revoking one of an
- * endpoint's tokens needs to name the row, and the scheme changing under a
- * stored hash is a breaking change this test should fail on. */
+/** The store's own hashing, repeated rather than exported: naming a token or a
+ * pairing row means naming its hash, and the scheme changing under a stored one
+ * is a breaking change these tests should fail on. */
 const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 const as = (token: string, path: string, init?: RequestInit): Promise<Response> =>
@@ -864,6 +864,136 @@ describe('tenancy', () => {
         endpoint: 'second-box',
         owner: second.owner,
       });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('spends a pairing code once, and takes the retyping a member will do', async () => {
+    const url = pg.getConnectionUri();
+    const nel = await provision(url, { team: 'pair', slackUser: 'nel', endpoint: 'nel-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const code = await store.mintPairingCode(nel.owner);
+      // Four groups of four, from an alphabet with no I, L, O or U — 80 bits.
+      assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
+      // Returned once and stored only as a hash, like a token.
+      const { rows } = await pool.query(`SELECT code_hash FROM pairings WHERE user_id = $1`, [
+        nel.owner,
+      ]);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].code_hash, tokenHash(code.replace(/-/g, '')));
+
+      // Typed back off a phone: lowercase, hyphens dropped, O for 0, l for 1.
+      const retyped = code.toLowerCase().replace(/-/g, '').replace(/0/g, 'O').replace(/1/g, 'l');
+      assert.deepEqual(await store.redeemPairingCode(retyped), { ok: true, owner: nel.owner });
+      // Spent once; a code nobody minted is the mistyped case, not a stale one.
+      assert.deepEqual(await store.redeemPairingCode(code), { ok: false, why: 'spent' });
+      assert.deepEqual(await store.redeemPairingCode('ZZZZ-ZZZZ-ZZZZ-ZZZZ'), {
+        ok: false,
+        why: 'unknown',
+      });
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('retires a code when it expires or when the next one is minted', async () => {
+    const url = pg.getConnectionUri();
+    const ora = await provision(url, { team: 'pair', slackUser: 'ora', endpoint: 'ora-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const stale = await store.mintPairingCode(ora.owner);
+      await pool.query(
+        `UPDATE pairings SET expires_at = now() - interval '1 second' WHERE user_id = $1`,
+        [ora.owner],
+      );
+      assert.deepEqual(await store.redeemPairingCode(stale), { ok: false, why: 'spent' });
+
+      // Minting supersedes: the member who clicks twice has one live code, not
+      // two, so there is only ever one thing to guess at.
+      const first = await store.mintPairingCode(ora.owner);
+      const second = await store.mintPairingCode(ora.owner);
+      assert.deepEqual(await store.redeemPairingCode(first), { ok: false, why: 'unknown' });
+      assert.deepEqual(await store.redeemPairingCode(second), { ok: true, owner: ora.owner });
+
+      // And when the two clicks overlap. Delete-then-insert let both find
+      // nothing to delete and insert their own; the unique user_id is what
+      // makes the second an update instead.
+      const [a, b] = await Promise.all([
+        store.mintPairingCode(ora.owner),
+        store.mintPairingCode(ora.owner),
+      ]);
+      const live = [await store.redeemPairingCode(a), await store.redeemPairingCode(b)];
+      assert.deepEqual(
+        live.filter((r) => r.ok),
+        [{ ok: true, owner: ora.owner }],
+      );
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('stops honouring a code once its member is deactivated', async () => {
+    // Deactivation is a soft delete, so the users row stays and the cascade
+    // never reaches the code. Without the join it outlives the member's tokens
+    // and endpoints and still names them.
+    const url = pg.getConnectionUri();
+    const sev = await provision(url, { team: 'pair', slackUser: 'sev', endpoint: 'sev-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const code = await store.mintPairingCode(sev.owner);
+      await store.deactivateUser('pair', 'sev');
+      // Gone with the tokens, not merely ignored — deactivation removes the
+      // credential the way it revokes the others.
+      assert.deepEqual(await store.redeemPairingCode(code), { ok: false, why: 'unknown' });
+
+      // Nor is a new one issued to a queued Slack event or an operator working
+      // off a stale list: minting takes the member row lock that deactivation
+      // takes, so it cannot land a code behind a cleanup that already ran.
+      await assert.rejects(store.mintPairingCode(sev.owner), /no active member/);
+      const left = await pool.query(`SELECT 1 FROM pairings WHERE user_id = $1`, [sev.owner]);
+      assert.equal(left.rowCount, 0, 'a refused mint left a row behind');
+
+      // Redeem asks whether the member is live regardless, the way every token
+      // check does. Planted directly, because with mint locked out of it there
+      // is nothing left that produces this row.
+      const planted = 'BPB1-9W92-HTZJ-RA19';
+      await pool.query(
+        `INSERT INTO pairings (code_hash, user_id, expires_at)
+         VALUES ($1, $2, now() + interval '10 minutes')`,
+        [tokenHash(planted.replace(/-/g, '')), sev.owner],
+      );
+      assert.deepEqual(await store.redeemPairingCode(planted), { ok: false, why: 'spent' });
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('lets exactly one of two racing redeems win the same code', async () => {
+    // Single-use rests on the check and the claim being one statement, so the
+    // loser reads the winner's consumed_at, not a snapshot taken before it.
+    const url = pg.getConnectionUri();
+    const rai = await provision(url, { team: 'pair', slackUser: 'rai', endpoint: 'rai-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      const code = await store.mintPairingCode(rai.owner);
+      // Two, in one tick on separate pooled connections. More prove nothing
+      // further and widen the pool past what close() tears down in time.
+      const racers = await Promise.all([
+        store.redeemPairingCode(code),
+        store.redeemPairingCode(code),
+      ]);
+      assert.deepEqual(
+        racers.filter((r) => r.ok),
+        [{ ok: true, owner: rai.owner }],
+      );
     } finally {
       await store.close();
     }

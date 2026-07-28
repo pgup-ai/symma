@@ -2,7 +2,7 @@
  * Owner lookups for tenancy (§1). Every question here is "who does this belong
  * to" — the relay and the HTTP layer ask, they never decide.
  */
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 
@@ -18,8 +18,18 @@ export interface LiveSession extends SessionRef {
   endpoint: string;
 }
 
+/** §2 gives expired and already-used the same words, so `spent` covers both;
+ * `unknown` is the mistyped code, which a log is worth telling apart. */
+export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unknown' | 'spent' };
+
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
+  /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
+   * supersedes this owner's outstanding code. Throws if they are not a member
+   * here any more, rather than handing back a code that can only fail later. */
+  mintPairingCode(owner: Owner): Promise<string>;
+  /** Spends a code. Two redeems of one code cannot both come back `ok`. */
+  redeemPairingCode(code: string): Promise<PairingResult>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   /** The authorization question itself, not the owner to compare outside: with
@@ -59,6 +69,29 @@ export interface Store {
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 
+// Crockford base32: no I, L, O or U, so nothing retyped off a screen reads as
+// another character. 256 is a whole multiple of its 32 symbols, so a random
+// byte taken modulo the alphabet is unbiased.
+const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+/** 16 × 5 bits = 80, past §2's ≥64-bit floor. */
+const CODE_LENGTH = 16;
+const PAIRING_TTL_MINUTES = 10;
+
+function newPairingCode(): string {
+  const pick = (b: number): string => CODE_ALPHABET[b % CODE_ALPHABET.length];
+  const code = Array.from(randomBytes(CODE_LENGTH), pick).join('');
+  return code.replace(/(.{4})(?=.)/g, '$1-'); // grouped to read aloud
+}
+
+/** Crockford's decode: a retyped code arrives with I or l for 1 and O for 0,
+ * and our grouping hyphens wherever the member left them. */
+const normalizeCode = (code: string): string =>
+  code
+    .toUpperCase()
+    .replace(/[^0-9A-Z]/g, '')
+    .replace(/[IL]/g, '1')
+    .replace(/O/g, '0');
+
 export async function openStore(url: string, schemaPath: string): Promise<Store> {
   const pool = new Pool({ connectionString: url });
   await pool.query(readFileSync(schemaPath, 'utf8'));
@@ -77,6 +110,56 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [hashToken(token)],
       );
       return row?.subject_id;
+    },
+    async mintPairingCode(owner) {
+      const code = newPairingCode();
+      // Supersede rather than queue: several live codes for one member is
+      // several chances for the wrong one to land. Upsert on the unique
+      // `user_id` rather than delete-then-insert, so two mints racing leave one
+      // row rather than each finding nothing to delete and inserting its own.
+      //
+      // `FOR UPDATE` on the member is what orders this against deactivation,
+      // which takes the same row lock: either it waits and then deletes this
+      // code with the rest, or it went first and there is no live member here
+      // to select. Unlocked, a mint could land a fresh code behind a cleanup
+      // that had already run.
+      const { rowCount } = await pool.query(
+        `INSERT INTO pairings (code_hash, user_id, expires_at)
+         SELECT $1, u.id, now() + make_interval(mins => $3)
+           FROM users u WHERE u.id = $2 AND u.deactivated_at IS NULL FOR UPDATE
+         ON CONFLICT (user_id) DO UPDATE
+            SET code_hash = EXCLUDED.code_hash,
+                expires_at = EXCLUDED.expires_at,
+                consumed_at = NULL`,
+        [hashToken(normalizeCode(code)), owner, PAIRING_TTL_MINUTES],
+      );
+      // Loud rather than a code that can only fail later: the caller asked to
+      // pair someone who is not a member here.
+      if (!rowCount) throw new Error(`no active member ${owner} to pair`);
+      return code;
+    },
+    async redeemPairingCode(code) {
+      const hash = hashToken(normalizeCode(code));
+      // The claim is the UPDATE: its WHERE is re-checked against the committed
+      // row once it holds the lock, so of two racing redeems exactly one wins.
+      //
+      // Joined to `users` because deactivation is a soft delete — the row stays,
+      // so the cascade never reaches the code, and a removed member's
+      // outstanding code would still name them.
+      const won = await one<{ user_id: string }>(
+        `UPDATE pairings p SET consumed_at = now()
+           FROM users u
+          WHERE u.id = p.user_id AND u.deactivated_at IS NULL
+            AND p.code_hash = $1 AND p.consumed_at IS NULL AND p.expires_at > now()
+          RETURNING p.user_id`,
+        [hash],
+      );
+      if (won) return { ok: true, owner: won.user_id };
+      // Only to say which, and only on the path that already failed.
+      const seen = await one<{ ok: number }>(`SELECT 1 AS ok FROM pairings WHERE code_hash = $1`, [
+        hash,
+      ]);
+      return { ok: false, why: seen ? 'spent' : 'unknown' };
     },
     async endpointForToken(token) {
       const row = await one<{ subject_id: string; user_id: string }>(
@@ -260,6 +343,11 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
              FROM workspaces w
             WHERE w.id = u.workspace_id AND w.slack_team_id = $1 AND u.slack_user_id = $2
            RETURNING u.id
+         ), unpaired AS (
+           -- Their code goes with the tokens. The target CTE holds the member
+           -- row, which is also the lock mintPairingCode waits on to stay
+           -- ordered against this.
+           DELETE FROM pairings WHERE user_id IN (SELECT id FROM target)
          ), revoked AS (
            UPDATE tokens SET revoked_at = now()
             WHERE revoked_at IS NULL
@@ -371,8 +459,8 @@ export function localStore(
     const b = Buffer.from(expected);
     return a.length === b.length && timingSafeEqual(a, b);
   };
-  const noWorkspaces = (): never => {
-    throw new Error('workspaces need a database; this gateway is single-tenant');
+  const needsDatabase = (): never => {
+    throw new Error('this gateway is single-tenant; pairing and workspaces need a database');
   };
   return {
     ownerForClientToken: (token) =>
@@ -422,8 +510,11 @@ export function localStore(
           ? [{ runId, sessionId }]
           : [],
       ),
-    deleteWorkspace: noWorkspaces,
-    deactivateUser: noWorkspaces,
+    deleteWorkspace: needsDatabase,
+    deactivateUser: needsDatabase,
+    // One member, holding a token they configured: nobody to introduce.
+    mintPairingCode: needsDatabase,
+    redeemPairingCode: needsDatabase,
     close: () => Promise.resolve(),
   };
 }

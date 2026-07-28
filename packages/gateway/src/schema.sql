@@ -56,5 +56,20 @@ CREATE TABLE IF NOT EXISTS sessions (
   ended_at    timestamptz
 );
 
+-- §2 pairing. The code is the whole credential the exchange presents, so it is
+-- stored hashed like a token and spent once.
+--
+-- One row per member, and `user_id` is unique so that holds through two mints
+-- racing: minting upserts, replacing the spent row rather than landing beside
+-- it, so the table is bounded by membership and the cascade retires it.
+--
+-- No `attempts` column — §1 records why it cannot answer brute force.
+CREATE TABLE IF NOT EXISTS pairings (
+  code_hash   text PRIMARY KEY,
+  user_id     text UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at  timestamptz NOT NULL,
+  consumed_at timestamptz
+);
+
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);
 CREATE INDEX IF NOT EXISTS endpoints_user_idx ON endpoints (user_id);
