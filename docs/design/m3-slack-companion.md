@@ -223,13 +223,13 @@ reconnect — it never runs the request on someone else's machine.
 
 ### Failure modes, all of which need words not stack traces
 
-| case                        | behaviour                                                                                                                                                      |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| code expired / already used | "That code expired — run **Connect my agent** for a new one."                                                                                                  |
-| no agents detected          | install links for supported agents; do not attach an endpoint with zero agents                                                                                 |
-| laptop sleeps or closes     | bot names it as sleep, not failure, and queues the request for wake — never a silent hang. §3 "Staying attached". **Expect this to be the top support issue.** |
-| companion killed            | distinguishable from sleep: the shutdown path sends a deliberate close. The login service restarts it at next login                                            |
-| two devices                 | both attach; member picks a default, per-session override available                                                                                            |
+| case                        | behaviour                                                                                                                                                                                                                                                                    |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| code expired / already used | "That code expired — run **Connect my agent** for a new one."                                                                                                                                                                                                                |
+| no agents detected          | install links for supported agents; do not attach an endpoint with zero agents                                                                                                                                                                                               |
+| laptop sleeps or closes     | name it as sleep, not failure, and hold the request for wake instead of refusing — never a silent hang. Both need §3 "Staying attached"; today `openSession` refuses and the bot has no way to tell sleep from anything else. **Expect this to be the top support issue.**   |
+| companion killed            | **the least distinguishable case, not the most.** SIGTERM with a live session sends a close today; SIGKILL, a crash and an idle exit send nothing, so they read exactly like sleep. §7's goodbye control is what separates them. The login service restarts it at next login |
+| two devices                 | both attach; member picks a default, per-session override available                                                                                                                                                                                                          |
 
 ## 3. Companion
 
@@ -311,13 +311,19 @@ word for situations a member experiences as completely different things.
 | silent drop, past it, last seen 4m ago | "asleep — this will run when it wakes"   |
 | never paired, or revoked               | the pairing copy from §2                 |
 
-Sleep and quit are not distinguishable today, and the gap is smaller than it
-looks. `shutdown()` already sends a `close` per live session, so a companion
-that quits mid-review is visible — but an _idle_ one, which is the common case,
-exits silently and looks exactly like a lid closing. Sleep sends no signal at
-all: the process is suspended, not signalled, so nothing can be inferred from
-the companion's side. One control frame on the way out closes it (§7), and a
-last-seen timestamp on the relay's attachment covers the rest.
+Two of those rows do not exist yet — the goodbye and the last-seen — and the gap
+is smaller than it looks.
+`shutdown()` sends a `close` per live session, so a SIGTERM mid-review is
+visible — but that is the narrowest case in the set. An _idle_ SIGTERM, which is
+the common quit, sends nothing; SIGKILL and a crash never reach the handler at
+all; and sleep suspends the process rather than signalling it, so nothing can be
+inferred from the companion's side under any of them. All four arrive as the
+same silent drop.
+
+One control frame on the way out separates the deliberate exits (§7). A
+last-seen timestamp on the relay's attachment covers the rest — it cannot tell a
+crash from a lid closing, and does not need to: both mean "not there now, try
+later", which is the only thing the member has to act on.
 
 Cheap, and it buys the difference between "something is broken" and "your laptop
 is asleep" — which is the entire support burden.
