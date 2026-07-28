@@ -2,7 +2,7 @@
  * Owner lookups for tenancy (§1). Every question here is "who does this belong
  * to" — the relay and the HTTP layer ask, they never decide.
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 
@@ -294,4 +294,77 @@ export async function provision(
   } finally {
     await pool.end();
   }
+}
+
+/**
+ * The same contract backed by the journal directory, for a gateway with no
+ * database. Single tenant means every question about ownership has one answer,
+ * so this is not a stub — it is the degenerate case of the same model.
+ *
+ * It exists so the server never asks "is there a store?". That question was a
+ * fork at nine call sites, and a behaviour written on one side of it kept
+ * shipping without the other.
+ */
+export function localStore(
+  clientToken: string,
+  endpointTokens: Map<string, string>,
+  /** Every journal on disk, with its mtime — the filesystem is the index. */
+  journals: () => { runId: string; sessionId: string; mtimeMs: number }[],
+): Store {
+  const LOCAL = 'local';
+  const matches = (presented: string, expected: string): boolean => {
+    const a = Buffer.from(presented);
+    const b = Buffer.from(expected);
+    return a.length === b.length && timingSafeEqual(a, b);
+  };
+  const noWorkspaces = (): never => {
+    throw new Error('workspaces need a database; this gateway is single-tenant');
+  };
+  return {
+    ownerForClientToken: (token) =>
+      // No configured token is M2's local mode: loopback only, no auth.
+      Promise.resolve(!clientToken || matches(token, clientToken) ? LOCAL : undefined),
+    endpointForToken: (token) => {
+      for (const [endpoint, expected] of endpointTokens) {
+        if (matches(token, expected)) return Promise.resolve({ endpoint, owner: LOCAL });
+      }
+      return Promise.resolve(undefined);
+    },
+    ownerForSession: (runId, sessionId) =>
+      Promise.resolve(
+        journals().some((j) => j.runId === runId && j.sessionId === sessionId) ? LOCAL : undefined,
+      ),
+    runsFor: () => Promise.resolve(new Set(journals().map((j) => j.runId))),
+    sessionsByRun: (_owner, runIds) => {
+      const byRun = new Map<string, Set<string>>();
+      for (const j of journals()) {
+        if (!runIds.includes(j.runId)) continue;
+        let owned = byRun.get(j.runId);
+        if (!owned) byRun.set(j.runId, (owned = new Set()));
+        owned.add(j.sessionId);
+      }
+      return Promise.resolve(byRun);
+    },
+    // Ownership is universal here, so there is nothing to record or release.
+    recordSession: () => Promise.resolve(),
+    deleteSessionRow: () => Promise.resolve(),
+    markSeen: () => Promise.resolve(),
+    expireSessions: (olderThanDays, live = []) => {
+      const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+      return Promise.resolve(
+        journals()
+          .filter((j) => j.mtimeMs < cutoff && !live.includes(j.sessionId))
+          .map(({ runId, sessionId }) => ({ runId, sessionId })),
+      );
+    },
+    deleteSession: (_owner, runId, sessionId) =>
+      Promise.resolve(
+        journals().some((j) => j.runId === runId && j.sessionId === sessionId)
+          ? [{ runId, sessionId }]
+          : [],
+      ),
+    deleteWorkspace: noWorkspaces,
+    deactivateUser: noWorkspaces,
+    close: () => Promise.resolve(),
+  };
 }

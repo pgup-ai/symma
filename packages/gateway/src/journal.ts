@@ -146,6 +146,28 @@ export function listRuns(dataDir: string): RunSummary[] {
   return runs.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+/** Every journal on disk with its mtime. The filesystem is the session index
+ * when there is no database, so retention and ownership read it directly. */
+export function listJournals(
+  dataDir: string,
+): { runId: string; sessionId: string; mtimeMs: number }[] {
+  return listRuns(dataDir).flatMap((run) =>
+    run.sessions.flatMap((sessionId) => {
+      try {
+        return [
+          {
+            runId: run.runId,
+            sessionId,
+            mtimeMs: statSync(journalPath(dataDir, run.runId, sessionId)).mtimeMs,
+          },
+        ];
+      } catch {
+        return [];
+      }
+    }),
+  );
+}
+
 /** Journal replay as raw NDJSON lines (already-validated envelopes). */
 export function readJournalLines(dataDir: string, runId: string, sessionId: string): string[] {
   const path = journalPath(dataDir, runId, sessionId);

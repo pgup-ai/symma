@@ -224,11 +224,16 @@ makes a read authorizable. Without it a runId and sessionId say nothing about
 who owns them.
 
 **Without `SYMMA_GATEWAY_DATABASE_URL` the gateway is single-tenant**, as M2
-was. Every check still runs — they compare against one implicit owner instead of
-a `users` row — so there is no unscoped code path, only a store with one tenant
-in it. A database counts as authentication, so it unlocks the configured bind
-the same way the shared token does; otherwise a multi-tenant deployment has to
-invent a token it never uses to become reachable.
+was — and that is a second implementation of the same `Store`, backed by the
+journal directory, not a branch that skips the checks. The distinction is not
+cosmetic: it was written as `if (store)` at nine call sites first, and every
+review round found a behaviour that had shipped on one side of that fork and not
+the other — retention that never ran without a database, a delete that ended the
+session in one mode only. With one contract there is no second side to forget.
+
+A database counts as authentication, so it unlocks the configured bind the same
+way the shared token does; otherwise a multi-tenant deployment has to invent a
+token it never uses to become reachable.
 
 **The M1 observer tee (`POST /api/ingest`) is single-tenant only** and 404s once
 a store is configured. It journals sessions the gateway never routed, so its

@@ -7,8 +7,10 @@ import { describe, it } from 'node:test';
 
 import type { ObserverEnvelope } from '@symma/protocol';
 
+import { localStore } from '../src/store.js';
 import {
   appendEnvelope,
+  listJournals,
   journalPath,
   listRuns,
   parseRunControl,
@@ -181,6 +183,63 @@ describe('gateway', () => {
     } finally {
       child?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('answers the same questions with no database behind it', async () => {
+    // The single-tenant path used to be an `if (store)` else-branch at nine
+    // call sites, so retention and delete each shipped on one side only. It is
+    // the same contract now, backed by the journal directory.
+    const dir = mkdtempSync(join(tmpdir(), 'symma-local-store-'));
+    try {
+      const frame = (runId: string, sessionId: string): void =>
+        appendEnvelope(dir, {
+          v: 1,
+          runId,
+          sessionId,
+          seq: 1,
+          ts: 1,
+          agent: 'kilo',
+          label: 'l',
+          dir: 'out',
+          frame: {},
+        });
+      frame('run-a', 'sid-a');
+      frame('run-b', 'sid-b');
+      const store = localStore('secret', new Map([['box', 'endpoint-secret']]), () =>
+        listJournals(dir),
+      );
+
+      await Promise.all([
+        // One tenant, so every journal is theirs — and a wrong token is nobody.
+        store.ownerForClientToken('secret').then((o) => assert.equal(o, 'local')),
+        store.ownerForClientToken('wrong').then((o) => assert.equal(o, undefined)),
+        store
+          .endpointForToken('endpoint-secret')
+          .then((e) => assert.deepEqual(e, { endpoint: 'box', owner: 'local' })),
+        store.ownerForSession('run-a', 'sid-a').then((o) => assert.equal(o, 'local')),
+        store.ownerForSession('run-a', 'nope').then((o) => assert.equal(o, undefined)),
+        // Retention runs here too — this was skipped entirely without a database.
+        store
+          .expireSessions(0, [])
+          .then((doomed) =>
+            assert.deepEqual(doomed.map((d) => d.sessionId).sort(), ['sid-a', 'sid-b']),
+          ),
+        store.expireSessions(0, ['sid-a']).then((doomed) =>
+          assert.deepEqual(
+            doomed.map((d) => d.sessionId),
+            ['sid-b'],
+          ),
+        ),
+        store.expireSessions(30, []).then((doomed) => assert.deepEqual(doomed, [])),
+        // And delete reports what it removed, so the caller ends the session.
+        store
+          .deleteSession('local', 'run-a', 'sid-a')
+          .then((gone) => assert.deepEqual(gone, [{ runId: 'run-a', sessionId: 'sid-a' }])),
+        store.deleteSession('local', 'run-a', 'gone').then((g) => assert.deepEqual(g, [])),
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

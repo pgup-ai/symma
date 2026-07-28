@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createGzip } from 'node:zlib';
@@ -16,6 +15,7 @@ import {
   appendEnvelope,
   deleteJournal,
   journalPath,
+  listJournals,
   listRuns,
   parseRunControl,
   readJournalLines,
@@ -24,7 +24,7 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
-import { openStore, type Owner, type SessionRef, type Store } from './store.js';
+import { localStore, openStore, type Owner, type SessionRef, type Store } from './store.js';
 import { VIEWER_HTML } from './viewer.js';
 
 // SSE comment ping; keeps idle viewer connections alive through proxies.
@@ -44,10 +44,11 @@ const databaseUrl = process.env.SYMMA_GATEWAY_DATABASE_URL?.trim() || '';
 // a dummy token it never uses to become reachable.
 const host =
   token || databaseUrl ? process.env.SYMMA_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
-// Without a database there is one tenant, which is what M2 was. Every check
-// below still runs; they all compare against this instead of a users row.
-const LOCAL_OWNER: Owner = 'local';
-let store: Store | undefined;
+// Always present. Without a database it is the journal directory with one
+// implicit tenant — the same contract, not a bypass. `if (store)` used to fork
+// nine call sites, and a behaviour written on one side kept shipping without
+// the other.
+let store: Store;
 // §1: "frames expire on a default window (start at 30 days)". 0 disables.
 const retentionDays = Number(process.env.SYMMA_GATEWAY_RETENTION_DAYS ?? 30);
 const RETENTION_SWEEP_MS = 60 * 60 * 1000;
@@ -129,14 +130,6 @@ const sendToSession =
     if (res) sseWrite(res, line);
   };
 
-// Constant-time compare so tokens can't be recovered by timing. Length is not
-// secret; unequal lengths short out.
-function tokenMatches(candidate: string, expected = token): boolean {
-  const a = Buffer.from(candidate);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
 /** The owner this request speaks for, or undefined if it speaks for nobody. */
 async function callerOwner(req: IncomingMessage, url: URL): Promise<Owner | undefined> {
   const header = req.headers.authorization;
@@ -146,9 +139,7 @@ async function callerOwner(req: IncomingMessage, url: URL): Promise<Owner | unde
   // ingest (POST) must use the Authorization header so the token never lands in
   // access logs or proxy caches.
   const presented = bearer ?? (req.method === 'GET' ? (url.searchParams.get('token') ?? '') : '');
-  if (store) return presented ? store.ownerForClientToken(presented) : undefined;
-  if (!token) return LOCAL_OWNER;
-  return presented && tokenMatches(presented) ? LOCAL_OWNER : undefined;
+  return store.ownerForClientToken(presented);
 }
 
 // SSE writes must never throw: a subscriber can disconnect between the
@@ -239,7 +230,7 @@ async function handleEndpointIngest(
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
         relay.attachEndpoint(control, sendToEndpoint(id), owner);
-        storeWrite(`markSeen ${id}`, store?.markSeen(id));
+        storeWrite(`markSeen ${id}`, store.markSeen(id));
       } else if (control.kind === 'opened' || control.kind === 'refused') {
         // Only on an ack the relay actually applied: a companion naming
         // another endpoint's session is ignored there, and deleting its row
@@ -254,7 +245,7 @@ async function handleEndpointIngest(
         if (applied && control.kind === 'refused' && refusedRun)
           storeWrite(
             `deleteSessionRow ${control.sessionId}`,
-            store?.deleteSessionRow(control.sessionId, refusedRun),
+            store.deleteSessionRow(control.sessionId, refusedRun),
           );
       } else if (control.kind === 'close') {
         relay.endpointClose(id, control.sessionId, control.reason ?? 'closed by endpoint');
@@ -282,7 +273,7 @@ async function handleSessionIngest(
       // until it lands the session is open, the companion has the open, and a
       // frame later in this same body would journal into whoever owned that id
       // last. A conflict here refuses instead.
-      if (store) {
+      {
         try {
           await store.recordSession({
             id: sid,
@@ -292,9 +283,16 @@ async function handleSessionIngest(
             model: control.model,
           });
         } catch (error) {
+          // Postgres 23505 is the id already existing — the caller's problem,
+          // and not retryable. Anything else is ours: answering `session_in_use`
+          // would tell them not to retry an outage that clears on its own.
+          const duplicate = (error as { code?: string }).code === '23505';
           log(
-            `recordSession ${sid} refused: ${error instanceof Error ? error.message : String(error)}`,
+            `recordSession ${sid} ${duplicate ? 'refused' : 'failed'}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
           );
+          if (!duplicate) throw error;
           // Only down a leg this caller holds. sendToSession resolves whichever
           // stream is registered, and on a duplicate id that is the existing
           // owner's — whose client reads a refusal as its own session failing.
@@ -314,7 +312,7 @@ async function handleSessionIngest(
       const accepted = relay.openSession(control, sendToSession(sid), owner);
       // Reserved but refused: release it, or the id is unopenable from here on.
       if (!accepted)
-        storeWrite(`deleteSessionRow ${sid}`, store?.deleteSessionRow(sid, control.runId));
+        storeWrite(`deleteSessionRow ${sid}`, store.deleteSessionRow(sid, control.runId));
       // maySession keeps a stranger from registering while someone holds the
       // id, but a registration can still interleave with the await above, when
       // neither the relay nor the map has a claim yet. Evict what that leaves.
@@ -347,14 +345,10 @@ async function endpointOwner(req: IncomingMessage, id: string): Promise<Owner | 
   const presented =
     typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!presented) return undefined;
-  if (store) {
-    // The token names the endpoint it may speak for; a token for one endpoint
-    // cannot attach as another (§1: the owner is never read off `hello`).
-    const found = await store.endpointForToken(presented);
-    return found?.endpoint === id ? found.owner : undefined;
-  }
-  const expected = endpointTokens.get(id);
-  return expected && tokenMatches(presented, expected) ? LOCAL_OWNER : undefined;
+  // The token names the endpoint it may speak for; a token for one endpoint
+  // cannot attach as another (§1: the owner is never read off `hello`).
+  const found = await store.endpointForToken(presented);
+  return found?.endpoint === id ? found.owner : undefined;
 }
 
 /** One live SSE leg per peer; last connection wins, cleanup only clears the
@@ -521,7 +515,6 @@ function maySession(owner: Owner, sessionId: string): boolean {
 
 /** 404 rather than 403 throughout: whether a session exists is itself owned. */
 async function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<boolean> {
-  if (!store) return true;
   return (await store.ownerForSession(runId, sessionId)) === owner;
 }
 
@@ -575,7 +568,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // A runId is caller-chosen, so two tenants can share one run directory and
     // the listing would name the other's sessions. One query for all of them:
     // per-run would grow with a tenant's history on every viewer refresh.
-    if (store) {
+    {
       const owned = await store.sessionsByRun(
         owner,
         runs.map((r) => r.runId),
@@ -658,22 +651,18 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       res.end('bad id');
       return;
     }
-    if (!store) {
-      forgetSessions([{ runId, sessionId }]);
-    } else {
-      const gone = await store.deleteSession(owner, runId, sessionId);
-      if (gone.length === 0) {
-        res.writeHead(404, { 'content-type': 'text/plain' });
-        res.end('not found');
-        return;
-      }
-      // Ending it is part of deleting it. A live session keeps journaling, so
-      // the next frame recreates the file with no row behind it — unreadable,
-      // undeletable, and past retention's reach, which turns a delete into a
-      // permanent retention leak.
-      relay.closeSession(sessionId, 'session deleted by its owner');
-      forgetSessions(gone);
+    const gone = await store.deleteSession(owner, runId, sessionId);
+    if (gone.length === 0) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
     }
+    // Ending it is part of deleting it. A live session keeps journaling, so the
+    // next frame recreates the file with nothing behind it — unreadable,
+    // undeletable, and past retention's reach, which turns a delete into a
+    // permanent retention leak.
+    relay.closeSession(sessionId, 'session deleted by its owner');
+    forgetSessions(gone);
     res.writeHead(204);
     res.end();
     return;
@@ -694,7 +683,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     handleStream(res, runId, sessionId);
     return;
   }
-  if (req.method === 'POST' && url.pathname === '/api/ingest' && store) {
+  if (req.method === 'POST' && url.pathname === '/api/ingest' && databaseUrl) {
     // The observer tee journals sessions this gateway never routed, so its
     // runId and sessionId are whatever the caller says — there is nothing to
     // check them against, and unchecked they write into another tenant's
@@ -783,34 +772,36 @@ function forgetSessions(doomed: SessionRef[]): void {
   }
 }
 
-// Fail to start rather than start unscoped: a gateway that cannot reach its
-// store has no owners, and every check above would fall back to local mode.
-if (databaseUrl) {
-  store = await openStore(databaseUrl, new URL('./schema.sql', import.meta.url).pathname);
-  if (retentionDays > 0) {
-    // A sweep that fails is a promise unkept, not a reason to stop serving —
-    // same fail-open contract as the journal, and identical at boot and on the
-    // interval so a transient database blip does not decide whether we start.
-    const sweep = (): void => {
-      void (async () => {
-        const doomed = await store!.expireSessions(retentionDays, relay.liveSessionIds());
-        forgetSessions(doomed);
-        if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
-      })().catch((error: unknown) =>
-        log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
-      );
-    };
-    // Runs at boot as well as on the interval, so a gateway that restarts often
-    // still forgets (§1: retention is a product promise, not an ops chore).
-    sweep();
-    setInterval(sweep, RETENTION_SWEEP_MS).unref();
-  }
+// Fail to start rather than start unscoped: a gateway told to use a database it
+// cannot reach has no owners, and silently falling back would serve every
+// tenant's journals to whoever asked.
+store = databaseUrl
+  ? await openStore(databaseUrl, new URL('./schema.sql', import.meta.url).pathname)
+  : localStore(token, endpointTokens, () => listJournals(dataDir));
+
+if (retentionDays > 0) {
+  // A sweep that fails is a promise unkept, not a reason to stop serving — same
+  // fail-open contract as the journal, and identical at boot and on the
+  // interval so a transient failure does not decide whether we start.
+  const sweep = (): void => {
+    void (async () => {
+      const doomed = await store.expireSessions(retentionDays, relay.liveSessionIds());
+      forgetSessions(doomed);
+      if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+    })().catch((error: unknown) =>
+      log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
+    );
+  };
+  // Both modes, at boot as well as on the interval: retention is a product
+  // promise (§1), and a gateway that restarts often still has to forget.
+  sweep();
+  setInterval(sweep, RETENTION_SWEEP_MS).unref();
 }
 
 server.listen(port, host, () => {
   log(`listening on http://${host}:${port} (data: ${dataDir})`);
   log(
-    store
+    databaseUrl
       ? 'multi-tenant: endpoints, journals and listings are owner-scoped'
       : token
         ? 'single tenant, token auth; ingest needs Authorization: Bearer, viewers ?token='
