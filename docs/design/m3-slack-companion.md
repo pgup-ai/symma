@@ -12,7 +12,8 @@ to **their** agent, with **their** credentials, on **their** machine.
 ### The category exists; the identity model does not
 
 Surveyed **2026-07-26**. Every project below connects Slack to _an_ ACP agent.
-None routes each Slack actor to that person's separately authenticated machine.
+None of _these_ routes each Slack actor to that person's separately
+authenticated machine — but the survey was incomplete, see below.
 
 Star counts and repo status drift, so treat them as a snapshot of that date, not
 a fact. Before citing this table again, re-check the repos and record URLs and
@@ -29,19 +30,44 @@ commit SHAs alongside the claims.
 | **OpenHands Agent Canvas** (~225★) | local agent server, Claude Code/Codex over ACP                                                                                               | its Slack path is a cron automation that posts a final result, not a live client                                                         |
 | **Juan**                           | "Slack as ACP Client", Socket Mode                                                                                                           | archived March 2026, single machine                                                                                                      |
 
-The shape they share: **one shared agent identity, machine, credentials and
-workspace — with isolated conversations per user.** A shared Mac mini is the
-natural deployment. Nobody dynamically routes Alice to Alice's laptop and Bob to
-Bob's.
+**The survey missed the largest player, and it does route per user.** Added
+2026-07-28 after this section had already been written against the table above.
+
+| project             | what matches                                                                                                                                                                                                                                        | how it differs                                                                                                                                                      |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **LobeHub** (~81k★) | `lh connect` is an outbound-dial daemon on the user's machine that spawns local agent CLIs (claude-code, codex, amp) and strips ambient provider keys so each uses its own subscription. Slack and Discord channels, device presence, pairing codes | routing is a per-user _preference_ (`AgentDeviceOverride` overriding `boundDeviceId`) layered on a shared agent, and `requestedDeviceId` on a request wins outright |
+
+So the claim this section was built on — that nobody routes Alice to Alice's
+laptop and Bob to Bob's — **is false.** LobeHub does, through per-user overrides
+merged into a shared agent config, with `RequestTrigger.Bot` upgrading a `local`
+target to `device`.
+
+The shape the _rest_ share still holds: one shared agent identity, machine,
+credentials and workspace, with isolated conversations per user. A shared Mac
+mini is the natural deployment. But "nobody has built personal routing" is no
+longer the thing to say.
 
 ### So the differentiator is not "ACP agent in Slack"
 
-That has been built several times. It is:
+That has been built several times, and since LobeHub, so has personal routing.
+What is left is narrower and better:
 
-> One shared Slack app, but every invocation resolves the actor to **their own**
-> signed, outbound-dial companion — their credentials, subscription, machine.
+> Ownership is the routing rule, not a setting on top of it. An endpoint belongs
+> to `(workspace_id, slack_user_id)`, and there is no configuration in which
+> Alice's invocation reaches Bob's laptop.
 
-What that buys, which none of the above can express:
+The distinction is worth being precise about, because "we route per user" is now
+a thing to say _second_. LobeHub routes per user by letting each user override a
+shared agent's bound device; the authorization question — may this sender use
+that device — is a separate `canUseDevice` check beside it, and an explicit
+`requestedDeviceId` on a request wins outright. In §1's model the two are the
+same question: `openSession` refuses when `caller.owner !== endpoint.owner`, so a
+request naming someone else's endpoint has nothing left to fall back on.
+
+That is a security posture rather than a feature, which makes it harder to
+demo and harder to copy back out of.
+
+What still follows from it:
 
 - Alice and Bob invoke _different_ personal agents in the same thread.
 - No workspace-wide shared agent credentials.
@@ -52,6 +78,12 @@ What that buys, which none of the above can express:
 The third bullet is deliberately narrow. "We never see your code" would be false:
 relayed frames carry prompts, output and reasoning, and we store them. The
 credential is what stays on the machine — see Data lifecycle.
+
+Nor is it uniquely ours: LobeHub strips `ANTHROPIC_API_KEY` from its spawned
+CLIs for the same reason `codex.ts` and `kilo.ts` do here — so the agent falls
+back to the user's own subscription instead of a stray ambient key. Two
+independent arrivals at the same non-obvious fix is evidence it is a real
+hazard, not a nicety.
 
 ACP does not solve this layer — it is point-to-point. Routing, reconnection and
 ownership are gateway responsibilities. **The defendable product is the
@@ -200,10 +232,17 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
 4. The companion detects locally authenticated ACP agents, dials out, exchanges
    the code for a durable endpoint token, persists it `0600`, installs a login
    service, and attaches.
-5. The gateway records
+5. **The endpoint id is derived, never typed.** M2 has the operator choose it
+   (`laptop`), which is one more field in a flow whose bar is zero fields — and
+   it changes when someone reinstalls, orphaning the endpoint the gateway knows.
+   Derive it from the machine id, with a per-install connection id beside it so
+   two companions on one machine stay distinguishable. Borrowed from LobeHub's
+   `lh connect`, which does exactly this. The **device label** stays free text
+   ("Jingbo's MacBook Pro") because that one is for humans.
+6. The gateway records
    `(team_id, user_id) → owner → companion devices`, plus the member's default
    device and agent. **Provider credentials never enter Slack or the gateway.**
-6. The DM shows the selected agent and live presence, with controls to switch
+7. The DM shows the selected agent and live presence, with controls to switch
    default, add a device, disconnect, or revoke a lost one. Presence needs no new
    machinery — `/api/endpoints` already reports `online`, agents and free
    capacity; it only needs scoping per user.
@@ -270,6 +309,15 @@ long-lived by definition, so the trigger has fired:
 - **Revoke** from the DM invalidates the endpoint token and unpins the key.
 - **Re-pair replaces** the key rather than adding one, so a lost laptop cannot
   keep signing after it is revoked.
+- **Re-pair is confirmed in the DM, not silently by holding a code.** LobeHub's
+  pairing mode does this well: the requester gets a code and the _owner_ approves
+  it from the chat surface they are already in (`/approve <code>`). Their reason
+  is a shared bot needing per-user access control, which §1's ownership model
+  makes moot — but the shape transfers to the case that is genuinely dangerous
+  here. Replacing a signing key is how a stolen laptop gets cut off, and it is
+  also how an attacker with one pairing code would cut _the owner_ off. First
+  pair is code-only; **replacing an existing key needs a confirmation in the
+  owner's DM.**
 
 Invariant 11 already says compromise means shutdown and token rotation, which is
 not a thing you can honour without a rotation path.
@@ -346,7 +394,7 @@ uninstall.
 **Not building:** wake-on-LAN, or a "keep my laptop awake" toggle. Both spend the
 member's hardware to paper over a boundary that is honest. Anyone who genuinely
 wants 24/7 runs the same companion on a desktop or VPS — multiple devices
-already attach, and §2 step 6 already has the default-device picker.
+already attach, and §2 step 7 already has the default-device picker.
 
 ## 4. Conversation model — one DM thread = one conversation
 
