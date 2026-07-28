@@ -460,7 +460,10 @@ runs while its owner is logged in.** Log out and it stops. That is the same
 boundary that keeps the credentials on the machine, seen from the other side.
 
 `RunAtLoad` plus `KeepAlive` covers crash and reboot. Reconnect needs no M3 work
-either: the companion backs off exponentially (1s→30s, reset on success) and both
+either: the companion backs off exponentially (1s→30s, reset once an attach
+lands rather than once a stream ends cleanly — an idle drop leaves through the
+error path, and compounding it would make a laptop that slept twice slower to
+return the third time) and both
 legs hold a 60s resume window, so a wifi blip does not kill an in-flight review.
 
 **One transport gap needed closing — done, ahead of the rest of M3.** The gateway

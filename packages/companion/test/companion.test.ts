@@ -274,7 +274,8 @@ describe('relay e2e', () => {
         // live; without it `fetch` never resolves and nothing is proven.
         res.write(': open\n\n');
         held.push(res);
-        if (streamOpens.length >= 2) {
+        // Mute for the first two attaches, chatty from the third.
+        if (streamOpens.length >= 3) {
           pinger = setInterval(() => res.write(': ping\n\n'), 100);
           pinger.unref?.();
         }
@@ -309,19 +310,27 @@ describe('relay e2e', () => {
 
       // A second attach means the first was abandoned — the stub never closed it.
       await waitFor(
-        async () => (streamOpens.length >= 2 ? true : undefined),
-        `reattach after an idle stream (opens=${streamOpens.length}) ${err.slice(-300)}`,
+        async () => (streamOpens.length >= 3 ? true : undefined),
+        `two reattaches after idle streams (opens=${streamOpens.length}) ${err.slice(-300)}`,
       );
       assert.ok(
         streamOpens[1]! - streamOpens[0]! >= 300,
         'waits out the idle budget rather than flapping',
+      );
+      // An idle stream ends through the error path, so resetting backoff only on
+      // a clean end would double this gap every sleep — a laptop that slept a
+      // few times would take 30s to come back. Both gaps are one idle budget
+      // plus one minimum backoff; a doubled one would be ~1s longer.
+      assert.ok(
+        streamOpens[2]! - streamOpens[1]! < 1_800,
+        `an attached-then-idle epoch resets backoff (gap=${streamOpens[2]! - streamOpens[1]!}ms)`,
       );
 
       // Heartbeats are traffic. Wait out several idle budgets AND the 1s
       // reconnect backoff — a shorter window would let a dropped connection be
       // still backing off when the assertion runs, and read as healthy.
       await new Promise((resolve) => setTimeout(resolve, 2_500));
-      assert.equal(streamOpens.length, 2, 'a heartbeating stream is never dropped');
+      assert.equal(streamOpens.length, 3, 'a heartbeating stream is never dropped');
     } finally {
       clearInterval(pinger);
       companion?.kill('SIGKILL');

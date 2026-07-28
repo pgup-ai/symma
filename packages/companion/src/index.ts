@@ -134,8 +134,6 @@ if (!gatewayUrl || !token || !endpointId) {
 // After the config guard, so a misconfigured start writes no key material.
 const signingKeys = loadSigningKeys();
 
-/** Built-ins use the machine's ambient auth; `name=cmd arg…` entries add any
- * ACP binary (also the test seam). Returns an error string when auth is absent. */
 /**
  * Absolute path for a command, or undefined. Agent specs name bare binaries
  * (`kilo`, `codex-acp`), which resolve fine from a terminal and not at all from
@@ -172,6 +170,8 @@ function resolveBin(bin: string): string | undefined {
   return path && path.startsWith('/') && runnable(path) ? path : undefined;
 }
 
+/** Built-ins use the machine's ambient auth; `name=cmd arg…` entries add any
+ * ACP binary (also the test seam). Returns an error string when auth is absent. */
 function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | string {
   const eq = entry.indexOf('=');
   if (eq !== -1) {
@@ -258,6 +258,11 @@ const encoder = new TextEncoder();
 let upstream: ReadableStreamDefaultController<Uint8Array> | undefined;
 const outbox: string[] = [];
 let shuttingDown = false;
+/** Whether this epoch got as far as attaching. main() resets backoff on it
+ * rather than on a clean stream end: a connection that attached and later went
+ * quiet leaves through the error path, and compounding its delay would make
+ * every laptop that sleeps twice slower to come back the third time. */
+let attached = false;
 /** Drops the current connection epoch; set while connected. */
 let abortEpoch: (() => void) | undefined;
 
@@ -580,6 +585,7 @@ async function connectOnce(): Promise<void> {
     .catch(failUp);
   sendControl(hello());
   while (outbox.length > 0 && upstream) sendLine(outbox.shift()!);
+  attached = true;
   log(`attached to ${gatewayUrl} as ${endpointId} (${[...agents.keys()].join(', ')})`);
 
   const reader = down.body.getReader();
@@ -632,13 +638,14 @@ async function connectOnce(): Promise<void> {
 async function main(): Promise<void> {
   let backoff = BACKOFF_MIN_MS;
   for (;;) {
+    attached = false;
     try {
       await connectOnce();
-      backoff = BACKOFF_MIN_MS;
       log('gateway stream ended; reconnecting');
     } catch (error) {
       log(`connect failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (attached) backoff = BACKOFF_MIN_MS;
     await new Promise((resolve) => setTimeout(resolve, backoff));
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
   }
