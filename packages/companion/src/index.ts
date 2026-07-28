@@ -47,6 +47,20 @@ const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 // Must-deliver buffer while the gateway is away; overflow fails sessions loud.
 const MAX_OUTBOX_LINES = 10_000;
+/**
+ * How long the down leg may say nothing before we treat it as dead. The gateway
+ * heartbeats every 25s, so silence past two of them is not a quiet period.
+ *
+ * Without this a half-open socket is invisible: a slept laptop whose NAT entry
+ * expired never sees a FIN, so `reader.read()` stays pending forever and the
+ * companion keeps believing it is attached while the gateway has long since
+ * dropped it. Tunable because it is really a question about the network in
+ * between, not about us.
+ */
+const STREAM_IDLE_MS =
+  Number(process.env.SYMMA_COMPANION_IDLE_MS) > 0
+    ? Number(process.env.SYMMA_COMPANION_IDLE_MS)
+    : 70_000;
 
 const gatewayUrl = (process.env.SYMMA_COMPANION_GATEWAY ?? '').trim().replace(/\/+$/, '');
 const token = (process.env.SYMMA_COMPANION_TOKEN ?? '').trim();
@@ -522,10 +536,25 @@ async function connectOnce(): Promise<void> {
   const reader = down.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  // Heartbeats count as traffic, so any read rearms this; only real silence
+  // fires it. Aborting the epoch is what `done`/`break` cannot do here — the
+  // read never resolves on a half-open socket — and it lands in the same
+  // teardown the clean path uses, so main()'s loop reconnects with backoff.
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  const rearm = (): void => {
+    clearTimeout(idle);
+    idle = setTimeout(() => {
+      log(`no traffic from the gateway in ${STREAM_IDLE_MS}ms; reconnecting`);
+      epoch.abort();
+    }, STREAM_IDLE_MS);
+    idle.unref?.();
+  };
   try {
+    rearm();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      rearm();
       buffer += decoder.decode(value, { stream: true });
       let nl = buffer.indexOf('\n');
       while (nl !== -1) {
@@ -536,6 +565,7 @@ async function connectOnce(): Promise<void> {
       }
     }
   } finally {
+    clearTimeout(idle);
     // Always tear down this epoch's upstream, even on a read error, so the
     // next connectOnce() doesn't leak the prior /ingest POST.
     try {

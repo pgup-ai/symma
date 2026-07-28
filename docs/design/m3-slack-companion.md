@@ -1,7 +1,8 @@
 # symma M3 — Slack ↔ personal companion
 
 - **Date:** 2026-07-27
-- **Status:** design, no code
+- **Status:** design. One piece shipped ahead of the rest — the companion's
+  stream liveness timer (§3, "Staying attached").
 - **Builds on:** `2026-07-24-acp-gateway-m2-design.md` (M2a–M2d shipped and dogfooded)
 
 ## The bet
@@ -419,23 +420,28 @@ boundary that keeps the credentials on the machine, seen from the other side.
 either: the companion backs off exponentially (1s→30s, reset on success) and both
 legs hold a 60s resume window, so a wifi blip does not kill an in-flight review.
 
-**One transport gap does need closing, and it is the same gap twice.** The
-gateway sends SSE heartbeats every 25s, but nothing on the companion side reads
-them — `connectOnce()` returns when the stream ends, and a half-open TCP
-connection never ends. A sleeping laptop whose NAT entry expired sends no FIN, so
-the companion sits believing it is attached while the gateway sees nothing, and
-does not reconnect until something else forces it. Track last-byte-received and
-drop the connection past ~2.5 heartbeats; the existing backoff loop does the
-rest.
+**One transport gap needed closing — done, ahead of the rest of M3.** The gateway
+sent SSE heartbeats every 25s and nothing on the companion side read them:
+`connectOnce()` returns when the stream ends, and a half-open TCP connection
+never ends. A sleeping laptop whose NAT entry expired sends no FIN, so the
+companion sat believing it was attached while the gateway saw nothing, and did
+not reconnect until something else forced it. Any read now rearms a timer
+(`SYMMA_COMPANION_IDLE_MS`, 70s default — past two heartbeats); silence aborts
+the epoch into the teardown the clean path already uses, and the backoff loop
+reconnects.
+
+Both directions are pinned by test, because they fail oppositely and only one is
+visible in normal operation: no timer and a dead connection is held forever, no
+rearm and a **healthy** one is dropped on a stopwatch.
 
 This is the one thing WebSocket ping/pong would have given for free, and it is
 worth naming as _that_ rather than as an argument for switching. M2 chose the
 SSE + NDJSON pair for reasons that still hold — both halves already
 production-tested, no new dependency in the two published packages, resume and
 journal-replay semantics built against it — and set the revisit trigger at
-sub-frame latency or binary frames, which ACP does not need. A liveness timer is
-a few lines against a proven transport. Swapping transports to obtain one would
-re-test resume, drain, backpressure and journaling to end up where a timer
+sub-frame latency or binary frames, which ACP does not need. The timer was a few
+lines against a proven transport; swapping transports to obtain one would have
+re-tested resume, drain, backpressure and journaling to end up where the timer
 already gets us.
 
 **A closed laptop is not running anything.** No supervisor changes that. The two

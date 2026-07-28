@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer, type ServerResponse } from 'node:http';
 import { describe, it } from 'node:test';
 
 import { readJournalLines } from '@symma/gateway';
@@ -249,6 +250,83 @@ describe('relay e2e', () => {
       companion?.kill('SIGKILL');
       gateway?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
+      rmSync(companionHome, { recursive: true, force: true });
+    }
+  });
+
+  it('drops a silent stream and keeps a chatty one', async () => {
+    // A slept laptop's NAT entry expires without a FIN, so the down leg stays
+    // open and mute forever. Nothing in the read loop can notice that — the
+    // read simply never resolves. Both halves matter and fail in opposite
+    // directions: no timer and a dead connection is held forever, no rearm and
+    // a healthy one is dropped on a stopwatch.
+    const companionHome = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    const streamOpens: number[] = [];
+    const held: ServerResponse[] = [];
+    let pinger: ReturnType<typeof setInterval> | undefined;
+    // Mute on the first attach; on the second it heartbeats faster than the
+    // idle budget, which must keep the connection alive indefinitely.
+    const stub = createServer((req, res) => {
+      if (req.url?.endsWith('/stream')) {
+        streamOpens.push(Date.now());
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        // One flush so the head reaches the client and the stream is genuinely
+        // live; without it `fetch` never resolves and nothing is proven.
+        res.write(': open\n\n');
+        held.push(res);
+        if (streamOpens.length >= 2) {
+          pinger = setInterval(() => res.write(': ping\n\n'), 100);
+          pinger.unref?.();
+        }
+        return;
+      }
+      req.resume();
+      req.on('end', () => res.writeHead(200).end('{}'));
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+
+    let companion: ChildProcess | undefined;
+    try {
+      companion = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        {
+          env: {
+            ...process.env,
+            HOME: companionHome,
+            SYMMA_COMPANION_GATEWAY: `http://127.0.0.1:${port}`,
+            SYMMA_COMPANION_TOKEN: 'tok',
+            SYMMA_COMPANION_ENDPOINT: 'mute',
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+            SYMMA_COMPANION_IDLE_MS: '300',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let err = '';
+      companion.stderr?.on('data', (c) => (err += String(c)));
+
+      // A second attach means the first was abandoned — the stub never closed it.
+      await waitFor(
+        async () => (streamOpens.length >= 2 ? true : undefined),
+        `reattach after an idle stream (opens=${streamOpens.length}) ${err.slice(-300)}`,
+      );
+      assert.ok(
+        streamOpens[1]! - streamOpens[0]! >= 300,
+        'waits out the idle budget rather than flapping',
+      );
+
+      // Heartbeats are traffic. Wait out several idle budgets AND the 1s
+      // reconnect backoff — a shorter window would let a dropped connection be
+      // still backing off when the assertion runs, and read as healthy.
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      assert.equal(streamOpens.length, 2, 'a heartbeating stream is never dropped');
+    } finally {
+      clearInterval(pinger);
+      companion?.kill('SIGKILL');
+      for (const res of held) res.destroy();
+      stub.close();
       rmSync(companionHome, { recursive: true, force: true });
     }
   });
