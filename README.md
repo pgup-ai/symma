@@ -36,3 +36,6 @@ bot and the tenancy model that M3 needs are not.
 
 [`docs/design/m3-slack-companion.md`](docs/design/m3-slack-companion.md) — tenancy,
 pairing, conversation model, approval boundary, launch phases, extraction plan.
+
+[`docs/strategy/open-core.md`](docs/strategy/open-core.md) — what gets published,
+what stays closed, and what we charge for. Thinking, not decided.
