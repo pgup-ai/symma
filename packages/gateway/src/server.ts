@@ -295,14 +295,19 @@ async function handleSessionIngest(
           log(
             `recordSession ${sid} refused: ${error instanceof Error ? error.message : String(error)}`,
           );
-          sendToSession(sid)(
-            JSON.stringify({
-              kind: 'refused',
-              sessionId: sid,
-              code: 'session_in_use',
-              reason: 'session id in use',
-            }),
-          );
+          // Only down a leg this caller holds. sendToSession resolves whichever
+          // stream is registered, and on a duplicate id that is the existing
+          // owner's — whose client reads a refusal as its own session failing.
+          if (sessionStreamOwners.get(sid) === owner) {
+            sendToSession(sid)(
+              JSON.stringify({
+                kind: 'refused',
+                sessionId: sid,
+                code: 'session_in_use',
+                reason: 'session id in use',
+              }),
+            );
+          }
           return;
         }
       }
@@ -310,10 +315,9 @@ async function handleSessionIngest(
       // Reserved but refused: release it, or the id is unopenable from here on.
       if (!accepted)
         storeWrite(`deleteSessionRow ${sid}`, store?.deleteSessionRow(sid, control.runId));
-      // A leg registered before the open is unowned by construction, and
-      // sendToSession resolves it at send time — so whoever holds it when the
-      // open lands becomes the target. Evict a stranger's; the opener
-      // reconnects, and `maySession` keeps them out from here on.
+      // maySession keeps a stranger from registering while someone holds the
+      // id, but a registration can still interleave with the await above, when
+      // neither the relay nor the map has a claim yet. Evict what that leaves.
       if (accepted && sessionStreamOwners.get(sid) !== owner) {
         sessionStreams.get(sid)?.end();
         sessionStreams.delete(sid);
@@ -508,7 +512,10 @@ function handleStream(res: ServerResponse, runId: string, sessionId: string): vo
 const sessionStreamOwners = new Map<string, Owner>();
 
 function maySession(owner: Owner, sessionId: string): boolean {
-  const held = relay.sessionOwner(sessionId);
+  // Before the open there is no relay owner, so the leg itself is the claim:
+  // otherwise a second caller registers over the first and ends it, and the
+  // client treats its stream ending as the session failing.
+  const held = relay.sessionOwner(sessionId) ?? sessionStreamOwners.get(sessionId);
   return held === undefined || held === owner;
 }
 

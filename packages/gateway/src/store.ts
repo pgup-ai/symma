@@ -170,15 +170,19 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         // `tokens.subject_id` points at a user or an endpoint, so it carries no
         // foreign key and the cascade cannot reach it. Left alone, an uninstall
         // leaves live credentials for a tenant that no longer exists.
+        //
+        // Qualified by kind: ids are not namespaced across the two tables, so
+        // an endpoint named after some other workspace's user id would have
+        // matched the user predicate and lost its token.
         await client.query(
           `WITH doomed_users AS (
              SELECT u.id FROM users u JOIN workspaces w ON w.id = u.workspace_id
               WHERE w.slack_team_id = $1
            )
            DELETE FROM tokens
-            WHERE subject_id IN (SELECT id FROM doomed_users)
-               OR subject_id IN (SELECT id FROM endpoints
-                                  WHERE user_id IN (SELECT id FROM doomed_users))`,
+            WHERE (subject_kind = 'client' AND subject_id IN (SELECT id FROM doomed_users))
+               OR (subject_kind = 'endpoint' AND subject_id IN (
+                     SELECT id FROM endpoints WHERE user_id IN (SELECT id FROM doomed_users)))`,
           [slackTeamId],
         );
         await client.query(`DELETE FROM workspaces WHERE slack_team_id = $1`, [slackTeamId]);
@@ -216,8 +220,9 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
          ), revoked AS (
            UPDATE tokens SET revoked_at = now()
             WHERE revoked_at IS NULL
-              AND (subject_id IN (SELECT id FROM target)
-                OR subject_id IN (SELECT id FROM endpoints WHERE user_id IN (SELECT id FROM target)))
+              AND ((subject_kind = 'client' AND subject_id IN (SELECT id FROM target))
+                OR (subject_kind = 'endpoint' AND subject_id IN (
+                      SELECT id FROM endpoints WHERE user_id IN (SELECT id FROM target))))
          )
          DELETE FROM endpoints WHERE user_id IN (SELECT id FROM target)`,
           [slackTeamId, slackUserId],

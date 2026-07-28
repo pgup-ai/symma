@@ -627,4 +627,96 @@ describe('tenancy', () => {
       await store.close();
     }
   });
+
+  it('lets a pre-open stream be claimed once, and answers conflicts only to their sender', async () => {
+    const url = pg.getConnectionUri();
+    const jo = await provision(url, { team: 'claim', slackUser: 'jo', endpoint: 'jo-box' });
+    const kim = await provision(url, { team: 'claim', slackUser: 'kim', endpoint: 'kim-box' });
+
+    // Before any open the relay has no owner for the id, so both callers used
+    // to pass and the second ended the first's leg — which the client reads as
+    // its session failing.
+    const abort = new AbortController();
+    const held = await fetch(`${base}/api/sessions/sid-claim/stream`, {
+      headers: { authorization: `Bearer ${jo.clientToken}` },
+      signal: abort.signal,
+    });
+    try {
+      assert.equal(held.status, 200);
+      assert.equal((await as(kim.clientToken, '/api/sessions/sid-claim/stream')).status, 404);
+    } finally {
+      abort.abort();
+    }
+
+    // And a duplicate open is answered to its sender or to nobody, never down
+    // the leg the existing owner is listening on.
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      await store.recordSession({
+        id: 'sid-taken',
+        runId: 'run-jo',
+        endpoint: 'jo-box',
+        agent: 'kilo',
+      });
+    } finally {
+      await store.close();
+    }
+    const joLeg = new AbortController();
+    const joStream = await fetch(`${base}/api/sessions/sid-taken/stream`, {
+      headers: { authorization: `Bearer ${jo.clientToken}` },
+      signal: joLeg.signal,
+    });
+    try {
+      const reader = joStream.body!.getReader();
+      const decoder = new TextDecoder();
+      let seen = '';
+      // The leg emits its own connect traffic, so watch for the refusal itself
+      // rather than for any bytes at all.
+      // Aborting the leg rejects the pending read, which is how this ends.
+      void (async () => {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          seen += decoder.decode(value, { stream: true });
+        }
+      })().catch(() => undefined);
+      await as(kim.clientToken, '/api/sessions/sid-taken/ingest', {
+        method: 'POST',
+        body: `${JSON.stringify({
+          kind: 'open',
+          sessionId: 'sid-taken',
+          runId: 'run-jo',
+          endpoint: 'kim-box',
+          agent: 'kilo',
+        })}\n`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      assert.doesNotMatch(seen, /refused/, "kim's conflict never reached jo's leg");
+    } finally {
+      joLeg.abort();
+    }
+  });
+
+  it('does not revoke a token whose id collides across the two subject kinds', async () => {
+    // tokens.subject_id names a user or an endpoint and the ids are not
+    // namespaced, so an endpoint named after another workspace's user id used
+    // to lose its token when that workspace was removed.
+    const url = pg.getConnectionUri();
+    const victim = await provision(url, {
+      team: 'collide',
+      slackUser: 'liz',
+      endpoint: 'u-gone-mo',
+    });
+    await provision(url, { team: 'gone', slackUser: 'mo', endpoint: 'mo-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      forget(await store.deleteWorkspace('gone'));
+      assert.deepEqual(await store.endpointForToken(victim.endpointToken), {
+        endpoint: 'u-gone-mo',
+        owner: victim.owner,
+      });
+    } finally {
+      await store.close();
+    }
+  });
 });
