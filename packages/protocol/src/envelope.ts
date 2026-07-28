@@ -7,7 +7,7 @@
 import { isSafeId } from './ids.js';
 
 /**
- * One observed ACP frame, as sent by the jbot-side tee (or the demo feeder).
+ * One observed ACP frame, as sent by a caller's tee (or the demo feeder).
  * `dir` is the frame's direction on the original stdio pair: `out` =
  * client→agent, `in` = agent→client. The gateway treats `frame` opaquely —
  * rendering is the viewer's job, so protocol evolution never breaks ingest.
@@ -22,7 +22,7 @@ export interface ObserverEnvelope {
   label: string;
   dir: 'out' | 'in';
   frame: Record<string, unknown>;
-  /** jbot model string for this session (`<provider>/<id>`), for viewer meta. */
+  /** Model string for this session (`<provider>/<id>`), for viewer meta. */
   model?: string;
   /** Signing endpoint, so a reader knows which advertised key to verify against. */
   endpoint?: string;

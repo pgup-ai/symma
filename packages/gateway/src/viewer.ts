@@ -9,7 +9,7 @@ export const VIEWER_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>jbot observer</title>
+<title>symma observer</title>
 <style>
   :root {
     --bg:#0c0f14; --panel:#11161e; --elev:#18202b; --line:#232c39;
@@ -98,7 +98,7 @@ export const VIEWER_HTML = `<!doctype html>
 </head>
 <body>
 <aside>
-  <div class="brand"><span class="mark"></span> jbot observer
+  <div class="brand"><span class="mark"></span> symma observer
     <span class="conn" id="conn"><span class="cdot"></span><span id="connText">connecting</span></span>
   </div>
   <div class="runs" id="runs"></div>

@@ -67,6 +67,10 @@ const maxSessions =
  * tamper-evident against the relay rather than merely by it.
  */
 function loadSigningKeys(): { privateKey: string; publicKey: string } {
+  // Keeps the jbot name deliberately: renaming this path silently rotates the
+  // signing key of anyone already running one, which is indistinguishable from
+  // the compromise invariant 3 says to shut down for. The companion's on-disk
+  // identity moves as one migration when the package ships.
   const dir = join(homedir(), '.local', 'share', 'jbot-companion');
   const path = join(dir, 'signing-key.pem');
   // The public half sits beside it as a file the operator can copy off this
