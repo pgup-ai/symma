@@ -113,13 +113,19 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async mintPairingCode(owner) {
       const code = newPairingCode();
       // Supersede rather than queue: several live codes for one member is
-      // several chances for the wrong one to land. The CTE is unreferenced on
-      // purpose — a data-modifying WITH always runs — which is what keeps the
-      // delete and the insert one statement instead of a transaction.
+      // several chances for the wrong one to land. Upsert on the unique
+      // `user_id` rather than delete-then-insert, so two mints racing leave one
+      // row rather than each finding nothing to delete and inserting its own.
+      //
+      // Whether the member is still one is redeem's question, not this one —
+      // same as a token, which is minted once and checked at every use.
       await pool.query(
-        `WITH superseded AS (DELETE FROM pairings WHERE user_id = $2)
-         INSERT INTO pairings (code_hash, user_id, expires_at)
-         VALUES ($1, $2, now() + make_interval(mins => $3))`,
+        `INSERT INTO pairings (code_hash, user_id, expires_at)
+         VALUES ($1, $2, now() + make_interval(mins => $3))
+         ON CONFLICT (user_id) DO UPDATE
+            SET code_hash = EXCLUDED.code_hash,
+                expires_at = EXCLUDED.expires_at,
+                consumed_at = NULL`,
         [hashToken(normalizeCode(code)), owner, PAIRING_TTL_MINUTES],
       );
       return code;
@@ -128,10 +134,16 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       const hash = hashToken(normalizeCode(code));
       // The claim is the UPDATE: its WHERE is re-checked against the committed
       // row once it holds the lock, so of two racing redeems exactly one wins.
+      //
+      // Joined to `users` because deactivation is a soft delete — the row stays,
+      // so the cascade never reaches the code, and a removed member's
+      // outstanding code would still name them.
       const won = await one<{ user_id: string }>(
-        `UPDATE pairings SET consumed_at = now()
-          WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
-          RETURNING user_id`,
+        `UPDATE pairings p SET consumed_at = now()
+           FROM users u
+          WHERE u.id = p.user_id AND u.deactivated_at IS NULL
+            AND p.code_hash = $1 AND p.consumed_at IS NULL AND p.expires_at > now()
+          RETURNING p.user_id`,
         [hash],
       );
       if (won) return { ok: true, owner: won.user_id };
@@ -323,6 +335,8 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
              FROM workspaces w
             WHERE w.id = u.workspace_id AND w.slack_team_id = $1 AND u.slack_user_id = $2
            RETURNING u.id
+         ), unpaired AS (
+           DELETE FROM pairings WHERE user_id IN (SELECT id FROM target)
          ), revoked AS (
            UPDATE tokens SET revoked_at = now()
             WHERE revoked_at IS NULL

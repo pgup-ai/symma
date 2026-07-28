@@ -919,8 +919,45 @@ describe('tenancy', () => {
       const second = await store.mintPairingCode(ora.owner);
       assert.deepEqual(await store.redeemPairingCode(first), { ok: false, why: 'unknown' });
       assert.deepEqual(await store.redeemPairingCode(second), { ok: true, owner: ora.owner });
+
+      // And when the two clicks overlap. Delete-then-insert let both find
+      // nothing to delete and insert their own; the unique user_id is what
+      // makes the second an update instead.
+      const [a, b] = await Promise.all([
+        store.mintPairingCode(ora.owner),
+        store.mintPairingCode(ora.owner),
+      ]);
+      const live = [await store.redeemPairingCode(a), await store.redeemPairingCode(b)];
+      assert.deepEqual(
+        live.filter((r) => r.ok),
+        [{ ok: true, owner: ora.owner }],
+      );
     } finally {
       await pool.end();
+      await store.close();
+    }
+  });
+
+  it('stops honouring a code once its member is deactivated', async () => {
+    // Deactivation is a soft delete, so the users row stays and the cascade
+    // never reaches the code. Without the join it outlives the member's tokens
+    // and endpoints and still names them.
+    const url = pg.getConnectionUri();
+    const sev = await provision(url, { team: 'pair', slackUser: 'sev', endpoint: 'sev-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      const code = await store.mintPairingCode(sev.owner);
+      await store.deactivateUser('pair', 'sev');
+      // Gone with the tokens, not merely ignored — deactivation removes the
+      // credential the way it revokes the others.
+      assert.deepEqual(await store.redeemPairingCode(code), { ok: false, why: 'unknown' });
+
+      // And a code minted after the fact is still refused, which is the half
+      // deleting on deactivation cannot cover: a queued Slack event or an
+      // operator working from a stale list mints against a member who is gone.
+      const late = await store.mintPairingCode(sev.owner);
+      assert.deepEqual(await store.redeemPairingCode(late), { ok: false, why: 'spent' });
+    } finally {
       await store.close();
     }
   });
