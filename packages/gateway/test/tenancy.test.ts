@@ -573,10 +573,12 @@ describe('tenancy', () => {
     }
   });
 
-  it('scopes session id reuse to one endpoint, so tenants cannot collide', async () => {
-    // Both ids come from the caller. A global key made their choices a shared
-    // namespace: one tenant reusing an id blocked another, and with ~32 bits of
-    // entropy that is a birthday problem rather than an attack.
+  it('refuses a session id that is already recorded', async () => {
+    // The id is the journal's filename as well as this row's key, so it has to
+    // stay globally unique — two rows addressing one file would let either
+    // owner read and delete the other's frames. That makes a cross-tenant
+    // collision a refusal rather than a leak: the wrong trade to reverse, and
+    // the real fix is a server-assigned identity, not a looser key here.
     const url = pg.getConnectionUri();
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const session = (endpoint: string, runId: string) => ({
@@ -587,26 +589,13 @@ describe('tenancy', () => {
     });
     try {
       await store.recordSession(session('frank-laptop', 'run-same'));
-
-      // Another tenant, same id and same run: no conflict, and each sees only
-      // its own. Under a global key this refused.
-      await store.recordSession(session('gina-box', 'run-same'));
+      await assert.rejects(store.recordSession(session('gina-box', 'run-same')));
+      await assert.rejects(store.recordSession(session('frank-laptop', 'run-other')));
       assert.equal(await store.sessionBelongsTo('u-tee-frank', 'run-same', 'sid-shared'), true);
-      assert.equal(await store.sessionBelongsTo('u-shared-gina', 'run-same', 'sid-shared'), true);
-      assert.equal(await store.sessionBelongsTo('u-shared-hank', 'run-same', 'sid-shared'), false);
+      assert.equal(await store.sessionBelongsTo('u-shared-gina', 'run-same', 'sid-shared'), false);
 
-      // The same owner reusing it is still a conflict, which is what stops a
-      // stale row authorizing new frames.
-      await assert.rejects(store.recordSession(session('frank-laptop', 'run-same')));
-
-      // And releasing it takes the whole key, not just the id.
       await store.deleteSessionRow('sid-shared', 'run-same', 'frank-laptop');
       assert.equal(await store.sessionBelongsTo('u-tee-frank', 'run-same', 'sid-shared'), false);
-      assert.equal(
-        await store.sessionBelongsTo('u-shared-gina', 'run-same', 'sid-shared'),
-        true,
-        "gina's row survived frank's delete",
-      );
     } finally {
       await store.close();
     }
@@ -633,30 +622,13 @@ describe('tenancy', () => {
         [],
       );
 
-      // Another tenant's stale session, same id. Keying the live set on ids
-      // alone would shield it from ever expiring — the row is scoped by
-      // endpoint, so the exclusion has to be too.
-      await store.recordSession({
-        id: 'sid-running',
-        runId: 'run-running',
-        endpoint: 'hank-box',
-        agent: 'kilo',
-      });
-      await ageSession(url, 'sid-running', 40);
+      // A different session, live elsewhere, must not shield this one.
       assert.deepEqual(
         await store.expireSessions(30, [
-          { endpoint: 'gina-box', runId: 'run-running', sessionId: 'sid-running' },
+          { endpoint: 'gina-box', runId: 'run-other', sessionId: 'sid-elsewhere' },
         ]),
         [{ runId: 'run-running', sessionId: 'sid-running' }],
       );
-      assert.equal(
-        await store.sessionBelongsTo('u-shared-gina', 'run-running', 'sid-running'),
-        true,
-        "gina's live session was not swept with it",
-      );
-      assert.deepEqual(await store.expireSessions(30, []), [
-        { runId: 'run-running', sessionId: 'sid-running' },
-      ]);
     } finally {
       await store.close();
     }

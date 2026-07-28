@@ -40,20 +40,20 @@ CREATE TABLE IF NOT EXISTS tokens (
 -- Journal frames stay on disk; this row is what makes a read authorizable,
 -- since a runId and sessionId alone say nothing about who owns them.
 --
--- The key is (endpoint, run, id), not id alone. Both ids come from the caller,
--- so a global key makes their choices a shared namespace: two tenants picking
--- the same one collide, and with ~32 bits of entropy that is a birthday problem
--- rather than an attack. An endpoint belongs to exactly one user, so scoping by
--- it means one tenant's ids can never reach another's.
+-- `id` is the key on its own, and has to stay that way while it is also the
+-- journal's filename, the relay's map key and the stream registry's. Scoping it
+-- per endpoint here alone let two tenants hold rows that address ONE file, so
+-- each could read and delete the other's frames. The caller-chosen id is the
+-- real defect; fixing it means a server-assigned identity across all four, not
+-- relaxing one of them.
 CREATE TABLE IF NOT EXISTS sessions (
-  id          text NOT NULL,
+  id          text PRIMARY KEY,
   run_id      text NOT NULL,
   endpoint_id text NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
   agent       text NOT NULL DEFAULT '',
   model       text,
   started_at  timestamptz NOT NULL DEFAULT now(),
-  ended_at    timestamptz,
-  PRIMARY KEY (endpoint_id, run_id, id)
+  ended_at    timestamptz
 );
 
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);

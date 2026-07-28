@@ -128,9 +128,7 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async recordSession({ id, runId, endpoint, agent, model }) {
       // No ON CONFLICT: a reused id must not silently keep the old row, or the
-      // new session's frames are authorized against whoever owned it last. With
-      // the key scoped per endpoint this can only conflict with the caller's
-      // own earlier session, never another tenant's.
+      // new session's frames are authorized against whoever owned it last.
       await pool.query(
         `INSERT INTO sessions (id, run_id, endpoint_id, agent, model) VALUES ($1, $2, $3, $4, $5)`,
         [id, runId, endpoint, agent, model ?? null],

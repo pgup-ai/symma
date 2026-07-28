@@ -308,13 +308,19 @@ carries no foreign key and no cascade reaches it. Uninstall deletes tokens
 explicitly, and both predicates are qualified by `subject_kind`, because the two
 id spaces are not namespaced against each other.
 
-**`sessions` is keyed `(endpoint, run, id)`, not by id alone.** Both ids come
-from the caller, so a global key makes their choices a shared namespace: one
-tenant's reuse blocks another's, and at ~32 bits of client entropy that is a
-birthday problem rather than an attack. An endpoint belongs to exactly one user,
-so scoping by it means one tenant's ids can never reach another's — and the
-authorization question becomes a `WHERE` clause rather than an owner fetched and
-compared outside.
+**The session id identifies four things, and they have to agree.** It keys the
+`sessions` row, the journal's filename, the relay's live map, and the stream
+registry. Scoping only the first per endpoint was tried and reverted the same
+day: two tenants then held rows addressing one file, so either could read or
+delete the other's frames, and `closeSession` by bare id ended the wrong
+session. Loosening one keyspace while three still assume global uniqueness is
+strictly worse than the collision it avoids.
+
+So the id stays globally unique, and a cross-tenant collision is a refusal
+rather than a leak — a liveness cost, bounded by the caller's ~32 bits of
+entropy. **The real defect is that the caller names it at all**, and the fix is
+a server-assigned identity applied across all four at once. That is its own
+change, not a schema tweak.
 
 ## 2. Pairing and onboarding — the product
 
