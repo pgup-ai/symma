@@ -340,10 +340,28 @@ The consequence is worth stating rather than engineering around: **the companion
 runs while its owner is logged in.** Log out and it stops. That is the same
 boundary that keeps the credentials on the machine, seen from the other side.
 
-`RunAtLoad` plus `KeepAlive` covers crash and reboot. Everything below that is
-already built and needs no M3 work: the companion reconnects with exponential
-backoff (1s→30s, reset on success) and both legs hold a 60s resume window, so a
-wifi blip does not kill an in-flight review.
+`RunAtLoad` plus `KeepAlive` covers crash and reboot. Reconnect needs no M3 work
+either: the companion backs off exponentially (1s→30s, reset on success) and both
+legs hold a 60s resume window, so a wifi blip does not kill an in-flight review.
+
+**One transport gap does need closing, and it is the same gap twice.** The
+gateway sends SSE heartbeats every 25s, but nothing on the companion side reads
+them — `connectOnce()` returns when the stream ends, and a half-open TCP
+connection never ends. A sleeping laptop whose NAT entry expired sends no FIN, so
+the companion sits believing it is attached while the gateway sees nothing, and
+does not reconnect until something else forces it. Track last-byte-received and
+drop the connection past ~2.5 heartbeats; the existing backoff loop does the
+rest.
+
+This is the one thing WebSocket ping/pong would have given for free, and it is
+worth naming as _that_ rather than as an argument for switching. M2 chose the
+SSE + NDJSON pair for reasons that still hold — both halves already
+production-tested, no new dependency in the two published packages, resume and
+journal-replay semantics built against it — and set the revisit trigger at
+sub-frame latency or binary frames, which ACP does not need. A liveness timer is
+a few lines against a proven transport. Swapping transports to obtain one would
+re-test resume, drain, backpressure and journaling to end up where a timer
+already gets us.
 
 **A closed laptop is not running anything.** No supervisor changes that. The two
 technical escapes both lose: clamshell dictates the member's desk, and a
