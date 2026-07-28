@@ -7,6 +7,8 @@ import {
   isSafeId,
   parseEnvelope,
   parseRelayControl,
+  type AckControl,
+  type RefusalCode,
   readNdjsonBody,
   type ObserverEnvelope,
 } from '@symma/protocol';
@@ -269,6 +271,14 @@ async function handleSessionIngest(
   const { overflow } = await readNdjsonBody(req, async (line) => {
     const control = parseRelayControl(line);
     if (control?.kind === 'open' && control.sessionId === sid) {
+      // Ownership before the write. The reserve below names the endpoint the
+      // caller asked for, so checking it only in openSession lets a caller
+      // insert a row against someone else's endpoint — which then blocks that
+      // id for its real owner and shows up in their listing.
+      if (relay.endpointOwner(control.endpoint) !== owner) {
+        refuseToSender(sid, owner, 'offline', 'endpoint offline');
+        return;
+      }
       // Reserve before dispatching. The insert is what rejects a reused id, and
       // until it lands the session is open, the companion has the open, and a
       // frame later in this same body would journal into whoever owned that id
@@ -293,19 +303,7 @@ async function handleSessionIngest(
             }`,
           );
           if (!duplicate) throw error;
-          // Only down a leg this caller holds. sendToSession resolves whichever
-          // stream is registered, and on a duplicate id that is the existing
-          // owner's — whose client reads a refusal as its own session failing.
-          if (sessionStreamOwners.get(sid) === owner) {
-            sendToSession(sid)(
-              JSON.stringify({
-                kind: 'refused',
-                sessionId: sid,
-                code: 'session_in_use',
-                reason: 'session id in use',
-              }),
-            );
-          }
+          refuseToSender(sid, owner, 'session_in_use', 'session id in use');
           return;
         }
       }
@@ -504,6 +502,17 @@ function handleStream(res: ServerResponse, runId: string, sessionId: string): vo
  * clients connect their leg before sending the open — so it cannot be a
  * refusal, and `openSession` is what authorizes the open itself. */
 const sessionStreamOwners = new Map<string, Owner>();
+
+/** A refusal the relay never saw, so it has no clientSend to use. Goes out only
+ * down a leg this caller holds: sendToSession resolves whichever stream is
+ * registered, and for a contested id that is someone else's — whose client
+ * reads any refusal as its own session failing. */
+function refuseToSender(sid: string, owner: Owner, code: RefusalCode, reason: string): void {
+  if (sessionStreamOwners.get(sid) !== owner) return;
+  sendToSession(sid)(
+    JSON.stringify({ kind: 'refused', sessionId: sid, code, reason } satisfies AckControl),
+  );
+}
 
 function maySession(owner: Owner, sessionId: string): boolean {
   // Before the open there is no relay owner, so the leg itself is the claim:

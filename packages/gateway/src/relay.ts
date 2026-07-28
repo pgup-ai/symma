@@ -142,6 +142,11 @@ export function createRelay(options: RelayOptions = {}) {
       if (session) disarm(session, 'clientResume');
     },
 
+    /** Who an attached endpoint belongs to; undefined if it is not attached. */
+    endpointOwner(endpoint: string): string | undefined {
+      return endpoints.get(endpoint)?.owner;
+    },
+
     /** Undefined while no session by that id is open, which is the normal state
      * when a client connects its leg before sending the open. */
     sessionOwner(sessionId: string): string | undefined {

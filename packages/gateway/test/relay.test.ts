@@ -266,4 +266,14 @@ describe('relay', () => {
     relay.closeSession('sid-1', 'done');
     assert.deepEqual(relay.liveSessionIds(), []);
   });
+
+  it('reports who an attached endpoint belongs to', () => {
+    // The gateway checks this before writing a session row, so a caller cannot
+    // reserve an id against an endpoint it does not own.
+    const relay = createRelay();
+    assert.equal(relay.endpointOwner('laptop'), undefined, 'not attached');
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    assert.equal(relay.endpointOwner('laptop'), OWNER);
+    assert.equal(relay.endpointOwner('someone-elses'), undefined);
+  });
 });

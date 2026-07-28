@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -206,6 +206,11 @@ describe('gateway', () => {
         });
       frame('run-a', 'sid-a');
       frame('run-b', 'sid-b');
+      // Backdated explicitly: expiring at zero days races the mtime the file
+      // was written with a moment earlier.
+      const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+      utimesSync(journalPath(dir, 'run-a', 'sid-a'), old, old);
+      utimesSync(journalPath(dir, 'run-b', 'sid-b'), old, old);
       const store = localStore('secret', new Map([['box', 'endpoint-secret']]), () =>
         listJournals(dir),
       );
@@ -221,17 +226,17 @@ describe('gateway', () => {
         store.ownerForSession('run-a', 'nope').then((o) => assert.equal(o, undefined)),
         // Retention runs here too — this was skipped entirely without a database.
         store
-          .expireSessions(0, [])
+          .expireSessions(31, [])
           .then((doomed) =>
             assert.deepEqual(doomed.map((d) => d.sessionId).sort(), ['sid-a', 'sid-b']),
           ),
-        store.expireSessions(0, ['sid-a']).then((doomed) =>
+        store.expireSessions(31, ['sid-a']).then((doomed) =>
           assert.deepEqual(
             doomed.map((d) => d.sessionId),
             ['sid-b'],
           ),
         ),
-        store.expireSessions(30, []).then((doomed) => assert.deepEqual(doomed, [])),
+        store.expireSessions(90, []).then((doomed) => assert.deepEqual(doomed, [])),
         // And delete reports what it removed, so the caller ends the session.
         store
           .deleteSession('local', 'run-a', 'sid-a')
