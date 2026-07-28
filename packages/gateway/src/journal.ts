@@ -96,6 +96,32 @@ export function deleteJournal(dataDir: string, runId: string, sessionId: string)
   rmSync(journalPath(dataDir, runId, sessionId), { force: true });
 }
 
+/** The other half of every lifecycle delete: the store's methods return the
+ * sessions they removed, and their frames are on disk, so a caller that keeps
+ * only the rows leaves files no retention sweep can still reach — it joins
+ * sessions, and those rows are gone.
+ *
+ * Returns the ones it could not remove, for the caller to log. They are past
+ * authorization and retention both, and nothing here can fix that. */
+export function deleteJournals(
+  dataDir: string,
+  sessions: { runId: string; sessionId: string }[],
+): { runId: string; sessionId: string; reason: string }[] {
+  const orphans = [];
+  for (const { runId, sessionId } of sessions) {
+    try {
+      deleteJournal(dataDir, runId, sessionId);
+    } catch (error) {
+      orphans.push({
+        runId,
+        sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return orphans;
+}
+
 /** Newest-first run listing from the plain directory layout — no index, no DB.
  * fs errors on any single run are skipped, never thrown, so one bad directory
  * can't take down the listing (or the gateway). */

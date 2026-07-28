@@ -218,8 +218,13 @@ describe('gateway', () => {
         frame(runId, sessionId);
         utimesSync(journalPath(dir, runId, sessionId), old, old);
       }
-      const store = localStore('secret', new Map([['box', 'endpoint-secret']]), () =>
-        listJournals(dir),
+      // Failed before its first ACP session: a status and no journal at all.
+      writeRunStatus(dir, { v: 1, kind: 'run', runId: 'run-early', status: 'failed', ts: 1 });
+      const store = localStore(
+        'secret',
+        new Map([['box', 'endpoint-secret']]),
+        () => listJournals(dir),
+        () => listRuns(dir).map((r) => r.runId),
       );
 
       await Promise.all([
@@ -231,6 +236,12 @@ describe('gateway', () => {
           .then((e) => assert.deepEqual(e, { endpoint: 'box', owner: 'local' })),
         store.sessionBelongsTo('local', 'run-a', 'sid-a').then((ok) => assert.equal(ok, true)),
         store.sessionBelongsTo('local', 'run-a', 'nope').then((ok) => assert.equal(ok, false)),
+        // Ownership spans every run on disk, not just those with journals: the
+        // viewer filters its listing through this, so a run that failed before
+        // its first session would be the one failure nobody could open.
+        store
+          .runsFor('local')
+          .then((runs) => assert.deepEqual([...runs].sort(), ['run-a', 'run-b', 'run-early'])),
         // Retention runs here too — this was skipped entirely without a database.
         store
           .expireSessions(31, [])

@@ -16,7 +16,7 @@ import {
 
 import {
   appendEnvelope,
-  deleteJournal,
+  deleteJournals,
   journalPath,
   listJournals,
   listRuns,
@@ -614,7 +614,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
   if (req.method === 'GET' && url.pathname === '/api/runs') {
-    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
     // Runs the caller owns, intersected with what is on disk — a run with no
     // session row belongs to nobody and is listed by nobody.
     const mine = await store.runsFor(owner);
@@ -640,6 +639,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         );
       }
     }
+    // Only now: a store failure above still has to be able to answer 500, and
+    // once the head is out the outer handler can only end a 200 mid-body.
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
     res.end(JSON.stringify(runs));
     return;
   }
@@ -816,17 +818,10 @@ function journalsUpdatedAt(
 }
 
 function forgetSessions(doomed: SessionRef[]): void {
-  for (const { runId, sessionId } of doomed) {
-    try {
-      deleteJournal(dataDir, runId, sessionId);
-    } catch (error) {
-      // The row is already gone, so this file now sits outside authorization
-      // and retention both. Nothing here can fix it; it must not be silent.
-      log(
-        `orphaned journal ${runId}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
+  // Loud, never silent: the row is already gone, so a file left here sits
+  // outside authorization and retention both.
+  for (const orphan of deleteJournals(dataDir, doomed))
+    log(`orphaned journal ${orphan.runId}/${orphan.sessionId}: ${orphan.reason}`);
 }
 
 // Fail to start rather than start unscoped: a gateway told to use a database it
@@ -834,7 +829,12 @@ function forgetSessions(doomed: SessionRef[]): void {
 // tenant's journals to whoever asked.
 store = databaseUrl
   ? await openStore(databaseUrl, fileURLToPath(new URL('./schema.sql', import.meta.url)))
-  : localStore(token, endpointTokens, () => listJournals(dataDir));
+  : localStore(
+      token,
+      endpointTokens,
+      () => listJournals(dataDir),
+      () => listRuns(dataDir).map((r) => r.runId),
+    );
 
 /** Destroy, not end: a revocation is a shutdown, and a half-closed response
  * still leaves the peer's request body streaming in. Cleanup runs off `close`,
@@ -842,7 +842,17 @@ store = databaseUrl
 function dropRevokedLegs(): void {
   void (async () => {
     for (const [res, leg] of heldLegs) {
-      if (await leg.admits()) continue;
+      // Caught per leg, not per sweep: one unreachable-database rejection must
+      // not skip every leg after it in iteration order, which is a revocation
+      // deferred to the next tick with nothing to say it was. Fail open and
+      // retry there — the same contract retention runs under.
+      const admitted = await leg.admits().catch((error: unknown) => {
+        log(
+          `recheck for ${leg.what} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return true;
+      });
+      if (admitted) continue;
       log(`${leg.what} is no longer authorized; dropping`);
       res.destroy();
     }

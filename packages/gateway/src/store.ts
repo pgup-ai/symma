@@ -359,6 +359,11 @@ export function localStore(
   endpointTokens: Map<string, string>,
   /** Every journal on disk, with its mtime — the filesystem is the index. */
   journals: () => { runId: string; sessionId: string; mtimeMs: number }[],
+  /** Every run on disk. Not derivable from `journals`: a run that failed before
+   * its first ACP session has a status and no journals, and still has to be
+   * discoverable — deriving ownership from the journals alone hid exactly the
+   * failures a viewer is opened to look at. */
+  runsOnDisk: () => string[],
 ): Store {
   const LOCAL = 'local';
   const matches = (presented: string, expected: string): boolean => {
@@ -383,7 +388,7 @@ export function localStore(
       Promise.resolve(
         owner === LOCAL && journals().some((j) => j.runId === runId && j.sessionId === sessionId),
       ),
-    runsFor: () => Promise.resolve(new Set(journals().map((j) => j.runId))),
+    runsFor: () => Promise.resolve(new Set(runsOnDisk())),
     sessionsByRun: (_owner, runIds) => {
       const byRun = new Map<string, Set<string>>();
       for (const j of journals()) {
