@@ -20,6 +20,9 @@ export interface Store {
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   ownerForSession(runId: string, sessionId: string): Promise<Owner | undefined>;
   runsFor(owner: Owner): Promise<Set<string>>;
+  /** Sessions of `runId` this owner may see. A runId is caller-chosen, so two
+   * tenants can land in one run directory; the listing must not leak across. */
+  sessionsIn(owner: Owner, runId: string): Promise<Set<string>>;
   recordSession(session: {
     id: string;
     runId: string;
@@ -28,6 +31,9 @@ export interface Store {
     model?: string;
   }): Promise<void>;
   markSeen(endpoint: string): Promise<void>;
+  /** For an open the companion went on to refuse: the row outlives the relay's
+   * in-memory session otherwise, and blocks the id from ever being reused. */
+  deleteSessionRow(id: string): Promise<void>;
   /** §1 data lifecycle. Each returns the sessions whose frames the caller must
    * now delete from disk — the row and the file are one unit, and only the
    * caller knows where the files live. */
@@ -87,10 +93,22 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return new Set(rows.map((r: { run_id: string }) => r.run_id));
     },
+    async sessionsIn(owner, runId) {
+      const { rows } = await pool.query(
+        `SELECT s.id FROM sessions s JOIN endpoints e ON e.id = s.endpoint_id
+          WHERE s.run_id = $1 AND e.user_id = $2`,
+        [runId, owner],
+      );
+      return new Set(rows.map((r: { id: string }) => r.id));
+    },
+    async deleteSessionRow(id) {
+      await pool.query(`DELETE FROM sessions WHERE id = $1`, [id]);
+    },
     async recordSession({ id, runId, endpoint, agent, model }) {
+      // No ON CONFLICT: a reused id must not silently keep the old row, or the
+      // new session's frames are authorized against whoever owned it last.
       await pool.query(
-        `INSERT INTO sessions (id, run_id, endpoint_id, agent, model)
-         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING`,
+        `INSERT INTO sessions (id, run_id, endpoint_id, agent, model) VALUES ($1, $2, $3, $4, $5)`,
         [id, runId, endpoint, agent, model ?? null],
       );
     },
@@ -164,18 +182,21 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       // with them. Leaving the files behind would strand them: no row means no
       // API path reaches them and retention, which reads sessions.started_at,
       // never finds them either.
-      const doomed = refs(
-        await pool.query(
-          `SELECT s.id, s.run_id FROM sessions s
-             JOIN endpoints e ON e.id = s.endpoint_id
-             JOIN users u ON u.id = e.user_id
-             JOIN workspaces w ON w.id = u.workspace_id
-            WHERE w.slack_team_id = $1 AND u.slack_user_id = $2`,
-          [slackTeamId, slackUserId],
-        ),
-      );
-      await pool.query(
-        `WITH target AS (
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const doomed = refs(
+          await client.query(
+            `SELECT s.id, s.run_id FROM sessions s
+               JOIN endpoints e ON e.id = s.endpoint_id
+               JOIN users u ON u.id = e.user_id
+               JOIN workspaces w ON w.id = u.workspace_id
+              WHERE w.slack_team_id = $1 AND u.slack_user_id = $2`,
+            [slackTeamId, slackUserId],
+          ),
+        );
+        await client.query(
+          `WITH target AS (
            UPDATE users u SET deactivated_at = now()
              FROM workspaces w
             WHERE w.id = u.workspace_id AND w.slack_team_id = $1 AND u.slack_user_id = $2
@@ -187,9 +208,16 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
                 OR subject_id IN (SELECT id FROM endpoints WHERE user_id IN (SELECT id FROM target)))
          )
          DELETE FROM endpoints WHERE user_id IN (SELECT id FROM target)`,
-        [slackTeamId, slackUserId],
-      );
-      return doomed;
+          [slackTeamId, slackUserId],
+        );
+        await client.query('COMMIT');
+        return doomed;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
     },
     close: () => pool.end(),
   };

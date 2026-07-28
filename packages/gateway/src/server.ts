@@ -241,6 +241,14 @@ async function handleEndpointIngest(
         storeWrite(`markSeen ${id}`, store?.markSeen(id));
       } else if (control.kind === 'opened' || control.kind === 'refused') {
         relay.endpointAck(id, control, line);
+        // The relay accepted this open before the companion saw it; a refusal
+        // now leaves a row with no session, which both shows as an empty run
+        // and blocks the id from being opened again.
+        if (control.kind === 'refused')
+          storeWrite(
+            `deleteSessionRow ${control.sessionId}`,
+            store?.deleteSessionRow(control.sessionId),
+          );
       } else if (control.kind === 'close') {
         relay.endpointClose(id, control.sessionId, control.reason ?? 'closed by endpoint');
       }
@@ -264,6 +272,15 @@ async function handleSessionIngest(
     const control = parseRelayControl(line);
     if (control?.kind === 'open' && control.sessionId === sid) {
       relay.openSession(control, sendToSession(sid), owner);
+      // A leg registered before the open is unowned by construction, and
+      // sendToSession resolves it at send time — so whoever holds it when the
+      // open lands becomes the target. Evict a stranger's; the opener
+      // reconnects, and `maySession` keeps them out from here on.
+      if (relay.sessionRun(sid) && sessionStreamOwners.get(sid) !== owner) {
+        sessionStreams.get(sid)?.end();
+        sessionStreams.delete(sid);
+        sessionStreamOwners.delete(sid);
+      }
       // Only a session the relay accepted may leave a row. A refused open that
       // recorded one would put a run in its owner's listing whose journal never
       // existed, and every read of it 404s.
@@ -469,6 +486,8 @@ function handleStream(res: ServerResponse, runId: string, sessionId: string): vo
 /** A live session belongs to whoever opened it. Unknown means not open yet —
  * clients connect their leg before sending the open — so it cannot be a
  * refusal, and `openSession` is what authorizes the open itself. */
+const sessionStreamOwners = new Map<string, Owner>();
+
 function maySession(owner: Owner, sessionId: string): boolean {
   const held = relay.sessionOwner(sessionId);
   return held === undefined || held === owner;
@@ -526,7 +545,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Runs the caller owns, intersected with what is on disk — a run with no
     // session row belongs to nobody and is listed by nobody.
     const mine = store ? await store.runsFor(owner) : undefined;
-    res.end(JSON.stringify(listRuns(dataDir).filter((r) => !mine || mine.has(r.runId))));
+    const runs = listRuns(dataDir).filter((r) => !mine || mine.has(r.runId));
+    // A runId is caller-chosen, so two tenants can share one run directory and
+    // the listing would name the other's sessions. Filter inside the run too.
+    if (store) {
+      for (const run of runs) {
+        const owned = await store.sessionsIn(owner, run.runId);
+        run.sessions = run.sessions.filter((sid) => owned.has(sid));
+      }
+    }
+    res.end(JSON.stringify(runs));
     return;
   }
   if (req.method === 'GET' && url.pathname === '/api/endpoints') {
@@ -554,7 +582,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // arm it again if this leg drops — symmetric with the endpoint side, so a
       // blip or the SIGTERM drain doesn't kill the session outright.
       relay.attachClient(sid);
-      registerPeerStream(sessionStreams, sid, res, () => relay.detachClient(sid));
+      sessionStreamOwners.set(sid, owner);
+      registerPeerStream(sessionStreams, sid, res, () => {
+        relay.detachClient(sid);
+        if (sessionStreams.get(sid) === undefined) sessionStreamOwners.delete(sid);
+      });
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
@@ -667,7 +699,17 @@ process.on('SIGTERM', () => {
 /** Frames and their row are one unit; deleting either alone leaves a journal
  * nobody can reach or a row pointing at nothing. */
 function forgetSessions(doomed: SessionRef[]): void {
-  for (const { runId, sessionId } of doomed) deleteJournal(dataDir, runId, sessionId);
+  for (const { runId, sessionId } of doomed) {
+    try {
+      deleteJournal(dataDir, runId, sessionId);
+    } catch (error) {
+      // The row is already gone, so this file now sits outside authorization
+      // and retention both. Nothing here can fix it; it must not be silent.
+      log(
+        `orphaned journal ${runId}/${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
 }
 
 // Fail to start rather than start unscoped: a gateway that cannot reach its

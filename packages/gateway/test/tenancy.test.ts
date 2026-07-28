@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
+import { Pool } from 'pg';
 
 import { appendEnvelope, deleteJournal, readJournalLines } from '../src/journal.js';
 import { openStore, provision } from '../src/store.js';
@@ -77,9 +78,6 @@ after(async () => {
 
 /** Backdates a session so retention has something old to find. */
 const ageSession = async (url: string, sessionId: string, days: number): Promise<void> => {
-  const admin = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
-  await admin.close();
-  const { Pool } = await import('pg');
   const pool = new Pool({ connectionString: url });
   await pool.query(
     `UPDATE sessions SET started_at = now() - make_interval(days => $2) WHERE id = $1`,
@@ -471,5 +469,77 @@ describe('tenancy', () => {
       }),
       /already belongs to/,
     );
+  });
+
+  it('keeps a shared run id from leaking session ids across owners', async () => {
+    // runId is caller-chosen, so two tenants can land in one run directory and
+    // listRuns returns every journal filename in it.
+    const url = pg.getConnectionUri();
+    const gina = await provision(url, { team: 'shared', slackUser: 'gina', endpoint: 'gina-box' });
+    const hank = await provision(url, { team: 'shared', slackUser: 'hank', endpoint: 'hank-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      for (const [sid, endpoint] of [
+        ['sid-gina', 'gina-box'],
+        ['sid-hank', 'hank-box'],
+      ] as const) {
+        appendEnvelope(dataDir, {
+          v: 1,
+          runId: 'run-shared',
+          sessionId: sid,
+          seq: 1,
+          ts: 1,
+          agent: 'kilo',
+          label: 'l',
+          dir: 'out',
+          frame: {},
+        });
+        await store.recordSession({ id: sid, runId: 'run-shared', endpoint, agent: 'kilo' });
+      }
+      const seen = async (token: string): Promise<string[]> =>
+        (
+          (await (await as(token, '/api/runs')).json()) as { runId: string; sessions: string[] }[]
+        ).find((r) => r.runId === 'run-shared')!.sessions;
+      assert.deepEqual(await seen(gina.clientToken), ['sid-gina']);
+      assert.deepEqual(await seen(hank.clientToken), ['sid-hank']);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('refuses to reuse a session id whose row outlived it', async () => {
+    // ON CONFLICT DO NOTHING kept the old row, so a reused id left the new
+    // session authorized against whoever owned it last.
+    const url = pg.getConnectionUri();
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      await store.recordSession({
+        id: 'sid-reused',
+        runId: 'run-one',
+        endpoint: 'frank-laptop',
+        agent: 'kilo',
+      });
+      await assert.rejects(
+        store.recordSession({
+          id: 'sid-reused',
+          runId: 'run-two',
+          endpoint: 'gina-box',
+          agent: 'kilo',
+        }),
+      );
+      // Still the first owner's, not silently reattributed to the second.
+      assert.equal(await store.ownerForSession('run-two', 'sid-reused'), undefined);
+      // And a refused open frees the id rather than blocking it forever.
+      await store.deleteSessionRow('sid-reused');
+      await store.recordSession({
+        id: 'sid-reused',
+        runId: 'run-two',
+        endpoint: 'gina-box',
+        agent: 'kilo',
+      });
+      assert.equal(await store.ownerForSession('run-two', 'sid-reused'), 'u-shared-gina');
+    } finally {
+      await store.close();
+    }
   });
 });
