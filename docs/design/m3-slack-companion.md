@@ -223,13 +223,13 @@ reconnect — it never runs the request on someone else's machine.
 
 ### Failure modes, all of which need words not stack traces
 
-| case                        | behaviour                                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| code expired / already used | "That code expired — run **Connect my agent** for a new one."                                                             |
-| no agents detected          | install links for supported agents; do not attach an endpoint with zero agents                                            |
-| laptop sleeps or closes     | bot says the companion is offline and offers to retry — never a silent hang. **Expect this to be the top support issue.** |
-| companion killed            | same as offline; the login service restarts it at next boot                                                               |
-| two devices                 | both attach; member picks a default, per-session override available                                                       |
+| case                        | behaviour                                                                                                                                                      |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| code expired / already used | "That code expired — run **Connect my agent** for a new one."                                                                                                  |
+| no agents detected          | install links for supported agents; do not attach an endpoint with zero agents                                                                                 |
+| laptop sleeps or closes     | bot names it as sleep, not failure, and queues the request for wake — never a silent hang. §3 "Staying attached". **Expect this to be the top support issue.** |
+| companion killed            | distinguishable from sleep: the shutdown path sends a deliberate close. The login service restarts it at next login                                            |
+| two devices                 | both attach; member picks a default, per-session override available                                                                                            |
 
 ## 3. Companion
 
@@ -246,7 +246,9 @@ symma` is secondary for the Node crowd and nearly free from the same codebase.
   by us, and without self-update every protocol change compounds into a
   permanent compatibility tax.
 - **Login service** — launchd user agent on macOS, systemd user unit on Linux.
-  "Keep this terminal open" is where non-technical users fall off.
+  "Keep this terminal open" is where non-technical users fall off. See
+  "Staying attached" below for why it is a _user_ service and what it cannot
+  cover.
 
 **`curl | sh` plus self-update is a supply-chain boundary, so it needs the
 supply-chain treatment.** We are asking non-technical people to run our script
@@ -271,6 +273,74 @@ long-lived by definition, so the trigger has fired:
 
 Invariant 11 already says compromise means shutdown and token rotation, which is
 not a thing you can honour without a rotation path.
+
+### Staying attached
+
+Two halves, and only one of them is solvable. Supervision is packaging. Sleep is
+physics, and pretending otherwise is how this becomes the top support issue §2
+already predicts.
+
+**The service is a _user_ service, and that is load-bearing.** On macOS a
+launchd **LaunchAgent**, not a LaunchDaemon; on Linux a systemd **user** unit
+with `loginctl enable-linger` as a deliberate opt-in, not a system unit. The
+whole premise is that the agent runs on the machine's ambient auth — kilo's
+`auth.json`, `~/.codex`, the login keychain. A root daemon starting before login
+cannot see any of it, and a design that reaches for one has quietly decided to
+put credentials somewhere else.
+
+The consequence is worth stating rather than engineering around: **the companion
+runs while its owner is logged in.** Log out and it stops. That is the same
+boundary that keeps the credentials on the machine, seen from the other side.
+
+`RunAtLoad` plus `KeepAlive` covers crash and reboot. Everything below that is
+already built and needs no M3 work: the companion reconnects with exponential
+backoff (1s→30s, reset on success) and both legs hold a 60s resume window, so a
+wifi blip does not kill an in-flight review.
+
+**A closed laptop is not running anything.** No supervisor changes that. The two
+technical escapes both lose: clamshell dictates the member's desk, and a
+standing power assertion cooks the battery of a machine in a bag. So the product
+surface is **presence, not uptime** — and the work is that `online: false` is one
+word for situations a member experiences as completely different things.
+
+| what the relay sees                    | what the member is told                  |
+| -------------------------------------- | ---------------------------------------- |
+| attached                               | ready                                    |
+| deliberate goodbye                     | "quit on your Mac — reopen or reconnect" |
+| silent drop, inside the resume window  | nothing; it is already coming back       |
+| silent drop, past it, last seen 4m ago | "asleep — this will run when it wakes"   |
+| never paired, or revoked               | the pairing copy from §2                 |
+
+Sleep and quit are not distinguishable today, and the gap is smaller than it
+looks. `shutdown()` already sends a `close` per live session, so a companion
+that quits mid-review is visible — but an _idle_ one, which is the common case,
+exits silently and looks exactly like a lid closing. Sleep sends no signal at
+all: the process is suspended, not signalled, so nothing can be inferred from
+the companion's side. One control frame on the way out closes it (§7), and a
+last-seen timestamp on the relay's attachment covers the rest.
+
+Cheap, and it buys the difference between "something is broken" and "your laptop
+is asleep" — which is the entire support burden.
+
+**Queue instead of refusing.** Today `openSession` refuses when the endpoint is
+offline. For a member who typed a request and shut the lid, refusing is the
+wrong answer to the right question: hold the request and run it on wake. This is
+the change that turns §2's predicted top issue into a non-event, and it is not
+free — the held request carries a prompt, so it is member content and takes the
+same tenancy scoping and retention rules as everything else in §1's store. Bound
+it with a TTL and a per-user cap, and put the TTL in the copy ("I'll run this
+when your Mac is back, up to 24h") rather than leaving it implicit.
+
+**One narrow power assertion, scoped to a live session** — `caffeinate -i` on
+macOS, an inhibitor on Linux, held only while a session is open. The failure it
+prevents is a review dying halfway because the screen locked, which reads as our
+bug rather than as a sleeping laptop. A blanket assertion is the thing people
+uninstall.
+
+**Not building:** wake-on-LAN, or a "keep my laptop awake" toggle. Both spend the
+member's hardware to paper over a boundary that is honest. Anyone who genuinely
+wants 24/7 runs the same companion on a desktop or VPS — multiple devices
+already attach, and §2 step 6 already has the default-device picker.
 
 ## 4. Conversation model — one DM thread = one conversation
 
@@ -547,7 +617,14 @@ Why each number matters:
    companion runs on someone else's laptop. M2d is the cautionary example —
    signing needed both sides, and we simply deployed both.
 2. **Owner binding** established during pairing and stored server-side.
-3. **Relay control types move** into the shared protocol package — **done**,
+3. **A goodbye control** the companion sends as it exits, so the relay can tell
+   "quit" from "asleep" (§3, "Staying attached"). Sleep is unsignalable by
+   construction — the process is suspended, not notified — so the only way to
+   separate the two is for the deliberate exit to say so. Small, but it has to
+   ride the same `hello.version` negotiation as everything else here: a relay
+   that expects a goodbye from a companion too old to send one is back to
+   guessing, and must degrade to the timestamp rather than mislabel.
+4. **Relay control types move** into the shared protocol package — **done**,
    `@symma/protocol` `relay-control.ts`. Today `src/companion/` and
    `src/shared/acp-remote.ts` both import from `src/gateway/` — the wire
    protocol lives inside one of its three consumers. The observer envelope
@@ -807,8 +884,8 @@ names the origin SHA keeps the provenance without dragging that along.
 | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle                                                                                  | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession` |
 | **M3b** | pairing: codes, `/connect`, token exchange                                                                                                           | a fresh laptop pairs from one command with no config file                                                                                                                |
-| **M3c** | companion: auto-detect, dual distribution, self-update, login service                                                                                | survives reboot; upgrades itself; reports which agents it found and why it skipped others                                                                                |
-| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging | a non-technical tester completes a task from Slack without help                                                                                                          |
+| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                               | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                |
+| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and queue, not a hang or an error          |
 
 M3d's bar is a person, not a passing test. If a tester needs a hand, the
 milestone is not done.
