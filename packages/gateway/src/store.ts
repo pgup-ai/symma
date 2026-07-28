@@ -119,32 +119,45 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
     },
     async deleteWorkspace(slackTeamId) {
-      // Sessions come back before the cascade removes them, so the caller still
-      // learns which files to delete.
-      const doomed = refs(
-        await pool.query(
-          `SELECT s.id, s.run_id FROM sessions s
+      // One transaction: a partial uninstall either strands tokens for a
+      // workspace that is gone or deletes credentials for one that is not.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        // Sessions come back before the cascade removes them, so the caller
+        // still learns which files to delete.
+        const doomed = refs(
+          await client.query(
+            `SELECT s.id, s.run_id FROM sessions s
              JOIN endpoints e ON e.id = s.endpoint_id
              JOIN users u ON u.id = e.user_id
             WHERE u.workspace_id = (SELECT id FROM workspaces WHERE slack_team_id = $1)`,
+            [slackTeamId],
+          ),
+        );
+        // `tokens.subject_id` points at a user or an endpoint, so it carries no
+        // foreign key and the cascade cannot reach it. Left alone, an uninstall
+        // leaves live credentials for a tenant that no longer exists.
+        await client.query(
+          `WITH doomed_users AS (
+             SELECT u.id FROM users u JOIN workspaces w ON w.id = u.workspace_id
+              WHERE w.slack_team_id = $1
+           )
+           DELETE FROM tokens
+            WHERE subject_id IN (SELECT id FROM doomed_users)
+               OR subject_id IN (SELECT id FROM endpoints
+                                  WHERE user_id IN (SELECT id FROM doomed_users))`,
           [slackTeamId],
-        ),
-      );
-      // `tokens.subject_id` points at a user or an endpoint, so it carries no
-      // foreign key and the cascade cannot reach it. Left alone, an uninstall
-      // leaves live credentials for a tenant that no longer exists.
-      await pool.query(
-        `WITH doomed_users AS (
-           SELECT u.id FROM users u JOIN workspaces w ON w.id = u.workspace_id
-            WHERE w.slack_team_id = $1
-         )
-         DELETE FROM tokens
-          WHERE subject_id IN (SELECT id FROM doomed_users)
-             OR subject_id IN (SELECT id FROM endpoints WHERE user_id IN (SELECT id FROM doomed_users))`,
-        [slackTeamId],
-      );
-      await pool.query(`DELETE FROM workspaces WHERE slack_team_id = $1`, [slackTeamId]);
-      return doomed;
+        );
+        await client.query(`DELETE FROM workspaces WHERE slack_team_id = $1`, [slackTeamId]);
+        await client.query('COMMIT');
+        return doomed;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
     },
     async deactivateUser(slackTeamId, slackUserId) {
       // Tokens revoked and endpoints unpaired, but their journals survive: a

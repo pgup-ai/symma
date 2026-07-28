@@ -635,18 +635,22 @@ function forgetSessions(doomed: SessionRef[]): void {
 if (databaseUrl) {
   store = await openStore(databaseUrl, new URL('./schema.sql', import.meta.url).pathname);
   if (retentionDays > 0) {
-    const sweep = async (): Promise<void> => {
-      const doomed = await store!.expireSessions(retentionDays);
-      forgetSessions(doomed);
-      if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+    // A sweep that fails is a promise unkept, not a reason to stop serving —
+    // same fail-open contract as the journal, and identical at boot and on the
+    // interval so a transient database blip does not decide whether we start.
+    const sweep = (): void => {
+      void (async () => {
+        const doomed = await store!.expireSessions(retentionDays);
+        forgetSessions(doomed);
+        if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+      })().catch((error: unknown) =>
+        log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
+      );
     };
-    // Retention is a promise, not an ops chore (§1), so it runs on startup as
-    // well as on the interval — a gateway that restarts often still forgets.
-    await sweep();
-    setInterval(
-      () => void sweep().catch((e: unknown) => log(`retention failed: ${String(e)}`)),
-      RETENTION_SWEEP_MS,
-    ).unref();
+    // Runs at boot as well as on the interval, so a gateway that restarts often
+    // still forgets (§1: retention is a product promise, not an ops chore).
+    sweep();
+    setInterval(sweep, RETENTION_SWEEP_MS).unref();
   }
 }
 

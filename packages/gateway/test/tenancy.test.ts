@@ -57,6 +57,10 @@ before(
         stdio: ['ignore', 'pipe', 'pipe'],
       },
     );
+    // Piped and drained: the gateway logs per attach and refusal, and an unread
+    // pipe eventually blocks it mid-test.
+    gateway.stdout?.resume();
+    gateway.stderr?.resume();
     await waitFor(
       async () => ((await fetch(`${base}/healthz`)).ok ? true : undefined),
       'gateway up',
@@ -86,6 +90,36 @@ const ageSession = async (url: string, sessionId: string, days: number): Promise
 
 const forget = (refs: { runId: string; sessionId: string }[]): void => {
   for (const { runId, sessionId } of refs) deleteJournal(dataDir, runId, sessionId);
+};
+
+/** Runs `act`, then resolves with the first control the gateway pushes to that
+ * session's stream. */
+const onceOnStream = async (
+  token: string,
+  sid: string,
+  act: () => Promise<void>,
+): Promise<{ kind?: string; code?: string }> => {
+  const abort = new AbortController();
+  const res = await fetch(`${base}/api/sessions/${sid}/stream`, {
+    headers: { authorization: `Bearer ${token}` },
+    signal: abort.signal,
+  });
+  const reader = res.body!.getReader();
+  try {
+    await act();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error(`stream for ${sid} ended before a control arrived`);
+      buffer += decoder.decode(value, { stream: true });
+      for (const line of buffer.split('\n')) {
+        if (line.startsWith('data: ')) return JSON.parse(line.slice(6)) as { kind?: string };
+      }
+    }
+  } finally {
+    abort.abort();
+  }
 };
 
 const as = (token: string, path: string, init?: RequestInit): Promise<Response> =>
@@ -129,11 +163,12 @@ describe('tenancy', () => {
       const bobSees = (await (await as(bob.clientToken, '/api/endpoints')).json()) as unknown[];
       assert.deepEqual(bobSees, [], "bob's listing does not include alice's endpoint");
 
-      // 2. Opening a session on it is refused, and refused as `offline` — the
-      //    same answer an endpoint that is merely away gives, so probing tells
-      //    him nothing about whether it exists.
-      const refusal = await waitFor(async () => {
-        const res = await as(bob.clientToken, '/api/sessions/sid-bob/ingest', {
+      // 2. Opening a session on it comes back refused as `offline` — the same
+      //    answer an endpoint that is merely away gives, so probing tells him
+      //    nothing about whether it exists. Read off his own session stream:
+      //    the ingest POST only reports that the line was accepted.
+      const refusal = await onceOnStream(bob.clientToken, 'sid-bob', async () => {
+        await as(bob.clientToken, '/api/sessions/sid-bob/ingest', {
           method: 'POST',
           body: `${JSON.stringify({
             kind: 'open',
@@ -143,9 +178,9 @@ describe('tenancy', () => {
             agent: 'kilo',
           })}\n`,
         });
-        return res.ok ? true : undefined;
-      }, "bob's open is accepted for routing");
-      assert.equal(refusal, true);
+      });
+      assert.equal(refusal.kind, 'refused');
+      assert.equal(refusal.code, 'offline', 'indistinguishable from merely away');
 
       // Alice's companion must never have been asked.
       const opened = (await (await as(alice.clientToken, '/api/endpoints')).json()) as {

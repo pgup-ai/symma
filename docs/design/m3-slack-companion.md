@@ -536,7 +536,7 @@ word for situations a member experiences as completely different things.
 | attached                               | ready                                    |
 | deliberate goodbye                     | "quit on your Mac — reopen or reconnect" |
 | silent drop, inside the resume window  | nothing; it is already coming back       |
-| silent drop, past it, last seen 4m ago | "asleep — this will run when it wakes"   |
+| silent drop, past it, last seen 4m ago | "asleep — send it again when it's back"  |
 | never paired, or revoked               | the pairing copy from §2                 |
 
 Two of those rows do not exist yet — the goodbye and the last-seen — and the gap
@@ -565,8 +565,8 @@ Holding was the tempting answer and the wrong one. A held request carries a
 prompt, so it is member content: tenancy scoping, retention, a TTL, a per-user
 cap, and a second place where work can be pending. Refusing keeps that state at
 zero and always reaches a definite outcome, which the presence copy above
-already explains ("asleep — this will run when it wakes" becomes "asleep — send
-it again when it's back").
+already says so — the copy above is "asleep — send it again when it's back",
+not a promise to run it later.
 
 **Whether to retry is the caller's**, per invariant 4. `offline` and
 `at_capacity` are worth retrying and the other two are the caller's own bug or
