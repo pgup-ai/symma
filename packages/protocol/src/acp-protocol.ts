@@ -97,21 +97,21 @@ export type PermissionResponse = {
 
 // ACP ToolKind maps file mutations to edit/delete/move; `write` is not a spec
 // kind but is denied too in case an agent labels nonstandardly. `switch_mode`
-// is denied because jbot sets the session mode itself — approving one would
-// let a prompt-injected request escape the plan-mode read-only layer.
+// is denied because the caller sets the session mode — approving one would let
+// a prompt-injected request escape the plan-mode read-only layer.
 const DENIED_TOOL_KINDS = new Set(['edit', 'delete', 'move', 'write', 'switch_mode']);
 
 /**
- * Client-side read-only layer of invariant #8: mutating tool kinds are
- * rejected, everything else (read/search/execute/fetch — bash stays allowed
- * for git diff/log/grep) is approved. This layer is deliberately kind-based
- * and allow-by-default for unknown kinds: read tools commonly ship kind
- * `other` or none, so denying unknowns would stall reviews (a recall hole),
- * while command-level policing (e.g. bash filtering) lives in the agent-side
- * layers — codex's OS sandbox and the plan modes — which invariant #8 pairs
- * with this one. Prefers the `*_once` option so no standing grant outlives a
- * single call. Kind strings normalize `-` to `_` (cursor emits hyphens). No
- * usable option ⇒ cancelled outcome.
+ * Client-side layer of the read-only floor (AGENTS.md, "Read-only enforced in
+ * three layers"): mutating tool kinds are rejected, everything else
+ * (read/search/execute/fetch — bash stays allowed for git diff/log/grep) is
+ * approved. Deliberately kind-based and allow-by-default for unknown kinds:
+ * read tools commonly ship kind `other` or none, so denying unknowns would
+ * stall reviews (a recall hole). Command-level policing — bash filtering and
+ * the like — belongs to the other two layers, codex's OS sandbox and plan
+ * mode. Prefers the `*_once` option so no standing grant outlives a single
+ * call. Kind strings normalize `-` to `_` (cursor emits hyphens). No usable
+ * option ⇒ cancelled outcome.
  */
 export function respondToPermissionRequest(params: PermissionRequestParams): PermissionResponse {
   const direction = DENIED_TOOL_KINDS.has(normalizeKind(params.toolCall?.kind))

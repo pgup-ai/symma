@@ -653,8 +653,17 @@ instead — which works because **the tests travel with the code**: 12 files
 **Divergence was the cost of this order.** Two copies existed between steps 2 and
 6, so jbot-review's were frozen for that window and any fix that could not wait
 landed in symma first and was re-copied — never the reverse, or the extraction
-would have inherited drift. That window is closed: fixes now land wherever the
-code lives and reach jbot-review as a release.
+would have inherited drift. The window is closed for `protocol` and `client`:
+jbot-review holds no copy, and a fix reaches it as a release plus a pin bump
+there, since the pins are exact and publishing alone moves nothing.
+
+It is still open for `gateway` and `companion`, and this is the part the six
+steps do not cover. They publish nothing, so there was no step 5 to swap
+jbot-review onto them and no step 6 to delete what it kept running. Both copies
+are live and they have drifted — symma's `server.ts` gained a cross-run frame
+guard, a fail-open journal write and a `q=0`-aware `acceptsGzip` that
+jbot-review's has not — which is the exact failure this order was meant to
+bound, just deferred rather than avoided. Publishing them is what closes it.
 
 Step 3 was expected to be the whole risk. It was not — see the status note
 below.
@@ -741,11 +750,22 @@ the registry copy instead of the local one, which silently tests a published
 package against workspace source — the failure surfaces as a missing `src/`,
 since tarballs ship only `dist`.
 
-**Step 6 landed as jbot-review#127** — nine files, 1318 lines, one commit. Their
-tests stayed: symma has none for the four agent specs, and the `devin`/`kilo`
-ones also reach into jbot-review's own prompt and config. They are its
-compatibility suite against the dependency now, which is what a downstream
-consumer should keep.
+**Step 6 landed as jbot-review#127.** Nine source files went first, then two
+things the swap had left behind. `relay.ts` still declared the eight relay
+control types and `parseRelayControl` beside the identical exported ones —
+`server.ts` and `companion/index.ts` had already moved to the package, so the
+parser had no caller at all. And four test files (`acp-protocol`,
+`envelope-signature`, `ndjson`, `signal-cleanup`, plus relay's parser case) were
+_strict subsets_ of symma's: zero cases they had that symma lacked, three that
+symma has and they lacked. An old copy of a dependency's unit tests reads as
+coverage and is not.
+
+What a consumer keeps instead is the seam it owns. The `codex`/`cursor`/`devin`/
+`kilo` tests stay — symma has none, and `devin`/`kilo` reach into jbot-review's
+own prompt and config. The read-only floor case moved into `acp-backend.test.ts`
+rather than going with the rest: the code is symma's, the guarantee is
+jbot-review's invariant #8, and an exact pin means a consumer-side check fires
+on the bump that loosens it instead of after the review that wrote to a repo.
 
 ### Repo, domains, and the name
 

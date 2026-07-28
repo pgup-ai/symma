@@ -69,10 +69,6 @@ extraction fixes, prevented from recurring.
    That path does not exist in code yet, so this invariant is unconditional
    today; whoever builds it amends this entry in the same commit.
 
-   _Copied code cites this as "invariant #8", its number in jbot-review's
-   AGENTS.md. Those references point across repos until the originals are
-   deleted (§8, step 6), when they get renumbered._
-
 2. **Auxiliary sessions fail open.** A broken precision filter must never
    become a recall hole.
 
@@ -91,10 +87,16 @@ extraction fixes, prevented from recurring.
    bug, not the boundary. Timeouts and retry policy are caller concerns —
    the protocol surfaces transport facts and lets the caller set deadlines.
 
-6. **Fixes to extracted code land here** (§8). The extraction is done —
-   jbot-review consumes the published packages and its copies are gone — so a
-   fix reaches it as a release, not a re-copy. Patching it there instead forks
-   the code that was just unforked.
+6. **Fixes to extracted code land here** (§8). jbot-review holds no copies of
+   `@symma/protocol` or `@symma/client` any more, so a fix reaches it as a
+   release _and_ a pin bump there — the pins are exact, and publishing alone
+   moves nothing. Patching its copy re-forks the code that was just unforked.
+
+   **`gateway` and `companion` are outside this.** They publish nothing, so
+   jbot-review still runs its own, and the two have already drifted: symma's
+   `server.ts` has a cross-run guard, a fail-open journal write and a
+   `q=0`-aware `acceptsGzip` that jbot-review's does not. Whoever ships those
+   packages reconciles the drift and extends this entry to cover them.
 
 ## Conventions
 
