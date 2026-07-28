@@ -188,6 +188,14 @@ token is scoped to an owner. Three enforcement points:
 2. Journal reads filter by owner.
 3. Endpoint listing shows only the caller's own endpoints.
 
+All three ship, plus run listing, which the original three missed — `/api/runs`
+would otherwise have enumerated every tenant's run ids.
+
+**Someone else's endpoint answers exactly like one that is away** (`offline`),
+and someone else's journal answers `404`, not `403`. Which endpoints and
+sessions exist is itself owned; a distinct refusal would turn the relay into a
+directory anyone could enumerate by probing.
+
 **Owner is assigned at pairing, never declared by the companion.** A
 companion-declared owner is attacker-controlled input — the same mistake as
 trusting `dir` or `endpoint` on an envelope, which M2d already had to unlearn.
@@ -197,6 +205,23 @@ trusting `dir` or `endpoint` on an envelope, which M2d already had to unlearn.
 Postgres from the start (decided 2026-07-27). Minting tokens needs durable
 state, and journals move into a real store too, so the file-based interim would
 be thrown away within one milestone.
+
+**Shipped 2026-07-28**, the tables owner scoping needs — `workspaces`, `users`,
+`endpoints`, `tokens`, `sessions` — in `packages/gateway/src/schema.sql`. The
+rest of this block is still design: `pairings` and `key_changes` arrive with
+M3b, `conversations`/`turns` with M3d, and building a table before its caller
+would be guessing at its shape.
+
+**Frames stay on disk.** §1 hedged this ("or blob + metadata") and moving them
+is a separate decision with its own volume argument; what changed is that a
+`sessions` row now records which endpoint a journal belongs to, which is what
+makes a read authorizable. Without it a runId and sessionId say nothing about
+who owns them.
+
+**Without `SYMMA_GATEWAY_DATABASE_URL` the gateway is single-tenant**, as M2
+was. Every check still runs — they compare against one implicit owner instead of
+a `users` row — so there is no unscoped code path, only a store with one tenant
+in it.
 
 ```
 workspaces   (id, slack_team_id, install_kind, installed_at, bot_token_ref)
@@ -1097,12 +1122,12 @@ names the origin SHA keeps the provenance without dragging that along.
 
 ## 9. Milestones
 
-|         | scope                                                                                                                                                | done when                                                                                                                                                                 |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle                                                                                  | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
-| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                           | a fresh laptop pairs from one command with no config file                                                                                                                 |
-| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                               | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
-| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
+|         | scope                                                                                                                                                                                               | done when                                                                                                                                                                 |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle — **the scoping half shipped 2026-07-28**; retention and the deletion/uninstall/user-removal rows of the lifecycle table remain | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
+| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                                                                          | a fresh laptop pairs from one command with no config file                                                                                                                 |
+| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                                                                              | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
+| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging                                                | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
 
 M3d's bar is a person, not a passing test. If a tester needs a hand, the
 milestone is not done.

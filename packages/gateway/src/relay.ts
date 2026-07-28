@@ -32,6 +32,9 @@ export function parseEndpointTokens(raw: string | undefined): Map<string, string
 
 interface Attachment {
   hello: HelloControl;
+  /** Assigned from the endpoint's token at attach — never read off `hello`,
+   * which is companion-declared and so attacker-controlled (§1). */
+  owner: string;
   send: SendLine;
   sessions: Set<string>;
   online: boolean;
@@ -92,7 +95,7 @@ export function createRelay(options: RelayOptions = {}) {
     /** Companion (re)attached. Sessions the companion still declares resume
      * (cancel their resume timers); any it dropped — e.g. after a restart —
      * fail loudly instead of lingering as zombies that hold capacity. */
-    attachEndpoint(hello: HelloControl, send: SendLine): void {
+    attachEndpoint(hello: HelloControl, send: SendLine, owner: string): void {
       const existing = endpoints.get(hello.endpoint);
       const declared = new Set(hello.sessions ?? [...(existing?.sessions ?? [])]);
       const carried = new Set<string>();
@@ -105,7 +108,7 @@ export function createRelay(options: RelayOptions = {}) {
         const session = sessions.get(sessionId);
         if (session) disarm(session, 'endpointResume');
       }
-      endpoints.set(hello.endpoint, { hello, send, sessions: carried, online: true });
+      endpoints.set(hello.endpoint, { hello, send, owner, sessions: carried, online: true });
       // A companion may still be running agents for sessions the relay already
       // failed (resume window elapsed while it was gone) — tell it to close them.
       for (const sessionId of hello.sessions ?? []) {
@@ -136,20 +139,22 @@ export function createRelay(options: RelayOptions = {}) {
       if (session) disarm(session, 'clientResume');
     },
 
-    listEndpoints(): EndpointPresence[] {
-      return [...endpoints.values()].map(({ hello, sessions: active, online }) => ({
-        endpoint: hello.endpoint,
-        device: hello.device,
-        agents: hello.agents,
-        maxSessions: hello.maxSessions,
-        activeSessions: active.size,
-        online,
-        ...(hello.publicKey ? { publicKey: hello.publicKey } : {}),
-      }));
+    listEndpoints(owner: string): EndpointPresence[] {
+      return [...endpoints.values()]
+        .filter((a) => a.owner === owner)
+        .map(({ hello, sessions: active, online }) => ({
+          endpoint: hello.endpoint,
+          device: hello.device,
+          agents: hello.agents,
+          maxSessions: hello.maxSessions,
+          activeSessions: active.size,
+          online,
+          ...(hello.publicKey ? { publicKey: hello.publicKey } : {}),
+        }));
     },
 
     /** Route a client's open to its endpoint, or refuse synchronously. */
-    openSession(control: OpenControl, clientSend: SendLine): void {
+    openSession(control: OpenControl, clientSend: SendLine, caller: string): void {
       const refuse = (code: RefusalCode, reason: string): void =>
         clientSend(
           JSON.stringify({
@@ -160,7 +165,10 @@ export function createRelay(options: RelayOptions = {}) {
           } satisfies AckControl),
         );
       const attachment = endpoints.get(control.endpoint);
-      if (!attachment?.online) return refuse('offline', 'endpoint offline');
+      // Someone else's endpoint is indistinguishable from one that is away:
+      // which endpoints exist is not the caller's to learn by probing.
+      if (!attachment?.online || attachment.owner !== caller)
+        return refuse('offline', 'endpoint offline');
       if (sessions.has(control.sessionId)) return refuse('session_in_use', 'session id in use');
       if (attachment.sessions.size >= attachment.hello.maxSessions)
         return refuse('at_capacity', 'at capacity');

@@ -22,6 +22,7 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
+import { openStore, type Owner, type Store } from './store.js';
 import { VIEWER_HTML } from './viewer.js';
 
 // SSE comment ping; keeps idle viewer connections alive through proxies.
@@ -36,6 +37,11 @@ const token = process.env.SYMMA_GATEWAY_TOKEN?.trim() || '';
 // local TLS proxy (deploy/observer), SYMMA_GATEWAY_HOST=127.0.0.1 keeps token
 // auth while making the proxy the only public door, firewall or not.
 const host = token ? process.env.SYMMA_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
+const databaseUrl = process.env.SYMMA_GATEWAY_DATABASE_URL?.trim() || '';
+// Without a database there is one tenant, which is what M2 was. Every check
+// below still runs; they all compare against this instead of a users row.
+const LOCAL_OWNER: Owner = 'local';
+let store: Store | undefined;
 
 const log = (msg: string): void => {
   console.log(`[symma-gateway] ${msg}`);
@@ -113,20 +119,18 @@ function tokenMatches(candidate: string, expected = token): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function authorized(req: IncomingMessage, url: URL): boolean {
-  if (!token) return true;
+/** The owner this request speaks for, or undefined if it speaks for nobody. */
+async function callerOwner(req: IncomingMessage, url: URL): Promise<Owner | undefined> {
   const header = req.headers.authorization;
-  if (typeof header === 'string' && header.startsWith('Bearer ') && tokenMatches(header.slice(7))) {
-    return true;
-  }
+  const bearer =
+    typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined;
   // Query token is for EventSource/browser GETs only (they cannot set headers);
   // ingest (POST) must use the Authorization header so the token never lands in
   // access logs or proxy caches.
-  if (req.method === 'GET') {
-    const q = url.searchParams.get('token');
-    if (q && tokenMatches(q)) return true;
-  }
-  return false;
+  const presented = bearer ?? (req.method === 'GET' ? (url.searchParams.get('token') ?? '') : '');
+  if (store) return presented ? store.ownerForClientToken(presented) : undefined;
+  if (!token) return LOCAL_OWNER;
+  return presented && tokenMatches(presented) ? LOCAL_OWNER : undefined;
 }
 
 // SSE writes must never throw: a subscriber can disconnect between the
@@ -210,12 +214,14 @@ async function handleEndpointIngest(
   req: IncomingMessage,
   res: ServerResponse,
   id: string,
+  owner: Owner,
 ): Promise<void> {
   const { overflow } = await readNdjsonBody(req, (line) => {
     const control = parseRelayControl(line);
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
-        relay.attachEndpoint(control, sendToEndpoint(id));
+        relay.attachEndpoint(control, sendToEndpoint(id), owner);
+        void store?.markSeen(id);
       } else if (control.kind === 'opened' || control.kind === 'refused') {
         relay.endpointAck(id, control, line);
       } else if (control.kind === 'close') {
@@ -235,11 +241,19 @@ async function handleSessionIngest(
   req: IncomingMessage,
   res: ServerResponse,
   sid: string,
+  owner: Owner,
 ): Promise<void> {
   const { overflow } = await readNdjsonBody(req, (line) => {
     const control = parseRelayControl(line);
     if (control?.kind === 'open' && control.sessionId === sid) {
-      relay.openSession(control, sendToSession(sid));
+      relay.openSession(control, sendToSession(sid), owner);
+      void store?.recordSession({
+        id: sid,
+        runId: control.runId,
+        endpoint: control.endpoint,
+        agent: control.agent,
+        model: control.model,
+      });
     } else if (control?.kind === 'close' && control.sessionId === sid) {
       relay.closeSession(sid, control.reason ?? 'closed by client');
     } else if (!control) {
@@ -252,15 +266,19 @@ async function handleSessionIngest(
 
 // Header-only: the companion is a fetch client (unlike a browser EventSource
 // viewer), so its token never needs the ?token= query form that lands in logs.
-function authorizedEndpoint(req: IncomingMessage, id: string): boolean {
-  const expected = endpointTokens.get(id);
-  if (!expected) return false;
+async function endpointOwner(req: IncomingMessage, id: string): Promise<Owner | undefined> {
   const header = req.headers.authorization;
-  return (
-    typeof header === 'string' &&
-    header.startsWith('Bearer ') &&
-    tokenMatches(header.slice(7), expected)
-  );
+  const presented =
+    typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : '';
+  if (!presented) return undefined;
+  if (store) {
+    // The token names the endpoint it may speak for; a token for one endpoint
+    // cannot attach as another (§1: the owner is never read off `hello`).
+    const found = await store.endpointForToken(presented);
+    return found?.endpoint === id ? found.owner : undefined;
+  }
+  const expected = endpointTokens.get(id);
+  return expected && tokenMatches(presented, expected) ? LOCAL_OWNER : undefined;
 }
 
 /** One live SSE leg per peer; last connection wins, cleanup only clears the
@@ -412,7 +430,13 @@ function handleStream(res: ServerResponse, runId: string, sessionId: string): vo
   res.on('error', cleanup);
 }
 
-function route(req: IncomingMessage, res: ServerResponse): void {
+/** 404 rather than 403 throughout: whether a session exists is itself owned. */
+async function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<boolean> {
+  if (!store) return true;
+  return (await store.ownerForSession(runId, sessionId)) === owner;
+}
+
+async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method === 'GET' && url.pathname === '/healthz') {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -424,7 +448,8 @@ function route(req: IncomingMessage, res: ServerResponse): void {
   const endpointRoute = url.pathname.match(/^\/api\/endpoints\/([^/]+)\/(stream|ingest)$/);
   if (endpointRoute) {
     const [, id, mode] = endpointRoute;
-    if (!isSafeId(id) || !authorizedEndpoint(req, id)) {
+    const endpointOwned = isSafeId(id) ? await endpointOwner(req, id) : undefined;
+    if (!endpointOwned) {
       res.writeHead(401, { 'content-type': 'text/plain' });
       res.end('unauthorized');
       return;
@@ -434,14 +459,15 @@ function route(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
-      void handleEndpointIngest(req, res, id).catch(() => res.destroy());
+      void handleEndpointIngest(req, res, id, endpointOwned).catch(() => res.destroy());
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
     return;
   }
-  if (!authorized(req, url)) {
+  const owner = await callerOwner(req, url);
+  if (!owner) {
     res.writeHead(401, { 'content-type': 'text/plain' });
     res.end('unauthorized');
     return;
@@ -453,12 +479,15 @@ function route(req: IncomingMessage, res: ServerResponse): void {
   }
   if (req.method === 'GET' && url.pathname === '/api/runs') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
-    res.end(JSON.stringify(listRuns(dataDir)));
+    // Runs the caller owns, intersected with what is on disk — a run with no
+    // session row belongs to nobody and is listed by nobody.
+    const mine = store ? await store.runsFor(owner) : undefined;
+    res.end(JSON.stringify(listRuns(dataDir).filter((r) => !mine || mine.has(r.runId))));
     return;
   }
   if (req.method === 'GET' && url.pathname === '/api/endpoints') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
-    res.end(JSON.stringify(relay.listEndpoints()));
+    res.end(JSON.stringify(relay.listEndpoints(owner)));
     return;
   }
   const sessionRoute = url.pathname.match(/^\/api\/sessions\/([^/]+)\/(stream|ingest)$/);
@@ -478,7 +507,7 @@ function route(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
-      void handleSessionIngest(req, res, sid).catch(() => res.destroy());
+      void handleSessionIngest(req, res, sid, owner).catch(() => res.destroy());
       return;
     }
   }
@@ -490,6 +519,11 @@ function route(req: IncomingMessage, res: ServerResponse): void {
       res.end('bad id');
       return;
     }
+    if (!(await ownsSession(owner, runId, sessionId))) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
     handleJournal(req, res, runId, sessionId);
     return;
   }
@@ -499,6 +533,11 @@ function route(req: IncomingMessage, res: ServerResponse): void {
     if (!isSafeId(runId) || !isSafeId(sessionId)) {
       res.writeHead(400, { 'content-type': 'text/plain' });
       res.end('bad id');
+      return;
+    }
+    if (!(await ownsSession(owner, runId, sessionId))) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
       return;
     }
     handleStream(res, runId, sessionId);
@@ -516,16 +555,14 @@ function route(req: IncomingMessage, res: ServerResponse): void {
 }
 
 const server = createServer((req, res) => {
-  // The handlers do synchronous fs reads (journals, run status, listing); a
-  // corrupt file or permission/disk error must return 500, never crash the
-  // long-lived gateway out of the request listener.
-  try {
-    route(req, res);
-  } catch (error) {
+  // Handlers do synchronous fs reads and now await the store; either a corrupt
+  // file or an unreachable database must return 500, never crash the long-lived
+  // gateway. route() is async, so this catches the rejection, not a throw.
+  void route(req, res).catch((error: unknown) => {
     log(`request failed: ${error instanceof Error ? error.message : String(error)}`);
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' });
     res.end('internal error');
-  }
+  });
 });
 // The ingest POST streams for a whole review (often >5min); Node's default
 // 300s requestTimeout would sever it mid-review, dropping trailing frames and
@@ -544,11 +581,19 @@ process.on('SIGTERM', () => {
   setTimeout(() => process.exit(0), 3000).unref();
 });
 
+// Fail to start rather than start unscoped: a gateway that cannot reach its
+// store has no owners, and every check above would fall back to local mode.
+if (databaseUrl) {
+  store = await openStore(databaseUrl, new URL('./schema.sql', import.meta.url).pathname);
+}
+
 server.listen(port, host, () => {
   log(`listening on http://${host}:${port} (data: ${dataDir})`);
   log(
-    token
-      ? 'token auth enabled; ingest needs Authorization: Bearer, viewers ?token='
-      : 'local mode: loopback only, no auth (set SYMMA_GATEWAY_TOKEN to expose)',
+    store
+      ? 'multi-tenant: endpoints, journals and listings are owner-scoped'
+      : token
+        ? 'single tenant, token auth; ingest needs Authorization: Bearer, viewers ?token='
+        : 'single tenant, local mode: loopback only, no auth',
   );
 });
