@@ -111,7 +111,11 @@ const onceOnStream = async (
       const { value, done } = await reader.read();
       if (done) throw new Error(`stream for ${sid} ended before a control arrived`);
       buffer += decoder.decode(value, { stream: true });
-      for (const line of buffer.split('\n')) {
+      // Complete lines only. A chunk boundary inside `data: {...}` leaves a
+      // fragment that still starts with the prefix, and parsing it throws.
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
         if (line.startsWith('data: ')) return JSON.parse(line.slice(6)) as { kind?: string };
       }
     }
