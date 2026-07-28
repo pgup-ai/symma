@@ -20,9 +20,10 @@ export interface Store {
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   ownerForSession(runId: string, sessionId: string): Promise<Owner | undefined>;
   runsFor(owner: Owner): Promise<Set<string>>;
-  /** Sessions of `runId` this owner may see. A runId is caller-chosen, so two
-   * tenants can land in one run directory; the listing must not leak across. */
-  sessionsIn(owner: Owner, runId: string): Promise<Set<string>>;
+  /** Sessions this owner may see, by run. A runId is caller-chosen, so two
+   * tenants can land in one run directory and the listing must not leak
+   * across — batched, since a query per run grows with run history. */
+  sessionsByRun(owner: Owner, runIds: string[]): Promise<Map<string, Set<string>>>;
   recordSession(session: {
     id: string;
     runId: string;
@@ -33,7 +34,7 @@ export interface Store {
   markSeen(endpoint: string): Promise<void>;
   /** For an open the companion went on to refuse: the row outlives the relay's
    * in-memory session otherwise, and blocks the id from ever being reused. */
-  deleteSessionRow(id: string): Promise<void>;
+  deleteSessionRow(id: string, runId: string): Promise<void>;
   /** §1 data lifecycle. Each returns the sessions whose frames the caller must
    * now delete from disk — the row and the file are one unit, and only the
    * caller knows where the files live. */
@@ -95,16 +96,24 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return new Set(rows.map((r: { run_id: string }) => r.run_id));
     },
-    async sessionsIn(owner, runId) {
+    async sessionsByRun(owner, runIds) {
       const { rows } = await pool.query(
-        `SELECT s.id FROM sessions s JOIN endpoints e ON e.id = s.endpoint_id
-          WHERE s.run_id = $1 AND e.user_id = $2`,
-        [runId, owner],
+        `SELECT s.run_id, s.id FROM sessions s JOIN endpoints e ON e.id = s.endpoint_id
+          WHERE s.run_id = ANY($1) AND e.user_id = $2`,
+        [runIds, owner],
       );
-      return new Set(rows.map((r: { id: string }) => r.id));
+      const byRun = new Map<string, Set<string>>();
+      for (const r of rows as { run_id: string; id: string }[]) {
+        let owned = byRun.get(r.run_id);
+        if (!owned) byRun.set(r.run_id, (owned = new Set()));
+        owned.add(r.id);
+      }
+      return byRun;
     },
-    async deleteSessionRow(id) {
-      await pool.query(`DELETE FROM sessions WHERE id = $1`, [id]);
+    async deleteSessionRow(id, runId) {
+      // Scoped by run too: the same id can name a historical session, and an
+      // unscoped delete would strip that one's authorization instead.
+      await pool.query(`DELETE FROM sessions WHERE id = $1 AND run_id = $2`, [id, runId]);
     },
     async recordSession({ id, runId, endpoint, agent, model }) {
       // No ON CONFLICT: a reused id must not silently keep the old row, or the
@@ -145,14 +154,16 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        // Sessions come back before the cascade removes them, so the caller
-        // still learns which files to delete.
+        // Deleted here rather than left to the cascade, so the rows reported
+        // and the rows removed are one statement: a session committed between
+        // a separate SELECT and the cascade would vanish unreported, stranding
+        // its journal outside authorization and retention both.
         const doomed = refs(
           await client.query(
-            `SELECT s.id, s.run_id FROM sessions s
-             JOIN endpoints e ON e.id = s.endpoint_id
-             JOIN users u ON u.id = e.user_id
-            WHERE u.workspace_id = (SELECT id FROM workspaces WHERE slack_team_id = $1)`,
+            `DELETE FROM sessions s USING endpoints e, users u
+              WHERE s.endpoint_id = e.id AND e.user_id = u.id
+                AND u.workspace_id = (SELECT id FROM workspaces WHERE slack_team_id = $1)
+             RETURNING s.id, s.run_id`,
             [slackTeamId],
           ),
         );
@@ -181,20 +192,18 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       }
     },
     async deactivateUser(slackTeamId, slackUserId) {
-      // Dropping the endpoints cascades their sessions away, so the frames go
-      // with them. Leaving the files behind would strand them: no row means no
-      // API path reaches them and retention, which reads sessions.started_at,
-      // never finds them either.
+      // Same reason as deleteWorkspace: taking the sessions in one statement
+      // that both removes and reports them, rather than letting the endpoint
+      // cascade take rows the caller never learned about.
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
         const doomed = refs(
           await client.query(
-            `SELECT s.id, s.run_id FROM sessions s
-               JOIN endpoints e ON e.id = s.endpoint_id
-               JOIN users u ON u.id = e.user_id
-               JOIN workspaces w ON w.id = u.workspace_id
-              WHERE w.slack_team_id = $1 AND u.slack_user_id = $2`,
+            `DELETE FROM sessions s USING endpoints e, users u, workspaces w
+              WHERE s.endpoint_id = e.id AND e.user_id = u.id AND w.id = u.workspace_id
+                AND w.slack_team_id = $1 AND u.slack_user_id = $2
+             RETURNING s.id, s.run_id`,
             [slackTeamId, slackUserId],
           ),
         );

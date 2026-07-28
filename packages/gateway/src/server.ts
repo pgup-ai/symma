@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { createGzip } from 'node:zlib';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
@@ -243,14 +244,17 @@ async function handleEndpointIngest(
         // Only on an ack the relay actually applied: a companion naming
         // another endpoint's session is ignored there, and deleting its row
         // anyway would strip the real owner's authorization and retention.
+        // Captured before the ack removes the session: the delete is scoped by
+        // run so it cannot strip a historical row that reuses the id.
+        const refusedRun = relay.sessionRun(control.sessionId);
         const applied = relay.endpointAck(id, control, line);
         // The relay accepted this open before the companion saw it; a refusal
         // now leaves a row with no session, which both shows as an empty run
         // and blocks the id from being opened again.
-        if (applied && control.kind === 'refused')
+        if (applied && control.kind === 'refused' && refusedRun)
           storeWrite(
             `deleteSessionRow ${control.sessionId}`,
-            store?.deleteSessionRow(control.sessionId),
+            store?.deleteSessionRow(control.sessionId, refusedRun),
           );
       } else if (control.kind === 'close') {
         relay.endpointClose(id, control.sessionId, control.reason ?? 'closed by endpoint');
@@ -271,10 +275,41 @@ async function handleSessionIngest(
   sid: string,
   owner: Owner,
 ): Promise<void> {
-  const { overflow } = await readNdjsonBody(req, (line) => {
+  const { overflow } = await readNdjsonBody(req, async (line) => {
     const control = parseRelayControl(line);
     if (control?.kind === 'open' && control.sessionId === sid) {
+      // Reserve before dispatching. The insert is what rejects a reused id, and
+      // until it lands the session is open, the companion has the open, and a
+      // frame later in this same body would journal into whoever owned that id
+      // last. A conflict here refuses instead.
+      if (store) {
+        try {
+          await store.recordSession({
+            id: sid,
+            runId: control.runId,
+            endpoint: control.endpoint,
+            agent: control.agent,
+            model: control.model,
+          });
+        } catch (error) {
+          log(
+            `recordSession ${sid} refused: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          sendToSession(sid)(
+            JSON.stringify({
+              kind: 'refused',
+              sessionId: sid,
+              code: 'session_in_use',
+              reason: 'session id in use',
+            }),
+          );
+          return;
+        }
+      }
       const accepted = relay.openSession(control, sendToSession(sid), owner);
+      // Reserved but refused: release it, or the id is unopenable from here on.
+      if (!accepted)
+        storeWrite(`deleteSessionRow ${sid}`, store?.deleteSessionRow(sid, control.runId));
       // A leg registered before the open is unowned by construction, and
       // sendToSession resolves it at send time — so whoever holds it when the
       // open lands becomes the target. Evict a stranger's; the opener
@@ -287,25 +322,6 @@ async function handleSessionIngest(
       // Only a session the relay accepted may leave a row. A refused open that
       // recorded one would put a run in its owner's listing whose journal never
       // existed, and every read of it 404s.
-      if (accepted && store) {
-        // Without this row the session's frames are unreadable, undeletable and
-        // invisible to retention, so they would outlive the window silently.
-        // Losing the session is the lesser failure, and a loud one.
-        void store
-          .recordSession({
-            id: sid,
-            runId: control.runId,
-            endpoint: control.endpoint,
-            agent: control.agent,
-            model: control.model,
-          })
-          .catch((error: unknown) => {
-            log(
-              `recordSession ${sid} failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            relay.closeSession(sid, 'session could not be recorded');
-          });
-      }
     } else if (!maySession(owner, sid)) {
       // Everything past the open touches a session that already has an owner:
       // a close ends it, a frame is forwarded to the endpoint as if the owner
@@ -550,11 +566,24 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const mine = store ? await store.runsFor(owner) : undefined;
     const runs = listRuns(dataDir).filter((r) => !mine || mine.has(r.runId));
     // A runId is caller-chosen, so two tenants can share one run directory and
-    // the listing would name the other's sessions. Filter inside the run too.
+    // the listing would name the other's sessions. One query for all of them:
+    // per-run would grow with a tenant's history on every viewer refresh.
     if (store) {
+      const owned = await store.sessionsByRun(
+        owner,
+        runs.map((r) => r.runId),
+      );
       for (const run of runs) {
-        const owned = await store.sessionsIn(owner, run.runId);
-        run.sessions = run.sessions.filter((sid) => owned.has(sid));
+        const mineHere = owned.get(run.runId) ?? new Set<string>();
+        run.sessions = run.sessions.filter((sid) => mineHere.has(sid));
+        // updatedAt came from every journal in the shared directory, so it
+        // reported when the other tenant last wrote. Recompute from ours.
+        run.updatedAt = journalsUpdatedAt(
+          dataDir,
+          run.runId,
+          run.sessions,
+          run.status !== undefined,
+        );
       }
     }
     res.end(JSON.stringify(runs));
@@ -631,6 +660,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         res.end('not found');
         return;
       }
+      // Ending it is part of deleting it. A live session keeps journaling, so
+      // the next frame recreates the file with no row behind it — unreadable,
+      // undeletable, and past retention's reach, which turns a delete into a
+      // permanent retention leak.
+      relay.closeSession(sessionId, 'session deleted by its owner');
       forgetSessions(gone);
     }
     res.writeHead(204);
@@ -703,6 +737,31 @@ process.on('SIGTERM', () => {
 
 /** Frames and their row are one unit; deleting either alone leaves a journal
  * nobody can reach or a row pointing at nothing. */
+/** Newest mtime across just these journals, plus the run's status file when it
+ * has one — the same inputs listRuns uses, narrowed to what the caller owns. */
+function journalsUpdatedAt(
+  dir: string,
+  runId: string,
+  sessions: string[],
+  withStatus: boolean,
+): number {
+  const times = sessions.map((sid) => {
+    try {
+      return statSync(journalPath(dir, runId, sid)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+  if (withStatus) {
+    try {
+      times.push(statSync(join(dir, runId, 'status')).mtimeMs);
+    } catch {
+      /* status vanished mid-list */
+    }
+  }
+  return times.length > 0 ? Math.max(...times) : 0;
+}
+
 function forgetSessions(doomed: SessionRef[]): void {
   for (const { runId, sessionId } of doomed) {
     try {

@@ -15,15 +15,20 @@ const MAX_BODY_BYTES = 1024 * 1024 * 1024;
  */
 export async function readNdjsonBody(
   req: IncomingMessage,
-  onLine: (line: string) => void,
+  onLine: (line: string) => void | Promise<void>,
 ): Promise<{ overflow: boolean }> {
   let total = 0;
   let partial = '';
   let partialBytes = 0;
   let overflow = false;
-  const take = (line: string, extraBytes: number): void => {
+  // Awaited when a handler returns a promise, so a line whose effects must
+  // land before the next one is read can say so. Sync handlers pay nothing.
+  const take = async (line: string, extraBytes: number): Promise<void> => {
     if (partialBytes + extraBytes > MAX_LINE_BYTES) overflow = true;
-    else if (line.trim()) onLine(line);
+    else if (line.trim()) {
+      const pending = onLine(line);
+      if (pending) await pending;
+    }
     partial = '';
     partialBytes = 0;
   };
@@ -41,12 +46,12 @@ export async function readNdjsonBody(
     // Each completed line is length-checked (partial carry-over + this chunk's
     // slice), so a cap-exceeding line can't slip through by ending in-chunk.
     const head = chunk.slice(0, start);
-    take(partial + head, Buffer.byteLength(head));
+    await take(partial + head, Buffer.byteLength(head));
     if (overflow) return { overflow: true };
     let nl = chunk.indexOf('\n', start + 1);
     while (nl !== -1) {
       const line = chunk.slice(start + 1, nl);
-      take(line, Buffer.byteLength(line));
+      await take(line, Buffer.byteLength(line));
       if (overflow) return { overflow: true };
       start = nl;
       nl = chunk.indexOf('\n', start + 1);
@@ -55,6 +60,6 @@ export async function readNdjsonBody(
     partialBytes = Buffer.byteLength(partial);
     if (partialBytes > MAX_LINE_BYTES) return { overflow: true };
   }
-  take(partial, 0);
+  await take(partial, 0);
   return { overflow };
 }

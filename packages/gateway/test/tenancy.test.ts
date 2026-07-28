@@ -475,6 +475,20 @@ describe('tenancy', () => {
       } finally {
         detachEve();
       }
+      // Deleting a live session ends it. Leaving it running would let the next
+      // frame recreate the journal with no row — past every route and past
+      // retention, so the delete would grow what is retained.
+      assert.equal(
+        (
+          await as(dana.clientToken, '/api/runs/run-live/sessions/sid-live/journal', {
+            method: 'DELETE',
+          })
+        ).status,
+        204,
+      );
+      // Immediately, not eventually: closeSession is synchronous, and a
+      // `waitFor` here would also pass for a session that ended some other way.
+      assert.equal(await live(), 0, 'deleting a live session ends it');
     } finally {
       detach();
     }
@@ -578,7 +592,7 @@ describe('tenancy', () => {
       // Still the first owner's, not silently reattributed to the second.
       assert.equal(await store.ownerForSession('run-two', 'sid-reused'), undefined);
       // And a refused open frees the id rather than blocking it forever.
-      await store.deleteSessionRow('sid-reused');
+      await store.deleteSessionRow('sid-reused', 'run-one');
       await store.recordSession({
         id: 'sid-reused',
         runId: 'run-two',
