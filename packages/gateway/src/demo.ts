@@ -10,8 +10,8 @@
  */
 import type { ObserverEnvelope } from '@symma/protocol';
 
-const url = process.env.JBOT_GATEWAY_URL?.trim() || 'http://127.0.0.1:8790';
-const token = process.env.JBOT_GATEWAY_TOKEN?.trim() || '';
+const url = process.env.SYMMA_GATEWAY_URL?.trim() || 'http://127.0.0.1:8790';
+const token = process.env.SYMMA_GATEWAY_TOKEN?.trim() || '';
 
 const runId = `demo-${new Date().toISOString().replaceAll(/[:.]/g, '-').slice(0, 19)}`;
 

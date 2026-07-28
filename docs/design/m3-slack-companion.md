@@ -82,11 +82,11 @@ changes".
 
 ### Today it is single-tenant by construction
 
-|               | today                                                 | why it breaks with two users                                             |
-| ------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
-| client auth   | one shared `JBOT_GATEWAY_TOKEN`                       | any client can open a session on **anyone's** companion                  |
-| endpoint auth | per-endpoint tokens from `JBOT_GATEWAY_ENDPOINTS` env | cannot issue per user without editing the box                            |
-| viewer auth   | same shared token                                     | anyone with the link reads every journal — code and full agent reasoning |
+|               | today                                                  | why it breaks with two users                                             |
+| ------------- | ------------------------------------------------------ | ------------------------------------------------------------------------ |
+| client auth   | one shared `SYMMA_GATEWAY_TOKEN`                       | any client can open a session on **anyone's** companion                  |
+| endpoint auth | per-endpoint tokens from `SYMMA_GATEWAY_ENDPOINTS` env | cannot issue per user without editing the box                            |
+| viewer auth   | same shared token                                      | anyone with the link reads every journal — code and full agent reasoning |
 
 The sharp one: `relay.openSession` checks the endpoint is online, has capacity,
 and offers the agent. **It never checks the caller is entitled to that

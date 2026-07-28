@@ -56,7 +56,7 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Pr
 
 describe('relay e2e', () => {
   it('relays a full session client → gateway → companion → agent and back', async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'jbot-relay-e2e-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'symma-relay-e2e-'));
     const agentPath = join(dataDir, 'echo-agent.mjs');
     writeFileSync(agentPath, ECHO_AGENT);
     const port = 22000 + Math.floor(Math.random() * 2000);
@@ -71,12 +71,12 @@ describe('relay e2e', () => {
         {
           env: {
             ...process.env,
-            JBOT_GATEWAY_PORT: String(port),
-            JBOT_GATEWAY_DATA: dataDir,
-            JBOT_GATEWAY_TOKEN: 'client-tok',
-            JBOT_GATEWAY_HOST: '127.0.0.1',
-            JBOT_GATEWAY_ENDPOINTS: 'e2e:endpoint-tok',
-            JBOT_GATEWAY_RESUME_MS: '400',
+            SYMMA_GATEWAY_PORT: String(port),
+            SYMMA_GATEWAY_DATA: dataDir,
+            SYMMA_GATEWAY_TOKEN: 'client-tok',
+            SYMMA_GATEWAY_HOST: '127.0.0.1',
+            SYMMA_GATEWAY_ENDPOINTS: 'e2e:endpoint-tok',
+            SYMMA_GATEWAY_RESUME_MS: '400',
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },
@@ -109,11 +109,11 @@ describe('relay e2e', () => {
         {
           env: {
             ...process.env,
-            JBOT_COMPANION_GATEWAY: base,
-            JBOT_COMPANION_TOKEN: 'endpoint-tok',
-            JBOT_COMPANION_ENDPOINT: 'e2e',
-            JBOT_COMPANION_DEVICE: 'test-box',
-            JBOT_COMPANION_AGENTS: `echo=${process.execPath} ${agentPath}`,
+            SYMMA_COMPANION_GATEWAY: base,
+            SYMMA_COMPANION_TOKEN: 'endpoint-tok',
+            SYMMA_COMPANION_ENDPOINT: 'e2e',
+            SYMMA_COMPANION_DEVICE: 'test-box',
+            SYMMA_COMPANION_AGENTS: `echo=${process.execPath} ${agentPath}`,
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },

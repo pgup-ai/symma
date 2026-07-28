@@ -57,7 +57,7 @@ describe('deepenUntilBase', () => {
 
 describe('fetchWorkspace', () => {
   const workspace = () => {
-    const dir = mkdtempSync(join(tmpdir(), 'jbot-workspace-test-'));
+    const dir = mkdtempSync(join(tmpdir(), 'symma-workspace-test-'));
     return { dir, clean: () => rmSync(dir, { recursive: true, force: true }) };
   };
 
@@ -82,7 +82,7 @@ describe('fetchWorkspace', () => {
 
   it('stops the clone when its open is cancelled', async () => {
     const { dir, clean } = workspace();
-    const origin = mkdtempSync(join(tmpdir(), 'jbot-workspace-origin-'));
+    const origin = mkdtempSync(join(tmpdir(), 'symma-workspace-origin-'));
     try {
       // A repo that WOULD clone: an implementation that drops the signal
       // succeeds here and returns undefined, so this can only pass when the

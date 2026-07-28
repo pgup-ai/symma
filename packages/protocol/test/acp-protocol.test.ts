@@ -197,7 +197,7 @@ describe('acp', () => {
   // police commands), so this test pins them on purpose.
   it('hands every frame to the tee, in both directions', async () => {
     // The tee is injected rather than built here, so nothing on either side of
-    // the boundary proves it is still called — jbot-review passes one and its
+    // the boundary proves it is still called — a consumer passes one and its
     // suite would stay green if this stopped firing.
     const teed: [string, string | undefined][] = [];
     const fake = fakeAgentIo({
@@ -238,9 +238,9 @@ describe('acp', () => {
   });
 
   it('introduces itself as the library, not as a consumer', async () => {
-    // Shipped as 'jbot-review' — true of the repo it came from, false for
-    // every other consumer, and invisible because no test looked at what the
-    // handshake claims. The only place the package names itself.
+    // Once shipped a downstream product's name — true of the repo this was
+    // extracted from, false for everyone else, and invisible because no test
+    // looked at what the handshake claims. The only place it names itself.
     let intro: unknown;
     const fake = fakeAgentIo({ onPrompt: (agent) => agent.finish() });
     await driveAcpSession(
@@ -257,7 +257,15 @@ describe('acp', () => {
         },
       },
     );
-    assert.deepEqual(intro, { name: '@symma/protocol', version: '0' });
+    const pkg = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as Record<string, string>;
+    assert.deepEqual(intro, { name: pkg.name, version: pkg.version });
+    // Both sides read package.json, so that alone would hold for any pair of
+    // values — including the empty ones a broken read produces. These pin what
+    // the pair has to be.
+    assert.match(pkg.name, /^@symma\//);
+    assert.match(pkg.version, /^\d+\.\d+\.\d+/);
   });
 
   it('answers permission requests read-only: mutations rejected, reads/exec allowed', () => {
@@ -291,7 +299,7 @@ describe('acp', () => {
       }),
       { outcome: { outcome: 'selected', optionId: 'ao' } },
     );
-    // switch_mode is denied: jbot sets the session mode; approving one would
+    // switch_mode is denied: the caller sets the session mode; approving one would
     // let a prompt-injected switch escape the plan-mode read-only layer.
     assert.deepEqual(
       respondToPermissionRequest({

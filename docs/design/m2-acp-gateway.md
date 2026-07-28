@@ -138,7 +138,7 @@ Control messages (new, `kind`-discriminated like `RunControl`):
 
 - companion → gateway: `{kind:'hello', endpoint, device, agents:[{agent,
 model?}...], maxSessions}` on connect; presence is the connection itself.
-  `device` is a free-text indicator ("macbook-pro", "jbot-vps") surfaced in
+  `device` is a free-text indicator ("macbook-pro", "build-vps") surfaced in
   `/api/endpoints` and the viewer, so flat endpoint ids stay ergonomic.
 - client → gateway: `{kind:'open', endpoint, agent, sessionId, repo?, ref?}`;
   gateway relays to companion, which acks `{kind:'opened'| 'refused', reason?}`.
@@ -155,7 +155,7 @@ interprets `frame`.
 - New routes (same process, same auth style):
   - `GET /api/endpoints/:id/stream` + `POST /api/endpoints/:id/ingest` —
     companion attachment, authed by **per-endpoint token** (new
-    `JBOT_GATEWAY_ENDPOINTS` config: `id:token` pairs, env or file; MVP is
+    `SYMMA_GATEWAY_ENDPOINTS` config: `id:token` pairs, env or file; MVP is
     operator-managed, no signup).
   - `GET /api/sessions/:sid/stream` + `POST /api/sessions/:sid/ingest` —
     client side, authed by the existing gateway token.
@@ -170,8 +170,8 @@ endpointId}`; on either side dropping, fail open sessions per the delivery
 ## Companion (new `src/companion/`, bundled like the gateway)
 
 - Single binary (`node dist/companion/index.js`), config = env:
-  `JBOT_COMPANION_GATEWAY` (url), `JBOT_COMPANION_TOKEN`,
-  `JBOT_COMPANION_ENDPOINT` (id), `JBOT_COMPANION_AGENTS` (csv of enabled
+  `SYMMA_COMPANION_GATEWAY` (url), `SYMMA_COMPANION_TOKEN`,
+  `SYMMA_COMPANION_ENDPOINT` (id), `SYMMA_COMPANION_AGENTS` (csv of enabled
   agents). Reuses the existing `kiloAcpSpec`/`codexAcpSpec`/… from
   `shared/acp-protocol.ts` — with **ambient auth**: no key materialization; the specs'
   env indirection reads the user's real `~/.codex`, kilo auth, etc.
@@ -421,7 +421,7 @@ machines:
    control UI and issues a short-lived, single-use pairing code bound to that
    Slack workspace and member.
 3. On the machine where their agents are already logged in, the member runs one
-   command, illustrated as `jbot companion connect <code>`. It installs or
+   command, illustrated as `symma companion connect <code>`. It installs or
    starts the companion, which connects outbound; no public address is needed.
 4. The companion detects available ACP agents and their local login state. The
    member chooses a default device and agent in the control UI.
@@ -801,7 +801,7 @@ attribution and tamper-evidence arrive without touching protocol fidelity:
   offline (`scripts/verify-journal.ts`) — the journal becomes tamper-evident
   per actor without the gateway being trusted for attribution.
 - Keys are **per companion**, generated on first run at
-  `~/.local/share/jbot-companion/signing-key.pem` (0600) and advertised via
+  `~/.local/share/symma-companion/signing-key.pem` (0600) and advertised via
   `hello.publicKey`; the gateway holds only public halves, one per endpoint.
   The public half is also written beside it (`signing-key.pub.pem`) as the
   gateway-independent channel: an audit that distrusts the gateway needs a key

@@ -28,17 +28,17 @@ import { VIEWER_HTML } from './viewer.js';
 const HEARTBEAT_MS = 25_000;
 
 const port =
-  Number(process.env.JBOT_GATEWAY_PORT) > 0 ? Number(process.env.JBOT_GATEWAY_PORT) : 8790;
-const dataDir = process.env.JBOT_GATEWAY_DATA?.trim() || 'gateway-data';
-const token = process.env.JBOT_GATEWAY_TOKEN?.trim() || '';
-// No token = local mode: loopback bind only, no auth — JBOT_GATEWAY_HOST
+  Number(process.env.SYMMA_GATEWAY_PORT) > 0 ? Number(process.env.SYMMA_GATEWAY_PORT) : 8790;
+const dataDir = process.env.SYMMA_GATEWAY_DATA?.trim() || 'gateway-data';
+const token = process.env.SYMMA_GATEWAY_TOKEN?.trim() || '';
+// No token = local mode: loopback bind only, no auth — SYMMA_GATEWAY_HOST
 // cannot override that. With a token the default is all interfaces; behind a
-// local TLS proxy (deploy/observer), JBOT_GATEWAY_HOST=127.0.0.1 keeps token
+// local TLS proxy (deploy/observer), SYMMA_GATEWAY_HOST=127.0.0.1 keeps token
 // auth while making the proxy the only public door, firewall or not.
-const host = token ? process.env.JBOT_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
+const host = token ? process.env.SYMMA_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
 
 const log = (msg: string): void => {
-  console.log(`[jbot-gateway] ${msg}`);
+  console.log(`[symma-gateway] ${msg}`);
 };
 
 /** Journaling is observability: a write failure (ENOSPC, EACCES) must never
@@ -70,13 +70,13 @@ const journalKey = (runId: string, sessionId: string): string => `${runId}/${ses
 
 // Relay state: companions and clients each hold one SSE leg; sends resolve
 // through the maps so a reconnect rebinds without touching the relay.
-const endpointTokens = parseEndpointTokens(process.env.JBOT_GATEWAY_ENDPOINTS);
+const endpointTokens = parseEndpointTokens(process.env.SYMMA_GATEWAY_ENDPOINTS);
 const endpointStreams = new Map<string, ServerResponse>();
 const sessionStreams = new Map<string, ServerResponse>();
 const relay = createRelay({
   resumeWindowMs:
-    Number(process.env.JBOT_GATEWAY_RESUME_MS) > 0
-      ? Number(process.env.JBOT_GATEWAY_RESUME_MS)
+    Number(process.env.SYMMA_GATEWAY_RESUME_MS) > 0
+      ? Number(process.env.SYMMA_GATEWAY_RESUME_MS)
       : undefined,
   onLine: (sessionId, runId, _dir, line) => {
     const envelope = parseEnvelope(line);
@@ -549,6 +549,6 @@ server.listen(port, host, () => {
   log(
     token
       ? 'token auth enabled; ingest needs Authorization: Bearer, viewers ?token='
-      : 'local mode: loopback only, no auth (set JBOT_GATEWAY_TOKEN to expose)',
+      : 'local mode: loopback only, no auth (set SYMMA_GATEWAY_TOKEN to expose)',
   );
 });

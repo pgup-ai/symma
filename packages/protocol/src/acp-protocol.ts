@@ -4,7 +4,7 @@
  * of review concerns — the companion and gateway depend on this half, and it
  * is what would extract as a standalone package.
  */
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
@@ -21,6 +21,13 @@ import { KILO_CLI_BIN, KILO_GATEWAY_FREE_MODEL, KILO_PROVIDER_ID, kiloEnvForAuth
 import { parseModelName } from './model.js';
 
 const ACP_PROTOCOL_VERSION = 1;
+// What the handshake reports as this client. Read from package.json rather
+// than duplicated as a constant: a hand-copied version is wrong the first time
+// someone forgets it, and the field's whole use is display and debugging.
+// Resolves the same from src/ and dist/, and npm ships package.json always.
+const { name: CLIENT_NAME, version: CLIENT_VERSION } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { name: string; version: string };
 // One JSON-RPC frame far above any real message; growth past it means a
 // runaway child, and the connection fails loud instead of buffering to OOM.
 const ACP_MAX_FRAME_BYTES = 32 * 1024 * 1024;
@@ -376,7 +383,7 @@ export async function driveAcpSession(
     // ACP `name` is for programmatic use, so agents may branch on it — naming
     // one consumer would put that branch on every other one. A caller needing
     // its own identity gets an option when it exists, not a default nobody sets.
-    clientInfo: { name: '@symma/protocol', version: '0' },
+    clientInfo: { name: CLIENT_NAME, version: CLIENT_VERSION },
   })) as Record<string, unknown>;
   const newSession = () =>
     conn.request('session/new', { cwd: options.cwd, mcpServers: [] }) as Promise<

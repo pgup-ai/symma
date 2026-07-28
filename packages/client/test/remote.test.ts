@@ -50,7 +50,7 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Pr
 
 describe('remote acp prompt', () => {
   it('runs a prompt through gateway + companion and journals the session', async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'jbot-remote-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'symma-remote-'));
     const agentPath = join(dataDir, 'review-agent.mjs');
     writeFileSync(agentPath, REVIEW_AGENT);
     const port = 24000 + Math.floor(Math.random() * 2000);
@@ -64,11 +64,11 @@ describe('remote acp prompt', () => {
         {
           env: {
             ...process.env,
-            JBOT_GATEWAY_PORT: String(port),
-            JBOT_GATEWAY_DATA: dataDir,
-            JBOT_GATEWAY_TOKEN: 'client-tok',
-            JBOT_GATEWAY_HOST: '127.0.0.1',
-            JBOT_GATEWAY_ENDPOINTS: 'box:endpoint-tok',
+            SYMMA_GATEWAY_PORT: String(port),
+            SYMMA_GATEWAY_DATA: dataDir,
+            SYMMA_GATEWAY_TOKEN: 'client-tok',
+            SYMMA_GATEWAY_HOST: '127.0.0.1',
+            SYMMA_GATEWAY_ENDPOINTS: 'box:endpoint-tok',
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },
@@ -95,10 +95,10 @@ describe('remote acp prompt', () => {
         {
           env: {
             ...process.env,
-            JBOT_COMPANION_GATEWAY: base,
-            JBOT_COMPANION_TOKEN: 'endpoint-tok',
-            JBOT_COMPANION_ENDPOINT: 'box',
-            JBOT_COMPANION_AGENTS: `probe=${process.execPath} ${agentPath}`,
+            SYMMA_COMPANION_GATEWAY: base,
+            SYMMA_COMPANION_TOKEN: 'endpoint-tok',
+            SYMMA_COMPANION_ENDPOINT: 'box',
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} ${agentPath}`,
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },

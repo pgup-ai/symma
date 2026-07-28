@@ -113,7 +113,7 @@ export const VIEWER_HTML = `<!doctype html>
   </header>
   <div id="log"><div id="empty">
     <p>Pick a session to watch it stream — reasoning, tool calls, permission decisions and findings appear as they happen.</p>
-    <p>Feed a real review by pointing it here:<br /><code>JBOT_OBSERVER_URL=http://127.0.0.1:8790 npm run review:local</code></p>
+    <p>Feed it scripted traffic with <code>npm run gateway:demo</code>, or POST NDJSON envelopes to <code>/api/ingest</code>.</p>
   </div></div>
   <button id="jump">↓ latest</button>
 </main>
