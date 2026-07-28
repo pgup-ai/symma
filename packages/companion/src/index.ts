@@ -48,17 +48,17 @@ const BACKOFF_MAX_MS = 30_000;
 // Must-deliver buffer while the gateway is away; overflow fails sessions loud.
 const MAX_OUTBOX_LINES = 10_000;
 
-const gatewayUrl = (process.env.JBOT_COMPANION_GATEWAY ?? '').trim().replace(/\/+$/, '');
-const token = (process.env.JBOT_COMPANION_TOKEN ?? '').trim();
-const endpointId = (process.env.JBOT_COMPANION_ENDPOINT ?? '').trim();
-const device = (process.env.JBOT_COMPANION_DEVICE ?? '').trim() || hostname();
-const agentNames = (process.env.JBOT_COMPANION_AGENTS ?? 'kilo')
+const gatewayUrl = (process.env.SYMMA_COMPANION_GATEWAY ?? '').trim().replace(/\/+$/, '');
+const token = (process.env.SYMMA_COMPANION_TOKEN ?? '').trim();
+const endpointId = (process.env.SYMMA_COMPANION_ENDPOINT ?? '').trim();
+const device = (process.env.SYMMA_COMPANION_DEVICE ?? '').trim() || hostname();
+const agentNames = (process.env.SYMMA_COMPANION_AGENTS ?? 'kilo')
   .split(',')
   .map((entry) => entry.trim())
   .filter(Boolean);
 const maxSessions =
-  Number(process.env.JBOT_COMPANION_MAX_SESSIONS) > 0
-    ? Number(process.env.JBOT_COMPANION_MAX_SESSIONS)
+  Number(process.env.SYMMA_COMPANION_MAX_SESSIONS) > 0
+    ? Number(process.env.SYMMA_COMPANION_MAX_SESSIONS)
     : 2;
 
 /**
@@ -67,7 +67,7 @@ const maxSessions =
  * tamper-evident against the relay rather than merely by it.
  */
 function loadSigningKeys(): { privateKey: string; publicKey: string } {
-  const dir = join(homedir(), '.local', 'share', 'jbot-companion');
+  const dir = join(homedir(), '.local', 'share', 'symma-companion');
   const path = join(dir, 'signing-key.pem');
   // The public half sits beside it as a file the operator can copy off this
   // machine: a journal audit that distrusts the gateway needs a key that never
@@ -105,11 +105,13 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
 }
 
 const log = (msg: string): void => {
-  console.log(`[jbot-companion] ${msg}`);
+  console.log(`[symma-companion] ${msg}`);
 };
 
 if (!gatewayUrl || !token || !endpointId) {
-  console.error('Set JBOT_COMPANION_GATEWAY, JBOT_COMPANION_TOKEN, and JBOT_COMPANION_ENDPOINT.');
+  console.error(
+    'Set SYMMA_COMPANION_GATEWAY, SYMMA_COMPANION_TOKEN, and SYMMA_COMPANION_ENDPOINT.',
+  );
   process.exit(1);
 }
 
@@ -165,7 +167,7 @@ for (const entry of agentNames) {
   else agents.set(resolved.name, resolved.spec);
 }
 if (agents.size === 0) {
-  console.error('No usable agents; check JBOT_COMPANION_AGENTS and local auth.');
+  console.error('No usable agents; check SYMMA_COMPANION_AGENTS and local auth.');
   process.exit(1);
 }
 
@@ -314,7 +316,7 @@ async function openSession(control: OpenControl): Promise<void> {
   if (!spec) return refuse(`agent ${control.agent} not offered`);
 
   const model = control.model ?? 'default';
-  const workspace = mkdtempSync(join(tmpdir(), 'jbot-companion-'));
+  const workspace = mkdtempSync(join(tmpdir(), 'symma-companion-'));
   if (control.repo) {
     // The clone is the one await in this function: hold a slot across it so it
     // counts against capacity and a close can cancel it. Everything after runs
@@ -362,7 +364,7 @@ async function openSession(control: OpenControl): Promise<void> {
   }
   // Built-in specs build env from process.env, so scrub the companion's own
   // gateway credentials here — the single choke point every agent passes.
-  for (const key of Object.keys(env)) if (key.startsWith('JBOT_COMPANION_')) delete env[key];
+  for (const key of Object.keys(env)) if (key.startsWith('SYMMA_COMPANION_')) delete env[key];
 
   let child: ChildProcess;
   try {

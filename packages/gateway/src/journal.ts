@@ -15,8 +15,8 @@ import { isSafeId, type ObserverEnvelope } from '@symma/protocol';
 export type RunStatus = 'reviewing' | 'completed' | 'failed';
 const RUN_STATUSES: RunStatus[] = ['reviewing', 'completed', 'failed'];
 
-/** Run-level lifecycle control (the jbot verdict), sent on the ingest stream
- * alongside frames but stored per-run, not per-session. */
+/** Run-level lifecycle control (the caller's verdict), sent on the ingest
+ * stream alongside frames but stored per-run, not per-session. */
 export interface RunControl {
   v: 1;
   kind: 'run';

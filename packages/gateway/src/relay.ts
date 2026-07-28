@@ -15,7 +15,7 @@ import {
   type SendLine,
 } from '@symma/protocol';
 
-/** `JBOT_GATEWAY_ENDPOINTS="id:token,id2:token2"` → per-endpoint bearer tokens. */
+/** `SYMMA_GATEWAY_ENDPOINTS="id:token,id2:token2"` → per-endpoint bearer tokens. */
 export function parseEndpointTokens(raw: string | undefined): Map<string, string> {
   const tokens = new Map<string, string>();
   for (const entry of raw?.split(',') ?? []) {

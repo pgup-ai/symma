@@ -9,7 +9,7 @@ export const VIEWER_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>jbot observer</title>
+<title>symma observer</title>
 <style>
   :root {
     --bg:#0c0f14; --panel:#11161e; --elev:#18202b; --line:#232c39;
@@ -98,7 +98,7 @@ export const VIEWER_HTML = `<!doctype html>
 </head>
 <body>
 <aside>
-  <div class="brand"><span class="mark"></span> jbot observer
+  <div class="brand"><span class="mark"></span> symma observer
     <span class="conn" id="conn"><span class="cdot"></span><span id="connText">connecting</span></span>
   </div>
   <div class="runs" id="runs"></div>
@@ -113,7 +113,7 @@ export const VIEWER_HTML = `<!doctype html>
   </header>
   <div id="log"><div id="empty">
     <p>Pick a session to watch it stream — reasoning, tool calls, permission decisions and findings appear as they happen.</p>
-    <p>Feed a real review by pointing it here:<br /><code>JBOT_OBSERVER_URL=http://127.0.0.1:8790 npm run review:local</code></p>
+    <p>Feed it scripted traffic with <code>npm run gateway:demo</code>, or POST NDJSON envelopes to <code>/api/ingest</code>.</p>
   </div></div>
   <button id="jump">↓ latest</button>
 </main>

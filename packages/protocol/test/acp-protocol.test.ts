@@ -192,12 +192,12 @@ describe('acp', () => {
     );
   });
 
-  // execute-allow and unknown-kind-allow are the DESIGNED policy (invariant
-  // #8: bash stays allowed; agent-side sandbox/plan layers police commands),
-  // so this test pins them on purpose.
+  // execute-allow and unknown-kind-allow are the DESIGNED policy of the
+  // read-only floor (bash stays allowed; the agent-side sandbox and plan mode
+  // police commands), so this test pins them on purpose.
   it('hands every frame to the tee, in both directions', async () => {
     // The tee is injected rather than built here, so nothing on either side of
-    // the boundary proves it is still called — jbot-review passes one and its
+    // the boundary proves it is still called — a consumer passes one and its
     // suite would stay green if this stopped firing.
     const teed: [string, string | undefined][] = [];
     const fake = fakeAgentIo({
@@ -237,6 +237,37 @@ describe('acp', () => {
     );
   });
 
+  it('introduces itself as the library, not as a consumer', async () => {
+    // Once shipped a downstream product's name — true of the repo this was
+    // extracted from, false for everyone else, and invisible because no test
+    // looked at what the handshake claims. The only place it names itself.
+    let intro: unknown;
+    const fake = fakeAgentIo({ onPrompt: (agent) => agent.finish() });
+    await driveAcpSession(
+      { input: fake.input, output: fake.output },
+      {
+        cwd: '/x',
+        prompt: 'p',
+        agent: 'fake',
+        label: 'review',
+        log: noLog,
+        tee: (_dir, frame) => {
+          if (frame.method === 'initialize')
+            intro = (frame.params as { clientInfo?: unknown }).clientInfo;
+        },
+      },
+    );
+    const pkg = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as Record<string, string>;
+    assert.deepEqual(intro, { name: pkg.name, version: pkg.version });
+    // Both sides read package.json, so that alone would hold for any pair of
+    // values — including the empty ones a broken read produces. These pin what
+    // the pair has to be.
+    assert.match(pkg.name, /^@symma\//);
+    assert.match(pkg.version, /^\d+\.\d+\.\d+/);
+  });
+
   it('answers permission requests read-only: mutations rejected, reads/exec allowed', () => {
     const options = [
       { optionId: 'aa', kind: 'allow_always' },
@@ -268,7 +299,7 @@ describe('acp', () => {
       }),
       { outcome: { outcome: 'selected', optionId: 'ao' } },
     );
-    // switch_mode is denied: jbot sets the session mode; approving one would
+    // switch_mode is denied: the caller sets the session mode; approving one would
     // let a prompt-injected switch escape the plan-mode read-only layer.
     assert.deepEqual(
       respondToPermissionRequest({
@@ -522,7 +553,7 @@ describe('acp', () => {
   });
 
   it('materializes per-agent read-only and model config', () => {
-    const codexHome = mkdtempSync(join(tmpdir(), 'jbot-test-codex-'));
+    const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
     writeFileSync(codexAuthPath(codexHome), '{}');
     const codex = codexAcpSpec(codexHome);
     // Seed the adapter runtime overrides so the strip assertions are not
@@ -531,9 +562,13 @@ describe('acp', () => {
     const overrides = ['CODEX_CONFIG', 'CODEX_PATH', 'MODEL_PROVIDER'] as const;
     const savedOverrides = overrides.map((key) => [key, process.env[key]] as const);
     for (const key of overrides) process.env[key] = `ambient-${key}`;
+    const codexLeakPrefix = 'symma-codex-acp-';
     const codexEnv = codex.env('codex/gpt-5.2-codex');
     try {
       const home = codexEnv.env.CODEX_HOME as string;
+      // Anchors the leak check below: matched against a stale prefix, both its
+      // snapshots are empty and it passes without observing anything.
+      assert.ok(home.includes(codexLeakPrefix), 'codex temp dirs carry the expected prefix');
       const config = readFileSync(join(home, 'config.toml'), 'utf8');
       assert.match(config, /sandbox_mode = "read-only"/);
       assert.match(config, /model = "gpt-5\.2-codex"/);
@@ -560,9 +595,8 @@ describe('acp', () => {
     }
     rmSync(codexHome, { recursive: true, force: true });
 
-    const codexLeakPrefix = 'jbot-codex-acp-';
     const codexBefore = readdirSync(tmpdir()).filter((entry) => entry.startsWith(codexLeakPrefix));
-    const codexEmptyHome = mkdtempSync(join(tmpdir(), 'jbot-test-empty-'));
+    const codexEmptyHome = mkdtempSync(join(tmpdir(), 'symma-test-empty-'));
     try {
       assert.throws(() => codexAcpSpec(codexEmptyHome).env('codex/default'));
     } finally {
@@ -575,7 +609,7 @@ describe('acp', () => {
     assert.deepEqual(kilo.args('kilo/default'), ['acp']);
     assert.equal(kilo.requirePlanMode, true);
     // Selection ALWAYS runs: kilo's session default is a paid model while
-    // jbot's kilo/default means the free gateway tier; values are prefixed.
+    // a caller's `kilo/default` means the free gateway tier; values are prefixed.
     assert.deepEqual(kilo.modelConfigCandidates?.('kilo/default'), [
       'kilo/kilo-auto/free',
       'kilo-auto/free',
@@ -599,7 +633,7 @@ describe('acp', () => {
       'acp',
     ]);
     assert.deepEqual(cursorAcpSpec('key').args('cursor/default'), ['acp']);
-    const devinHome = mkdtempSync(join(tmpdir(), 'jbot-test-devin-'));
+    const devinHome = mkdtempSync(join(tmpdir(), 'symma-test-devin-'));
     const sourceCredentials = devinCredentialsPath(devinHome);
     mkdirSync(dirname(sourceCredentials), { recursive: true });
     writeFileSync(sourceCredentials, 'windsurf_api_key = "k"\n');
@@ -608,10 +642,12 @@ describe('acp', () => {
     assert.deepEqual(devin.modelConfigCandidates?.('devin/glm-5.2'), ['glm-5.2', 'devin/glm-5.2']);
     assert.deepEqual(devin.modelConfigCandidates?.('devin/default'), []);
     assert.equal(devin.requirePlanMode, true);
+    const devinLeakPrefix = 'symma-devin-acp-';
     const devinEnv = devin.env('devin/glm-5.2');
     try {
       const home = devinEnv.env.HOME as string;
       assert.notEqual(home, devinHome);
+      assert.ok(home.includes(devinLeakPrefix), 'devin temp dirs carry the expected prefix');
       assert.equal(devinEnv.env.XDG_CONFIG_HOME, undefined);
       assert.ok(existsSync(devinCredentialsPath(home)));
       const config = JSON.parse(
@@ -622,9 +658,8 @@ describe('acp', () => {
       devinEnv.cleanup?.();
     }
     // I/O failure after mkdtemp must reclaim the temp dir (no cleanup returned).
-    const devinLeakPrefix = 'jbot-devin-acp-';
     const before = readdirSync(tmpdir()).filter((entry) => entry.startsWith(devinLeakPrefix));
-    const devinEmptyHome = mkdtempSync(join(tmpdir(), 'jbot-test-empty-'));
+    const devinEmptyHome = mkdtempSync(join(tmpdir(), 'symma-test-empty-'));
     try {
       assert.throws(() => devinAcpSpec(devinEmptyHome).env('devin/default'));
     } finally {

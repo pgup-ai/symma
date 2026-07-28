@@ -4,7 +4,7 @@
  * of review concerns — the companion and gateway depend on this half, and it
  * is what would extract as a standalone package.
  */
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
@@ -21,6 +21,13 @@ import { KILO_CLI_BIN, KILO_GATEWAY_FREE_MODEL, KILO_PROVIDER_ID, kiloEnvForAuth
 import { parseModelName } from './model.js';
 
 const ACP_PROTOCOL_VERSION = 1;
+// What the handshake reports as this client. Read from package.json rather
+// than duplicated as a constant: a hand-copied version is wrong the first time
+// someone forgets it, and the field's whole use is display and debugging.
+// Resolves the same from src/ and dist/, and npm ships package.json always.
+const { name: CLIENT_NAME, version: CLIENT_VERSION } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { name: string; version: string };
 // One JSON-RPC frame far above any real message; growth past it means a
 // runaway child, and the connection fails loud instead of buffering to OOM.
 const ACP_MAX_FRAME_BYTES = 32 * 1024 * 1024;
@@ -284,7 +291,7 @@ export interface ModelOptionCandidate {
   options?: ModelOptionCandidate[];
 }
 
-/** Resolves a jbot model id against a model config option's choices: exact
+/** Resolves a caller's model id against a model config option's choices: exact
  * value, then display name (case-insensitive), then dotted→hyphenated value
  * (`glm-5.2` ⇒ devin's `glm-5-2`). Grouped option lists (spec: entries with a
  * nested `options` array under a group header) are flattened first — a
@@ -373,7 +380,10 @@ export async function driveAcpSession(
       // agents may not).
       session: { configOptions: {} },
     },
-    clientInfo: { name: 'jbot-review', version: '0' },
+    // ACP `name` is for programmatic use, so agents may branch on it — naming
+    // one consumer would put that branch on every other one. A caller needing
+    // its own identity gets an option when it exists, not a default nobody sets.
+    clientInfo: { name: CLIENT_NAME, version: CLIENT_VERSION },
   })) as Record<string, unknown>;
   const newSession = () =>
     conn.request('session/new', { cwd: options.cwd, mcpServers: [] }) as Promise<
@@ -549,7 +559,7 @@ async function selectModelConfigOption(
 }
 
 export interface AcpAgentSpec {
-  /** jbot backend id this spec serves; the engine name becomes `acp:<id>`. */
+  /** Backend id this spec serves; the engine name becomes `acp:<id>`. */
   id: string;
   bin: string;
   args(model: string): string[];
@@ -558,8 +568,8 @@ export interface AcpAgentSpec {
   /** Ordered model-id candidates for the agent's ACP model config option —
    * for agents (devin, kilo) whose CLI flags/env/config never reach the ACP
    * session. Empty result skips selection; kilo always returns candidates
-   * because its session default is a PAID model while jbot's kilo/default
-   * means the free gateway tier. */
+   * because its session default is a PAID model while the caller's
+   * `kilo/default` means the free gateway tier. */
   modelConfigCandidates?(model: string): string[];
   /** See AcpSessionOptions.requirePlanMode. */
   requirePlanMode?: boolean;
@@ -590,7 +600,7 @@ export function devinAcpSpec(credentialsHome = process.env.HOME || homedir()): A
     // reach the ACP session (verified via the session's own config-option
     // readout), so the model rides session/set_config_option instead.
     env: () => {
-      const dir = mkdtempSync(join(tmpdir(), 'jbot-devin-acp-'));
+      const dir = mkdtempSync(join(tmpdir(), 'symma-devin-acp-'));
       try {
         const credentials = devinCredentialsPath(dir);
         mkdirSync(dirname(credentials), { recursive: true, mode: 0o700 });
@@ -626,7 +636,7 @@ export function kiloAcpSpec(auth: string): AcpAgentSpec {
     // env-injected KILO_AUTH_CONTENT + ambient key stripping — the argv
     // driver's materialization, live-verified against `kilo acp`.
     env: () => {
-      const dir = mkdtempSync(join(tmpdir(), 'jbot-kilo-acp-'));
+      const dir = mkdtempSync(join(tmpdir(), 'symma-kilo-acp-'));
       try {
         return {
           env: kiloEnvForAuth(auth, dir),
@@ -637,8 +647,8 @@ export function kiloAcpSpec(auth: string): AcpAgentSpec {
         throw error;
       }
     },
-    // ALWAYS select: the ACP session default is a paid model, while jbot's
-    // kilo/default means the free gateway tier. Option values are full
+    // ALWAYS select: the ACP session default is a paid model, while a caller's
+    // `kilo/default` means the free gateway tier. Option values are full
     // gateway-prefixed ids (`kilo/<vendor>/<model>`), so the prefixed form
     // leads; the bare id is only a hedge against kilo dropping the prefix.
     modelConfigCandidates: (model) => {
@@ -658,7 +668,7 @@ export function codexAcpSpec(codexHome: string): AcpAgentSpec {
     env: (model) => {
       // Same per-spawn CODEX_HOME copy as the CLI driver. Read-only and model
       // ride config.toml because the adapter takes no argv for them.
-      const dir = mkdtempSync(join(tmpdir(), 'jbot-codex-acp-'));
+      const dir = mkdtempSync(join(tmpdir(), 'symma-codex-acp-'));
       try {
         copyFileSync(codexAuthPath(codexHome), codexAuthPath(dir));
         const { modelID } = parseModelName(model);

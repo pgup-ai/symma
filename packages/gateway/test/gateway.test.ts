@@ -31,7 +31,7 @@ const envelope = (overrides: Partial<ObserverEnvelope> = {}): ObserverEnvelope =
 
 describe('gateway', () => {
   it('appends, lists, and replays journals from plain files', () => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'jbot-gw-test-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'symma-gw-test-'));
     try {
       appendEnvelope(dataDir, envelope({ seq: 1 }));
       appendEnvelope(dataDir, envelope({ seq: 2 }));
@@ -52,7 +52,7 @@ describe('gateway', () => {
   });
 
   it('parses and stores run-status controls, surfaced in the run listing', () => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'jbot-gw-run-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'symma-gw-run-'));
     try {
       const control = parseRunControl(
         JSON.stringify({ v: 1, kind: 'run', runId: 'run-1', status: 'failed', ts: 1 }),
@@ -73,7 +73,7 @@ describe('gateway', () => {
   });
 
   it('serves ingest → journal → SSE replay and live fanout with token auth', async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), 'jbot-gw-int-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'symma-gw-int-'));
     const port = 18000 + Math.floor(Math.random() * 2000);
     const base = `http://127.0.0.1:${port}`;
     const token = 'test-token';
@@ -85,11 +85,11 @@ describe('gateway', () => {
         {
           env: {
             ...process.env,
-            JBOT_GATEWAY_PORT: String(port),
-            JBOT_GATEWAY_DATA: dataDir,
-            JBOT_GATEWAY_TOKEN: token,
+            SYMMA_GATEWAY_PORT: String(port),
+            SYMMA_GATEWAY_DATA: dataDir,
+            SYMMA_GATEWAY_TOKEN: token,
             // Reverse-proxy topology: token auth without the 0.0.0.0 bind.
-            JBOT_GATEWAY_HOST: '127.0.0.1',
+            SYMMA_GATEWAY_HOST: '127.0.0.1',
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },

@@ -86,7 +86,7 @@ export function parseKiloModelList(output: string): string[] {
 }
 
 export async function listKiloModels(workspace: string, auth: string): Promise<string[]> {
-  const dir = mkdtempSync(join(tmpdir(), 'jbot-kilo-'));
+  const dir = mkdtempSync(join(tmpdir(), 'symma-kilo-'));
   try {
     const result = await spawnWithTimeout(KILO_CLI_BIN, ['models'], {
       cwd: workspace,
