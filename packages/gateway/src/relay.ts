@@ -148,6 +148,11 @@ export function createRelay(options: RelayOptions = {}) {
       return sessions.get(sessionId)?.owner;
     },
 
+    /** Ids retention must leave alone: their frames are still arriving. */
+    liveSessionIds(): string[] {
+      return [...sessions.keys()];
+    },
+
     listEndpoints(owner: string): EndpointPresence[] {
       return [...endpoints.values()]
         .filter((a) => a.owner === owner)
@@ -162,9 +167,11 @@ export function createRelay(options: RelayOptions = {}) {
         }));
     },
 
-    /** Route a client's open to its endpoint, or refuse synchronously. */
-    openSession(control: OpenControl, clientSend: SendLine, caller: string): void {
-      const refuse = (code: RefusalCode, reason: string): void =>
+    /** Route a client's open to its endpoint, or refuse synchronously. Returns
+     * whether it was accepted — `sessionRun` cannot answer that, since a
+     * `session_in_use` refusal means someone else's session holds the id. */
+    openSession(control: OpenControl, clientSend: SendLine, caller: string): boolean {
+      const refuse = (code: RefusalCode, reason: string): false => {
         clientSend(
           JSON.stringify({
             kind: 'refused',
@@ -173,6 +180,8 @@ export function createRelay(options: RelayOptions = {}) {
             reason,
           } satisfies AckControl),
         );
+        return false;
+      };
       const attachment = endpoints.get(control.endpoint);
       // Someone else's endpoint is indistinguishable from one that is away:
       // which endpoints exist is not the caller's to learn by probing.
@@ -191,18 +200,23 @@ export function createRelay(options: RelayOptions = {}) {
       });
       attachment.sessions.add(control.sessionId);
       attachment.send(JSON.stringify(control));
+      return true;
     },
 
     /** opened/refused from the companion; a refusal frees the slot. Ignored
      * unless the session belongs to this endpoint (no cross-endpoint spoofing). */
-    endpointAck(endpoint: string, control: AckControl, line: string): void {
+    endpointAck(endpoint: string, control: AckControl, line: string): boolean {
       const session = sessions.get(control.sessionId);
-      if (session?.endpoint !== endpoint) return;
+      // A companion naming a session it does not hold is ignored, and the
+      // caller must learn that: acting on a forged refusal would delete the
+      // real owner's row.
+      if (session?.endpoint !== endpoint) return false;
       session.clientSend(line);
       if (control.kind === 'refused') {
         sessions.delete(control.sessionId);
         endpoints.get(endpoint)?.sessions.delete(control.sessionId);
       }
+      return true;
     },
 
     /** Frame from the companion side, relayed to its session's client. A

@@ -186,10 +186,9 @@ describe('tenancy', () => {
       }[];
       assert.equal(opened[0]?.activeSessions, 0, "bob's open never reached alice's endpoint");
 
-      // Nor may the refusal leave a row. It would name ALICE's endpoint, and
-      // recordSession is ON CONFLICT DO NOTHING — so if bob later opened this
-      // id for real, the stale row would still say alice, handing her his
-      // journal.
+      // Nor may the refusal leave a row. It would name ALICE's endpoint, so
+      // bob could never open that id for real afterwards — the insert would
+      // conflict and close his session.
       const store = await openStore(
         pg.getConnectionUri(),
         join(import.meta.dirname, '../src/schema.sql'),
@@ -308,15 +307,23 @@ describe('tenancy', () => {
       assert.deepEqual(readJournalLines(dataDir, 'run-old', 'sid-old'), []);
       assert.notDeepEqual(readJournalLines(dataDir, 'run-new', 'sid-new'), []);
 
+      // Its own workspace: uninstalling the shared one would invalidate alice
+      // and bob for every test after this, which is an ordering rule nobody
+      // adding a test would see.
+      const doomed = await provision(url, {
+        team: 'doomed',
+        slackUser: 'ivan',
+        endpoint: 'ivan-box',
+      });
+      await seed('run-gone', 'sid-gone', 'ivan-box');
       // Uninstall reports the frames before the cascade removes the rows, or
       // they would be unreachable and undeletable.
-      await seed('run-gone', 'sid-gone', 'bob-laptop');
-      forget(await store.deleteWorkspace('acme'));
+      forget(await store.deleteWorkspace('doomed'));
       assert.deepEqual(readJournalLines(dataDir, 'run-gone', 'sid-gone'), []);
       // tokens.subject_id is polymorphic, so no cascade reaches it — an
       // uninstall that skipped them would leave live credentials behind.
-      assert.equal(await store.ownerForClientToken(alice.clientToken), undefined);
-      assert.equal(await store.endpointForToken(alice.endpointToken), undefined);
+      assert.equal(await store.ownerForClientToken(doomed.clientToken), undefined);
+      assert.equal(await store.endpointForToken(doomed.endpointToken), undefined);
     } finally {
       await store.close();
     }
@@ -427,6 +434,47 @@ describe('tenancy', () => {
         });
       }
       assert.equal(await live(), 1, "eve's close did not end dana's session");
+
+      // And an open reusing dana's session id must not end it either. The
+      // relay refuses `session_in_use`, but asking sessionRun whether the open
+      // landed answers about DANA's session — and the failed insert that
+      // follows closes it.
+      await as(eve.clientToken, '/api/sessions/sid-live/ingest', {
+        method: 'POST',
+        body: `${JSON.stringify({
+          kind: 'open',
+          sessionId: 'sid-live',
+          runId: 'run-eve',
+          endpoint: 'eve-laptop',
+          agent: 'kilo',
+        })}\n`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(await live(), 1, "eve's duplicate id did not end dana's session");
+
+      // Nor may eve's companion refuse a session it does not hold. The relay
+      // ignores the cross-endpoint ack; acting on it anyway would delete dana's
+      // row, stripping her journal of both authorization and retention.
+      const detachEve = await attach(eve.endpointToken, 'eve-laptop');
+      try {
+        await as(eve.endpointToken, '/api/endpoints/eve-laptop/ingest', {
+          method: 'POST',
+          body: `${JSON.stringify({ kind: 'refused', sessionId: 'sid-live', reason: 'nope' })}\n`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal(await live(), 1, "eve's forged refusal did not end dana's session");
+        const store = await openStore(
+          pg.getConnectionUri(),
+          join(import.meta.dirname, '../src/schema.sql'),
+        );
+        try {
+          assert.equal(await store.ownerForSession('run-live', 'sid-live'), dana.owner);
+        } finally {
+          await store.close();
+        }
+      } finally {
+        detachEve();
+      }
     } finally {
       detach();
     }
@@ -538,6 +586,29 @@ describe('tenancy', () => {
         agent: 'kilo',
       });
       assert.equal(await store.ownerForSession('run-two', 'sid-reused'), 'u-shared-gina');
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('leaves a live session alone when retention comes for it', async () => {
+    // Deleting a live session's row does not stop the frames: the relay keeps
+    // writing, recreating a journal with no row — unreadable, and invisible to
+    // every sweep after.
+    const url = pg.getConnectionUri();
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      await store.recordSession({
+        id: 'sid-running',
+        runId: 'run-running',
+        endpoint: 'gina-box',
+        agent: 'kilo',
+      });
+      await ageSession(url, 'sid-running', 40);
+      assert.deepEqual(await store.expireSessions(30, ['sid-running']), []);
+      assert.deepEqual(await store.expireSessions(30, []), [
+        { runId: 'run-running', sessionId: 'sid-running' },
+      ]);
     } finally {
       await store.close();
     }

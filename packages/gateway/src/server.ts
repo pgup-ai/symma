@@ -240,11 +240,14 @@ async function handleEndpointIngest(
         relay.attachEndpoint(control, sendToEndpoint(id), owner);
         storeWrite(`markSeen ${id}`, store?.markSeen(id));
       } else if (control.kind === 'opened' || control.kind === 'refused') {
-        relay.endpointAck(id, control, line);
+        // Only on an ack the relay actually applied: a companion naming
+        // another endpoint's session is ignored there, and deleting its row
+        // anyway would strip the real owner's authorization and retention.
+        const applied = relay.endpointAck(id, control, line);
         // The relay accepted this open before the companion saw it; a refusal
         // now leaves a row with no session, which both shows as an empty run
         // and blocks the id from being opened again.
-        if (control.kind === 'refused')
+        if (applied && control.kind === 'refused')
           storeWrite(
             `deleteSessionRow ${control.sessionId}`,
             store?.deleteSessionRow(control.sessionId),
@@ -271,12 +274,12 @@ async function handleSessionIngest(
   const { overflow } = await readNdjsonBody(req, (line) => {
     const control = parseRelayControl(line);
     if (control?.kind === 'open' && control.sessionId === sid) {
-      relay.openSession(control, sendToSession(sid), owner);
+      const accepted = relay.openSession(control, sendToSession(sid), owner);
       // A leg registered before the open is unowned by construction, and
       // sendToSession resolves it at send time — so whoever holds it when the
       // open lands becomes the target. Evict a stranger's; the opener
       // reconnects, and `maySession` keeps them out from here on.
-      if (relay.sessionRun(sid) && sessionStreamOwners.get(sid) !== owner) {
+      if (accepted && sessionStreamOwners.get(sid) !== owner) {
         sessionStreams.get(sid)?.end();
         sessionStreams.delete(sid);
         sessionStreamOwners.delete(sid);
@@ -284,7 +287,7 @@ async function handleSessionIngest(
       // Only a session the relay accepted may leave a row. A refused open that
       // recorded one would put a run in its owner's listing whose journal never
       // existed, and every read of it 404s.
-      if (relay.sessionRun(sid) && store) {
+      if (accepted && store) {
         // Without this row the session's frames are unreadable, undeletable and
         // invisible to retention, so they would outlive the window silently.
         // Losing the session is the lesser failure, and a loud one.
@@ -582,11 +585,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // arm it again if this leg drops — symmetric with the endpoint side, so a
       // blip or the SIGTERM drain doesn't kill the session outright.
       relay.attachClient(sid);
-      sessionStreamOwners.set(sid, owner);
       registerPeerStream(sessionStreams, sid, res, () => {
         relay.detachClient(sid);
         if (sessionStreams.get(sid) === undefined) sessionStreamOwners.delete(sid);
       });
+      // After registering, not before: evicting the previous leg runs its
+      // cleanup, which would delete the entry this line sets.
+      sessionStreamOwners.set(sid, owner);
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
@@ -722,7 +727,7 @@ if (databaseUrl) {
     // interval so a transient database blip does not decide whether we start.
     const sweep = (): void => {
       void (async () => {
-        const doomed = await store!.expireSessions(retentionDays);
+        const doomed = await store!.expireSessions(retentionDays, relay.liveSessionIds());
         forgetSessions(doomed);
         if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
       })().catch((error: unknown) =>

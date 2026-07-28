@@ -228,4 +228,42 @@ describe('relay', () => {
     // And the refusal left no session behind for its owner to trip over.
     assert.equal(relay.sessionOwner('sid-1'), undefined);
   });
+
+  it('reports whether an open and an ack were actually applied', () => {
+    // The callers use these to decide whether to touch the database. Asking
+    // sessionRun instead answered about whatever session held the id, which on
+    // a duplicate is the other owner's — and the answer killed it.
+    const relay = createRelay();
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    assert.equal(
+      relay.openSession(open(), () => {}, OWNER),
+      true,
+    );
+    assert.equal(
+      relay.openSession(open(), () => {}, OWNER),
+      false,
+      'duplicate id refused',
+    );
+    assert.equal(
+      relay.openSession(open({ endpoint: 'ghost' }), () => {}, OWNER),
+      false,
+      'unknown endpoint refused',
+    );
+
+    // A companion naming a session it does not hold is ignored, and says so.
+    const ack = { kind: 'refused' as const, sessionId: 'sid-1' };
+    assert.equal(relay.endpointAck('someone-else', ack, JSON.stringify(ack)), false);
+    assert.equal(relay.sessionOwner('sid-1'), OWNER, 'the real session survives');
+    assert.equal(relay.endpointAck('laptop', ack, JSON.stringify(ack)), true);
+    assert.equal(relay.sessionOwner('sid-1'), undefined);
+  });
+
+  it('leaves live sessions out of what retention may expire', () => {
+    const relay = createRelay();
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    relay.openSession(open(), () => {}, OWNER);
+    assert.deepEqual(relay.liveSessionIds(), ['sid-1']);
+    relay.closeSession('sid-1', 'done');
+    assert.deepEqual(relay.liveSessionIds(), []);
+  });
 });

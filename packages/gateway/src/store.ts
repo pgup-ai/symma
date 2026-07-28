@@ -37,7 +37,9 @@ export interface Store {
   /** §1 data lifecycle. Each returns the sessions whose frames the caller must
    * now delete from disk — the row and the file are one unit, and only the
    * caller knows where the files live. */
-  expireSessions(olderThanDays: number): Promise<SessionRef[]>;
+  /** `live` is excluded: its frames are still arriving, and a session that
+   * lost its row keeps writing a journal nothing can read or expire. */
+  expireSessions(olderThanDays: number, live?: string[]): Promise<SessionRef[]>;
   deleteSession(owner: Owner, runId: string, sessionId: string): Promise<SessionRef[]>;
   deleteWorkspace(slackTeamId: string): Promise<SessionRef[]>;
   deactivateUser(slackTeamId: string, slackUserId: string): Promise<SessionRef[]>;
@@ -115,12 +117,13 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async markSeen(endpoint) {
       await pool.query(`UPDATE endpoints SET last_seen_at = now() WHERE id = $1`, [endpoint]);
     },
-    async expireSessions(olderThanDays) {
+    async expireSessions(olderThanDays, live = []) {
       return refs(
         await pool.query(
-          `DELETE FROM sessions WHERE started_at < now() - make_interval(days => $1)
+          `DELETE FROM sessions
+            WHERE started_at < now() - make_interval(days => $1) AND NOT (id = ANY($2))
            RETURNING id, run_id`,
-          [olderThanDays],
+          [olderThanDays, live],
         ),
       );
     },
