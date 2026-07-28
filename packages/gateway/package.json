@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@symma/protocol": "0.1.2"
+    "@symma/protocol": "0.2.0"
   },
   "engines": {
     "node": ">=20"

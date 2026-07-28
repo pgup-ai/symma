@@ -86,6 +86,7 @@ export {
   type EndpointPresence,
   type HelloControl,
   type OpenControl,
+  type RefusalCode,
   type RelayControl,
   type SendLine,
 } from './relay-control.js';

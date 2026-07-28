@@ -45,10 +45,18 @@ export interface OpenControl {
   base?: string;
 }
 
+/** Why an open was refused; `reason` stays the human sentence. Whether to retry
+ * is the caller's decision, not ours. */
+export type RefusalCode = 'offline' | 'at_capacity' | 'no_such_agent' | 'session_in_use';
+
+const REFUSAL_CODES: RefusalCode[] = ['offline', 'at_capacity', 'no_such_agent', 'session_in_use'];
+
 export interface AckControl {
   kind: 'opened' | 'refused';
   sessionId: string;
   reason?: string;
+  /** Present on `refused`. */
+  code?: RefusalCode;
   /** On `opened`: what the client needs to drive this agent — the workspace
    * the companion checked out, plus the agent's session policy. The companion
    * owns the agent spec, so this is the one place that knowledge lives. */
@@ -125,6 +133,11 @@ export function parseRelayControl(line: string): RelayControl | undefined {
       if (!str(raw.sessionId) || !isSafeId(raw.sessionId)) return undefined;
       const control = { kind: raw.kind, sessionId: raw.sessionId } as AckControl | CloseControl;
       if (str(raw.reason)) control.reason = raw.reason;
+      // An unknown code drops, the frame does not: a relay that learns a new one
+      // must not make refusals unreadable to an older client.
+      if (raw.kind === 'refused' && REFUSAL_CODES.includes(raw.code as RefusalCode)) {
+        (control as AckControl).code = raw.code as RefusalCode;
+      }
       if (raw.kind === 'opened') {
         const ack = control as AckControl;
         if (str(raw.workspace)) ack.workspace = raw.workspace;

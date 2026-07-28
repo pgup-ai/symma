@@ -78,8 +78,8 @@ describe('relay', () => {
     const relay = createRelay();
     const refusals: string[] = [];
     const client = (line: string): void => {
-      const control = JSON.parse(line) as { kind: string; reason?: string };
-      if (control.kind === 'refused') refusals.push(control.reason ?? '');
+      const control = JSON.parse(line) as { kind: string; reason?: string; code?: string };
+      if (control.kind === 'refused') refusals.push(`${control.code}: ${control.reason}`);
     };
     relay.openSession(open(), client);
     relay.attachEndpoint(hello({ maxSessions: 1 }), () => {});
@@ -87,11 +87,13 @@ describe('relay', () => {
     relay.openSession(open(), client);
     relay.openSession(open({ sessionId: 'sid-1' }), client); // duplicate
     relay.openSession(open({ sessionId: 'sid-2' }), client); // over capacity
+    // The code is what a caller branches on — `offline` and `at_capacity` are
+    // worth retrying, the other two are its own bug or config.
     assert.deepEqual(refusals, [
-      'endpoint offline',
-      'agent ghost not offered',
-      'session id in use',
-      'at capacity',
+      'offline: endpoint offline',
+      'no_such_agent: agent ghost not offered',
+      'session_in_use: session id in use',
+      'at_capacity: at capacity',
     ]);
     // A companion refusal frees the slot for the next open.
     const ack = { kind: 'refused' as const, sessionId: 'sid-1', reason: 'no auth' };

@@ -12,6 +12,7 @@ import {
   type CloseControl,
   type HelloControl,
   type OpenControl,
+  type RefusalCode,
   type SendLine,
 } from '@symma/protocol';
 
@@ -149,20 +150,22 @@ export function createRelay(options: RelayOptions = {}) {
 
     /** Route a client's open to its endpoint, or refuse synchronously. */
     openSession(control: OpenControl, clientSend: SendLine): void {
-      const refuse = (reason: string): void =>
+      const refuse = (code: RefusalCode, reason: string): void =>
         clientSend(
           JSON.stringify({
             kind: 'refused',
             sessionId: control.sessionId,
+            code,
             reason,
           } satisfies AckControl),
         );
       const attachment = endpoints.get(control.endpoint);
-      if (!attachment?.online) return refuse('endpoint offline');
-      if (sessions.has(control.sessionId)) return refuse('session id in use');
-      if (attachment.sessions.size >= attachment.hello.maxSessions) return refuse('at capacity');
+      if (!attachment?.online) return refuse('offline', 'endpoint offline');
+      if (sessions.has(control.sessionId)) return refuse('session_in_use', 'session id in use');
+      if (attachment.sessions.size >= attachment.hello.maxSessions)
+        return refuse('at_capacity', 'at capacity');
       if (!attachment.hello.agents.some((a) => a.agent === control.agent))
-        return refuse(`agent ${control.agent} not offered`);
+        return refuse('no_such_agent', `agent ${control.agent} not offered`);
       sessions.set(control.sessionId, {
         runId: control.runId,
         endpoint: control.endpoint,

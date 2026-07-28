@@ -76,11 +76,12 @@ lines are not pinned.
   make the server give a session away.
 - **Work dispatched to a vanished machine fails with a _reason_, and reasons
   drive policy.** `runtime_offline`, `runtime_recovery` and `timeout` are
-  retryable and requeue at most twice; others do not retry at all. That is worth
-  weighing against §3's "hold the request for wake": theirs keeps far less state
-  and always reaches a definite outcome, at the cost of a member having to ask
-  again. **Decide this before M3a builds the queue**, because the two designs
-  store different things.
+  retryable and requeue at most twice; others do not retry at all. §3 had
+  proposed holding a request for wake instead; **this is what changed it**
+  (§3, §10). Refusing keeps member content out of a second pending state and
+  always reaches a definite outcome, at the cost of a member asking again. We
+  stop short of their retry policy — the relay reports the code, the caller
+  decides, per invariant 4.
 - **A restarting daemon reports what it was running.** Tasks it owned but never
   finalized come back as `runtime_recovery` rather than hanging. §7's goodbye
   control covers the clean exit; this is the crash, and it needs the same frame.
@@ -332,7 +333,7 @@ reconnect — it never runs the request on someone else's machine.
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | code expired / already used | "That code expired — run **Connect my agent** for a new one."                                                                                                                                                                                                                |
 | no agents detected          | install links for supported agents; do not attach an endpoint with zero agents                                                                                                                                                                                               |
-| laptop sleeps or closes     | name it as sleep, not failure, and hold the request for wake instead of refusing — never a silent hang. Both need §3 "Staying attached"; today `openSession` refuses and the bot has no way to tell sleep from anything else. **Expect this to be the top support issue.**   |
+| laptop sleeps or closes     | name it as sleep, not failure — the refusal carries `code: 'offline'` (§3), so the bot says so instead of hanging. Telling sleep from a crash still needs §3's last-seen. **Expect this to be the top support issue.**                                                       |
 | companion killed            | **the least distinguishable case, not the most.** SIGTERM with a live session sends a close today; SIGKILL, a crash and an idle exit send nothing, so they read exactly like sleep. §7's goodbye control is what separates them. The login service restarts it at next login |
 | two devices                 | both attach; member picks a default, per-session override available                                                                                                                                                                                                          |
 
@@ -521,14 +522,22 @@ later", which is the only thing the member has to act on.
 Cheap, and it buys the difference between "something is broken" and "your laptop
 is asleep" — which is the entire support burden.
 
-**Queue instead of refusing.** Today `openSession` refuses when the endpoint is
-offline. For a member who typed a request and shut the lid, refusing is the
-wrong answer to the right question: hold the request and run it on wake. This is
-the change that turns §2's predicted top issue into a non-event, and it is not
-free — the held request carries a prompt, so it is member content and takes the
-same tenancy scoping and retention rules as everything else in §1's store. Bound
-it with a TTL and a per-user cap, and put the TTL in the copy ("I'll run this
-when your Mac is back, up to 24h") rather than leaving it implicit.
+**Refuse with a code, do not hold the request.** Decided 2026-07-28, after
+weighing a queue against Multica's typed failures (§8). `openSession` already
+refuses an offline endpoint; the refusal now carries `code` — `offline`,
+`at_capacity`, `no_such_agent`, `session_in_use` — beside the human `reason`.
+
+Holding was the tempting answer and the wrong one. A held request carries a
+prompt, so it is member content: tenancy scoping, retention, a TTL, a per-user
+cap, and a second place where work can be pending. Refusing keeps that state at
+zero and always reaches a definite outcome, which the presence copy above
+already explains ("asleep — this will run when it wakes" becomes "asleep — send
+it again when it's back").
+
+**Whether to retry is the caller's**, per invariant 4. `offline` and
+`at_capacity` are worth retrying and the other two are the caller's own bug or
+config, but the relay reports the fact and stops there — it has no idea whether
+a Slack member is still waiting.
 
 **One narrow power assertion, scoped to a live session** — `caffeinate -i` on
 macOS, an inhibitor on Linux, held only while a session is open. The failure it
@@ -1088,12 +1097,12 @@ names the origin SHA keeps the provenance without dragging that along.
 
 ## 9. Milestones
 
-|         | scope                                                                                                                                                | done when                                                                                                                                                                |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle                                                                                  | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession` |
-| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                           | a fresh laptop pairs from one command with no config file                                                                                                                |
-| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                               | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                |
-| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and queue, not a hang or an error          |
+|         | scope                                                                                                                                                | done when                                                                                                                                                                 |
+| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle                                                                                  | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
+| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                           | a fresh laptop pairs from one command with no config file                                                                                                                 |
+| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                               | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
+| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
 
 M3d's bar is a person, not a passing test. If a tester needs a hand, the
 milestone is not done.
@@ -1107,11 +1116,6 @@ to anyone outside the operator.
 
 ## 10. Open / deferred
 
-- **A sleeping endpoint: hold the request, or fail it with a reason?** §3
-  proposes holding for wake with a TTL; Multica fails with `runtime_offline` and
-  requeues at most twice. Theirs stores far less and always reaches a definite
-  outcome; ours spares the member asking twice. **Decide before M3a**, since the
-  two store different things.
 - **Model enumeration** in Slack — deferred; needs a `models` control.
 - **Write-mode approvals** — the DM path writes inside an allowlisted workspace
   root (§4); what stays open is the escape case, where a request that would
@@ -1132,6 +1136,10 @@ to anyone outside the operator.
 - **Viewer scope** (should non-ACP runs appear at all) — unresolved product
   question inherited from M2, sharpened by run 30235271632, where the guideline
   pass ran to completion on the pi engine and appeared nowhere.
+
+**Decided 2026-07-28:** a sleeping endpoint is refused with a `code`, not
+queued for wake (§3). The queue would have put member content in a second
+pending state; refusing keeps it at zero. Retry is the caller's call.
 
 **Closed since M2, so do not re-defer them:** key rotation (M2's trigger was "a
 companion is shared or long-lived" — M3 companions are long-lived by definition;
