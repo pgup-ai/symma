@@ -564,6 +564,72 @@ function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<bo
   return store.sessionBelongsTo(owner, runId, sessionId);
 }
 
+/**
+ * A pair request carries a member's code and no token, so what it is limited by
+ * is where it came from. Behind the TLS proxy §6 puts in front every peer is the
+ * proxy, so only a configured one is allowed to name the caller — and only by
+ * the last hop it appended, since anything earlier in X-Forwarded-For was
+ * written by whoever it was talking to and is theirs to forge. Trusting the
+ * header from any peer would be worse than not throttling: it would look like a
+ * limit while a fresh value per request walked around it.
+ */
+// Compared verbatim, so it has to be the address Node reports — an IPv4 peer on
+// a dual-stack socket is `::ffff:127.0.0.1`, not `127.0.0.1`. A value that never
+// matches costs reach, not safety: every caller shares the proxy's bucket.
+const trustedProxy = process.env.SYMMA_GATEWAY_TRUSTED_PROXY?.trim() || '';
+function callerIp(req: IncomingMessage): string {
+  const peer = req.socket.remoteAddress ?? '';
+  if (!trustedProxy || peer !== trustedProxy) return peer;
+  const forwarded = req.headers['x-forwarded-for'];
+  const hops = (Array.isArray(forwarded) ? forwarded.join(',') : (forwarded ?? '')).split(',');
+  return hops[hops.length - 1]?.trim() || peer;
+}
+
+// Abuse control, not the guarantee: guessing a code is answered by its 80 bits
+// (§2), and this bounds the database work one caller can ask for.
+const PAIR_WINDOW_MS = Number(process.env.SYMMA_GATEWAY_PAIR_WINDOW_MS) || 60_000;
+const PAIR_TRIES = 10;
+const pairTries = new Map<string, { count: number; resetAt: number }>();
+
+function pairThrottled(ip: string): boolean {
+  const now = Date.now();
+  const seen = pairTries.get(ip);
+  if (!seen || seen.resetAt <= now) {
+    pairTries.set(ip, { count: 1, resetAt: now + PAIR_WINDOW_MS });
+    return false;
+  }
+  seen.count += 1;
+  return seen.count > PAIR_TRIES;
+}
+// Or the map grows with every address that ever asked.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, seen] of pairTries) if (seen.resetAt <= now) pairTries.delete(ip);
+}, PAIR_WINDOW_MS).unref();
+
+/** Small whole-body JSON, for the one route that takes an object rather than a
+ * stream. Undefined covers both an oversized body and unparseable one — the
+ * caller answers the same way for either. */
+const MAX_PAIR_BYTES = 4096;
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  let body = '';
+  req.setEncoding('utf8');
+  for await (const chunk of req as AsyncIterable<string>) {
+    body += chunk;
+    if (Buffer.byteLength(body) > MAX_PAIR_BYTES) return undefined;
+  }
+  try {
+    return JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+}
+
+function sendJson(res: ServerResponse, status: number, value: unknown): void {
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(value));
+}
+
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method === 'GET' && url.pathname === '/healthz') {
@@ -598,6 +664,47 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
     return;
+  }
+  // Unauthenticated by design: the code is the credential, and the member has
+  // no token until this call gives them one.
+  if (req.method === 'POST' && url.pathname === '/api/pair') {
+    // Nobody to pair without a store: M2's single-tenant gateway has one member
+    // and they configured its token themselves.
+    if (!databaseUrl) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+    if (pairThrottled(callerIp(req))) return sendJson(res, 429, { error: 'throttled' });
+    const body = await readJsonBody(req);
+    if (typeof body !== 'object' || body === null) return sendJson(res, 400, { error: 'request' });
+    const { code, device, agents } = body as {
+      code?: unknown;
+      device?: unknown;
+      agents?: unknown;
+    };
+    if (typeof code !== 'string') return sendJson(res, 400, { error: 'request' });
+    // §2: never attach an endpoint with no agents. The member is told which to
+    // log into instead, and a companion that can run nothing is not a device.
+    // `length` first: every() on an empty array is true, which is the whole
+    // case this rule exists for.
+    if (!Array.isArray(agents) || agents.length === 0)
+      return sendJson(res, 400, { error: 'agents' });
+    if (!agents.every((a) => typeof a === 'string' && a))
+      return sendJson(res, 400, { error: 'request' });
+    const spent = await store.redeemPairingCode(code);
+    if (!spent.ok) {
+      log(`pair refused: ${spent.why}`);
+      return sendJson(res, 401, { error: 'code' });
+    }
+    // Redeemed first on purpose. The other order leaves an endpoint and a live
+    // token belonging to nobody when the code turns out to be spent.
+    const claimed = await store.claimEndpoint(
+      spent.owner,
+      typeof device === 'string' ? device : '',
+    );
+    log(`paired endpoint ${claimed.endpoint}`);
+    return sendJson(res, 200, claimed);
   }
   const token = clientToken(req, url);
   const owner = await store.ownerForClientToken(token);

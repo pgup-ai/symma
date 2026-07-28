@@ -30,6 +30,12 @@ export interface Store {
   mintPairingCode(owner: Owner): Promise<string>;
   /** Spends a code. Two redeems of one code cannot both come back `ok`. */
   redeemPairingCode(code: string): Promise<PairingResult>;
+  /** The other half of pairing: an endpoint for this member and the token it
+   * will present, both returned once. The id is assigned here rather than taken
+   * from the request — the pair route is unauthenticated, so an id in its body
+   * would be a valid code away from claiming an endpoint the caller does not
+   * own (§2). Throws if they are not a member here any more. */
+  claimEndpoint(owner: Owner, device: string): Promise<{ endpoint: string; token: string }>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   /** The authorization question itself, not the owner to compare outside: with
@@ -160,6 +166,26 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         hash,
       ]);
       return { ok: false, why: seen ? 'spent' : 'unknown' };
+    },
+    async claimEndpoint(owner, device) {
+      const endpoint = randomUUID();
+      const token = randomUUID();
+      // Same member lock as mintPairingCode, for the same reason: deactivation
+      // deletes endpoints, and unlocked this could land one behind that.
+      const { rowCount } = await pool.query(
+        `WITH member AS (
+           SELECT id FROM users WHERE id = $2 AND deactivated_at IS NULL FOR UPDATE
+         ), claimed AS (
+           INSERT INTO endpoints (id, user_id, device_name)
+           SELECT $1, id, $3 FROM member
+           RETURNING id
+         )
+         INSERT INTO tokens (id, subject_kind, subject_id, hash)
+         SELECT $4, 'endpoint', id, $5 FROM claimed`,
+        [endpoint, owner, device, randomUUID(), hashToken(token)],
+      );
+      if (!rowCount) throw new Error(`no active member ${owner} to pair`);
+      return { endpoint, token };
     },
     async endpointForToken(token) {
       const row = await one<{ subject_id: string; user_id: string }>(
@@ -512,6 +538,7 @@ export function localStore(
       ),
     deleteWorkspace: needsDatabase,
     deactivateUser: needsDatabase,
+    claimEndpoint: needsDatabase,
     // One member, holding a token they configured: nobody to introduce.
     mintPairingCode: needsDatabase,
     redeemPairingCode: needsDatabase,

@@ -385,20 +385,28 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
 4. The companion detects locally authenticated ACP agents, dials out, exchanges
    the code for a durable endpoint token, persists it `0600`, installs a login
    service, and attaches.
-5. **The endpoint id is derived, never typed.** M2 has the operator choose it
+5. **The endpoint id is assigned, never typed.** M2 has the operator choose it
    (`laptop`), which is one more field in a flow whose bar is zero fields — and
    it changes when someone reinstalls, orphaning the endpoint the gateway knows.
-   Borrowed from LobeHub's `lh connect`, which derives from the machine id.
 
-   **It is one composite value, not two keys.** `hash(machine id + install id)`,
-   so a second companion on the same machine gets a different endpoint and the
-   relay needs no change: `attachEndpoint` still keys by `endpoint` alone, and
-   `hello` still carries one id. Splitting them into an endpoint plus a separate
-   connection id would put a second routing key into the store, the control
-   protocol and every ownership check, to distinguish two things the relay
-   already distinguishes. Reinstalling deliberately produces a new endpoint —
-   which is why revoke and re-pair (§3) exist, and is better than silently
-   inheriting the old one's grants.
+   **Changed on building it (2026-07-28):** an earlier draft had the companion
+   derive `hash(machine id + install id)`, borrowed from LobeHub's `lh connect`.
+   The gateway assigns it instead and returns it with the token, for the pair
+   route to hold no caller-named identity: it is unauthenticated by design, so
+   an id in its body is a valid code away from claiming an endpoint the caller
+   does not own. Every other identity the caller named has been a bug here
+   already — see §1's note on owner ids.
+
+   Assignment keeps what the derivation was for. It is still **one composite
+   value, not two keys**: a second companion on the same machine pairs again and
+   gets its own endpoint, and the relay needs no change — `attachEndpoint` still
+   keys by `endpoint` alone, and `hello` still carries one id. Splitting them
+   into an endpoint plus a separate connection id would put a second routing key
+   into the store, the control protocol and every ownership check, to
+   distinguish two things the relay already distinguishes. Reinstalling
+   deliberately produces a new endpoint — which is why revoke and re-pair (§3)
+   exist, and is better than silently inheriting the old one's grants. The
+   companion persists what it was given, so the id survives a restart.
 
    The **device label** stays free text ("Jingbo's MacBook Pro"): humans need it,
    nothing routes on it, and two machines may honestly share one.
