@@ -66,7 +66,7 @@ node --conditions=development --input-type=module -e 'import "@symma/protocol";'
 
 echo "==> typechecking a consumer WITHOUT skipLibCheck"
 printf '{"compilerOptions":{"module":"nodenext","moduleResolution":"nodenext","strict":true,"noEmit":true},"files":["probe.ts"]}\n' > tsconfig.json
-printf 'import { parseEnvelope } from "@symma/protocol";\nimport { checkEndpointReady } from "@symma/client";\nexport const seq = parseEnvelope("{}")?.seq;\nexport const ready = checkEndpointReady;\n' > probe.ts
+printf 'import { parseEnvelope } from "@symma/protocol";\nimport { checkEndpointReady, type LocalAcpPromptOptions } from "@symma/client";\nexport const seq = parseEnvelope("{}")?.seq;\nexport const ready = checkEndpointReady;\nexport const opts: LocalAcpPromptOptions = { timeoutMs: 1 };\n' > probe.ts
 "$root/node_modules/.bin/tsc" -p tsconfig.json
 
 echo "==> publint"

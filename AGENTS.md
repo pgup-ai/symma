@@ -138,7 +138,7 @@ without losing behavior, it should not have been written.
    generic halves; `ReviewBackend` wrappers and routing policy never leave
    jbot-review. **done** — `observer.ts` stays behind: every caller of it is
    review-side, so it is not symma's to hold.
-4. Publish `@symma/*`, exact-pinned — 0.1.0, then 0.1.1. **done** —
+4. Publish `@symma/*`, exact-pinned — protocol 0.1.1, client 0.2.0. **done** —
    `@symma/protocol` and `@symma/client` are on npm; `gateway` and `companion`
    stay private. Intra-
    workspace pins must equal the workspace version exactly; `*` resolves to the

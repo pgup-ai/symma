@@ -195,6 +195,48 @@ describe('acp', () => {
   // execute-allow and unknown-kind-allow are the DESIGNED policy (invariant
   // #8: bash stays allowed; agent-side sandbox/plan layers police commands),
   // so this test pins them on purpose.
+  it('hands every frame to the tee, in both directions', async () => {
+    // The tee is injected rather than built here, so nothing on either side of
+    // the boundary proves it is still called — jbot-review passes one and its
+    // suite would stay green if this stopped firing.
+    const teed: [string, string | undefined][] = [];
+    const fake = fakeAgentIo({
+      onPrompt: (agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.finish();
+      },
+    });
+    await driveAcpSession(
+      { input: fake.input, output: fake.output },
+      {
+        cwd: '/x',
+        prompt: 'p',
+        agent: 'fake',
+        label: 'review',
+        log: noLog,
+        tee: (dir, frame) => teed.push([dir, frame.method as string | undefined]),
+      },
+    );
+    assert.deepEqual(
+      teed.filter(([, method]) => method === 'initialize'),
+      [['out', 'initialize']],
+      'client frames are teed outbound',
+    );
+    assert.ok(
+      teed.some(([dir, method]) => dir === 'in' && method === 'session/update'),
+      'agent frames are teed inbound',
+    );
+    // A relayed caller passes none, and that must stay a no-op rather than throw.
+    const quiet = fakeAgentIo({ onPrompt: (agent) => agent.finish() });
+    await driveAcpSession(
+      { input: quiet.input, output: quiet.output },
+      { cwd: '/x', prompt: 'p', agent: 'fake', label: 'review', log: noLog },
+    );
+  });
+
   it('answers permission requests read-only: mutations rejected, reads/exec allowed', () => {
     const options = [
       { optionId: 'aa', kind: 'allow_always' },

@@ -637,7 +637,8 @@ instead — which works because **the tests travel with the code**: 12 files
    `ReviewBackend` wrappers and routing policy never leave jbot-review, so this
    is an extraction, not a migration. **Done.**
 4. **Publish `@symma/*`**, exact-pinned. Shipped as 0.1.0, then 0.1.1 once
-   the barrel was completed. Narrowed on contact: only
+   the barrel was completed, then `@symma/client` 0.2.0 for the tee option
+   step 5 needed. Narrowed on contact: only
    `protocol` and `client` are libraries and publish. `gateway` and `companion`
    stay `private` and publish nothing at this step; they are applications, and
    they ship by other routes later — the gateway as an image, the companion as
@@ -691,8 +692,8 @@ callers tell the opposite story, and they are all review-side: `runner.ts` takes
 `setRunName`/`reportRun`/`closeObserver`, and `reportRun` is the jbot verdict
 rather than a protocol event; `local/index.ts` takes `observerEnabled` and
 `setRunName`. The one caller that could have moved — `makeSessionTee` inside
-`driveAcpSession` — was deleted in #1 when the tee became injectable, so
-protocol's `tee` parameter has no caller in symma today.
+`driveAcpSession` — was deleted in #1 when the tee became injectable. Inside
+symma the parameter's caller is now `runLocalAcpPrompt`.
 
 Nor does the product need it: the gateway _receives_ `/api/ingest`, and the
 companion sends over its relay leg, which the gateway journals directly.
@@ -721,8 +722,12 @@ of them silent.
   the package takes an injected `tee` and builds nothing. Swapping the import
   therefore stops teeing local ACP reviews to the observer — with no type error
   and no failing test, because the tee is env-gated and off in CI. **Step 5 must
-  pass `tee: makeSessionTee(...)` at `acp.ts`'s call site in the same commit as
-  the import swap.** Nothing will catch forgetting it.
+  pass the tee in the same commit as the import swap.** Nothing will catch
+  forgetting it. The protocol slice passes it straight to `driveAcpSession` at
+  `acp.ts`'s call site; the client slice passes it through
+  `runLocalAcpPrompt`'s options bag, which #8 added for exactly this — the
+  signature had no slot for it, so the client package's local runner could not
+  serve its only consumer.
 - **`relayed: true` fails loudly, which is fine.** `acp-remote.ts` passes it and
   the package has no such option, so the swap is a typecheck error. Delete the
   line: a relayed caller now passes no tee, which is what the flag encoded.

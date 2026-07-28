@@ -55,8 +55,9 @@ describe('runLocalAcpPrompt', () => {
     };
   };
 
-  it('drives a prompt to its final message and tears the agent down', async () => {
+  it('drives a prompt to its final message, forwards the tee, and tears down', async () => {
     const { spec, cleanedUp } = specFor(script('ok.mjs', AGENT));
+    const teed: string[] = [];
     const text = await runLocalAcpPrompt(
       spec,
       dir,
@@ -64,8 +65,12 @@ describe('runLocalAcpPrompt', () => {
       'review this',
       'review',
       noLog,
+      { tee: (direction) => teed.push(direction) },
     );
     assert.equal(text, 'local ok');
+    // Only that it is forwarded — which frames reach it is driveAcpSession's
+    // contract, pinned in the protocol suite.
+    assert.ok(teed.length > 0, 'tee reached the session');
     assert.ok(cleanedUp(), 'temp home reclaimed');
   });
 
@@ -84,7 +89,7 @@ describe('runLocalAcpPrompt', () => {
     // Never reads stdin, never answers: only the wall clock ends this.
     const { spec } = specFor(script('wedged.mjs', `setInterval(() => {}, 1000);`));
     await assert.rejects(
-      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, 250),
+      runLocalAcpPrompt(spec, dir, 'probe/default', 'p', 'review', noLog, { timeoutMs: 250 }),
       /prompt timed out/,
     );
   });

@@ -12,6 +12,7 @@ import {
   terminateProcessTree,
   truncateForLog,
   type AcpAgentSpec,
+  type AcpSessionOptions,
 } from '@symma/protocol';
 
 const ACP_PROMPT_TIMEOUT_MS = 20 * 60_000;
@@ -35,6 +36,13 @@ function exitWithin(child: ChildProcess, ms: number): Promise<number | string | 
   });
 }
 
+export interface LocalAcpPromptOptions {
+  /** Wall-clock budget for the whole prompt. */
+  timeoutMs?: number;
+  /** Observe every frame in both directions — the same tee `driveAcpSession` takes. */
+  tee?: AcpSessionOptions['tee'];
+}
+
 export async function runLocalAcpPrompt(
   spec: AcpAgentSpec,
   workspace: string,
@@ -42,7 +50,7 @@ export async function runLocalAcpPrompt(
   prompt: string,
   label: string,
   log: (msg: string) => void,
-  timeoutMs = ACP_PROMPT_TIMEOUT_MS,
+  { timeoutMs = ACP_PROMPT_TIMEOUT_MS, tee }: LocalAcpPromptOptions = {},
 ): Promise<string> {
   const { env, cleanup } = spec.env(model);
   const configOptionModelIds = spec.modelConfigCandidates?.(model);
@@ -78,6 +86,7 @@ export async function runLocalAcpPrompt(
           model,
           configOptionModelIds,
           requirePlanMode: spec.requirePlanMode,
+          tee,
         },
       ),
       new Promise<never>((_, reject) => {
