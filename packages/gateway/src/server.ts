@@ -63,8 +63,8 @@ const log = (msg: string): void => {
 /** Same fail-open contract as journalWrite, for the store's fire-and-forget
  * writes: a failed recordSession costs its owner the journal, so it must be
  * loud in the log even though nothing here can retry it. */
-const storeWrite = (what: string, write: Promise<void> | undefined): void => {
-  void write?.catch((error: unknown) =>
+const storeWrite = (what: string, write: Promise<void>): void => {
+  void write.catch((error: unknown) =>
     log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`),
   );
 };
@@ -576,8 +576,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
     // Runs the caller owns, intersected with what is on disk — a run with no
     // session row belongs to nobody and is listed by nobody.
-    const mine = store ? await store.runsFor(owner) : undefined;
-    const runs = listRuns(dataDir).filter((r) => !mine || mine.has(r.runId));
+    const mine = await store.runsFor(owner);
+    const runs = listRuns(dataDir).filter((r) => mine.has(r.runId));
     // A runId is caller-chosen, so two tenants can share one run directory and
     // the listing would name the other's sessions. One query for all of them:
     // per-run would grow with a tenant's history on every viewer refresh.
@@ -798,7 +798,7 @@ if (retentionDays > 0) {
   // interval so a transient failure does not decide whether we start.
   const sweep = (): void => {
     void (async () => {
-      const doomed = await store.expireSessions(retentionDays, relay.liveSessionIds());
+      const doomed = await store.expireSessions(retentionDays, relay.liveSessions());
       forgetSessions(doomed);
       if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
     })().catch((error: unknown) =>

@@ -204,13 +204,20 @@ describe('gateway', () => {
           dir: 'out',
           frame: {},
         });
-      frame('run-a', 'sid-a');
-      frame('run-b', 'sid-b');
+      const journals: [string, string][] = [
+        ['run-a', 'sid-a'],
+        ['run-b', 'sid-b'],
+        // Same session id under a different run: one being live must not shield
+        // the other, which keying the exclusion on the id alone would do.
+        ['run-b', 'sid-a'],
+      ];
       // Backdated explicitly: expiring at zero days races the mtime the file
       // was written with a moment earlier.
       const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
-      utimesSync(journalPath(dir, 'run-a', 'sid-a'), old, old);
-      utimesSync(journalPath(dir, 'run-b', 'sid-b'), old, old);
+      for (const [runId, sessionId] of journals) {
+        frame(runId, sessionId);
+        utimesSync(journalPath(dir, runId, sessionId), old, old);
+      }
       const store = localStore('secret', new Map([['box', 'endpoint-secret']]), () =>
         listJournals(dir),
       );
@@ -228,14 +235,20 @@ describe('gateway', () => {
         store
           .expireSessions(31, [])
           .then((doomed) =>
-            assert.deepEqual(doomed.map((d) => d.sessionId).sort(), ['sid-a', 'sid-b']),
+            assert.deepEqual(doomed.map((d) => `${d.runId}/${d.sessionId}`).sort(), [
+              'run-a/sid-a',
+              'run-b/sid-a',
+              'run-b/sid-b',
+            ]),
           ),
-        store.expireSessions(31, ['sid-a']).then((doomed) =>
-          assert.deepEqual(
-            doomed.map((d) => d.sessionId),
-            ['sid-b'],
+        store
+          .expireSessions(31, [{ endpoint: 'box', runId: 'run-a', sessionId: 'sid-a' }])
+          .then((doomed) =>
+            assert.deepEqual(doomed.map((d) => `${d.runId}/${d.sessionId}`).sort(), [
+              'run-b/sid-a',
+              'run-b/sid-b',
+            ]),
           ),
-        ),
         store.expireSessions(90, []).then((doomed) => assert.deepEqual(doomed, [])),
         // And delete reports what it removed, so the caller ends the session.
         store

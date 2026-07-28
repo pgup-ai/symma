@@ -262,9 +262,11 @@ describe('relay', () => {
     const relay = createRelay();
     relay.attachEndpoint(hello(), () => {}, OWNER);
     relay.openSession(open(), () => {}, OWNER);
-    assert.deepEqual(relay.liveSessionIds(), ['sid-1']);
+    assert.deepEqual(relay.liveSessions(), [
+      { endpoint: 'laptop', runId: 'run-1', sessionId: 'sid-1' },
+    ]);
     relay.closeSession('sid-1', 'done');
-    assert.deepEqual(relay.liveSessionIds(), []);
+    assert.deepEqual(relay.liveSessions(), []);
   });
 
   it('reports who an attached endpoint belongs to', () => {

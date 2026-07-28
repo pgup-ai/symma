@@ -153,9 +153,15 @@ export function createRelay(options: RelayOptions = {}) {
       return sessions.get(sessionId)?.owner;
     },
 
-    /** Ids retention must leave alone: their frames are still arriving. */
-    liveSessionIds(): string[] {
-      return [...sessions.keys()];
+    /** Sessions retention must leave alone: their frames are still arriving.
+     * Whole keys, not ids — an id alone names a different session under another
+     * endpoint, and would shield it from ever expiring. */
+    liveSessions(): { endpoint: string; runId: string; sessionId: string }[] {
+      return [...sessions.entries()].map(([sessionId, s]) => ({
+        endpoint: s.endpoint,
+        runId: s.runId,
+        sessionId,
+      }));
     },
 
     listEndpoints(owner: string): EndpointPresence[] {

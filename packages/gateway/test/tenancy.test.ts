@@ -626,7 +626,34 @@ describe('tenancy', () => {
         agent: 'kilo',
       });
       await ageSession(url, 'sid-running', 40);
-      assert.deepEqual(await store.expireSessions(30, ['sid-running']), []);
+      assert.deepEqual(
+        await store.expireSessions(30, [
+          { endpoint: 'gina-box', runId: 'run-running', sessionId: 'sid-running' },
+        ]),
+        [],
+      );
+
+      // Another tenant's stale session, same id. Keying the live set on ids
+      // alone would shield it from ever expiring — the row is scoped by
+      // endpoint, so the exclusion has to be too.
+      await store.recordSession({
+        id: 'sid-running',
+        runId: 'run-running',
+        endpoint: 'hank-box',
+        agent: 'kilo',
+      });
+      await ageSession(url, 'sid-running', 40);
+      assert.deepEqual(
+        await store.expireSessions(30, [
+          { endpoint: 'gina-box', runId: 'run-running', sessionId: 'sid-running' },
+        ]),
+        [{ runId: 'run-running', sessionId: 'sid-running' }],
+      );
+      assert.equal(
+        await store.sessionBelongsTo('u-shared-gina', 'run-running', 'sid-running'),
+        true,
+        "gina's live session was not swept with it",
+      );
       assert.deepEqual(await store.expireSessions(30, []), [
         { runId: 'run-running', sessionId: 'sid-running' },
       ]);

@@ -14,6 +14,10 @@ export interface SessionRef {
   sessionId: string;
 }
 
+export interface LiveSession extends SessionRef {
+  endpoint: string;
+}
+
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
   /** The endpoint a companion token speaks for, and who owns it. */
@@ -40,9 +44,10 @@ export interface Store {
   /** §1 data lifecycle. Each returns the sessions whose frames the caller must
    * now delete from disk — the row and the file are one unit, and only the
    * caller knows where the files live. */
-  /** `live` is excluded: its frames are still arriving, and a session that
-   * lost its row keeps writing a journal nothing can read or expire. */
-  expireSessions(olderThanDays: number, live?: string[]): Promise<SessionRef[]>;
+  /** `live` is excluded: its frames are still arriving, and a session that lost
+   * its row keeps writing a journal nothing can read or expire. Whole keys —
+   * an id alone names a different session under another endpoint. */
+  expireSessions(olderThanDays: number, live?: LiveSession[]): Promise<SessionRef[]>;
   deleteSession(owner: Owner, runId: string, sessionId: string): Promise<SessionRef[]>;
   deleteWorkspace(slackTeamId: string): Promise<SessionRef[]>;
   deactivateUser(slackTeamId: string, slackUserId: string): Promise<SessionRef[]>;
@@ -137,10 +142,20 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async expireSessions(olderThanDays, live = []) {
       return refs(
         await pool.query(
-          `DELETE FROM sessions
-            WHERE started_at < now() - make_interval(days => $1) AND NOT (id = ANY($2))
-           RETURNING id, run_id`,
-          [olderThanDays, live],
+          `DELETE FROM sessions s
+            WHERE s.started_at < now() - make_interval(days => $1)
+              AND NOT EXISTS (
+                SELECT 1 FROM unnest($2::text[], $3::text[], $4::text[])
+                       AS l(endpoint_id, run_id, id)
+                 WHERE l.endpoint_id = s.endpoint_id AND l.run_id = s.run_id AND l.id = s.id
+              )
+           RETURNING s.id, s.run_id`,
+          [
+            olderThanDays,
+            live.map((l) => l.endpoint),
+            live.map((l) => l.runId),
+            live.map((l) => l.sessionId),
+          ],
         ),
       );
     },
@@ -359,9 +374,12 @@ export function localStore(
     markSeen: () => Promise.resolve(),
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
+      // One tenant, so a run and session id are the whole key here.
+      const isLive = (runId: string, sessionId: string): boolean =>
+        live.some((l) => l.runId === runId && l.sessionId === sessionId);
       return Promise.resolve(
         journals()
-          .filter((j) => j.mtimeMs < cutoff && !live.includes(j.sessionId))
+          .filter((j) => j.mtimeMs < cutoff && !isLive(j.runId, j.sessionId))
           .map(({ runId, sessionId }) => ({ runId, sessionId })),
       );
     },
