@@ -18,7 +18,9 @@ export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
-  ownerForSession(runId: string, sessionId: string): Promise<Owner | undefined>;
+  /** The authorization question itself, not the owner to compare outside: with
+   * the key scoped per endpoint, "who owns this id" no longer has one answer. */
+  sessionBelongsTo(owner: Owner, runId: string, sessionId: string): Promise<boolean>;
   runsFor(owner: Owner): Promise<Set<string>>;
   /** Sessions this owner may see, by run. A runId is caller-chosen, so two
    * tenants can land in one run directory and the listing must not leak
@@ -34,7 +36,7 @@ export interface Store {
   markSeen(endpoint: string): Promise<void>;
   /** For an open the companion went on to refuse: the row outlives the relay's
    * in-memory session otherwise, and blocks the id from ever being reused. */
-  deleteSessionRow(id: string, runId: string): Promise<void>;
+  deleteSessionRow(id: string, runId: string, endpoint: string): Promise<void>;
   /** §1 data lifecycle. Each returns the sessions whose frames the caller must
    * now delete from disk — the row and the file are one unit, and only the
    * caller knows where the files live. */
@@ -79,14 +81,14 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return row && { endpoint: row.subject_id, owner: row.user_id };
     },
-    async ownerForSession(runId, sessionId) {
+    async sessionBelongsTo(owner, runId, sessionId) {
       return (
-        await one<{ user_id: string }>(
-          `SELECT e.user_id FROM sessions s JOIN endpoints e ON e.id = s.endpoint_id
-            WHERE s.id = $1 AND s.run_id = $2`,
-          [sessionId, runId],
-        )
-      )?.user_id;
+        (await one<{ ok: number }>(
+          `SELECT 1 AS ok FROM sessions s JOIN endpoints e ON e.id = s.endpoint_id
+            WHERE s.id = $1 AND s.run_id = $2 AND e.user_id = $3`,
+          [sessionId, runId, owner],
+        )) !== undefined
+      );
     },
     async runsFor(owner) {
       const { rows } = await pool.query(
@@ -110,14 +112,20 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       }
       return byRun;
     },
-    async deleteSessionRow(id, runId) {
-      // Scoped by run too: the same id can name a historical session, and an
-      // unscoped delete would strip that one's authorization instead.
-      await pool.query(`DELETE FROM sessions WHERE id = $1 AND run_id = $2`, [id, runId]);
+    async deleteSessionRow(id, runId, endpoint) {
+      // The whole key: the same id names a different session under another
+      // endpoint or run, and a partial match would strip that one instead.
+      await pool.query(`DELETE FROM sessions WHERE id = $1 AND run_id = $2 AND endpoint_id = $3`, [
+        id,
+        runId,
+        endpoint,
+      ]);
     },
     async recordSession({ id, runId, endpoint, agent, model }) {
       // No ON CONFLICT: a reused id must not silently keep the old row, or the
-      // new session's frames are authorized against whoever owned it last.
+      // new session's frames are authorized against whoever owned it last. With
+      // the key scoped per endpoint this can only conflict with the caller's
+      // own earlier session, never another tenant's.
       await pool.query(
         `INSERT INTO sessions (id, run_id, endpoint_id, agent, model) VALUES ($1, $2, $3, $4, $5)`,
         [id, runId, endpoint, agent, model ?? null],
@@ -330,9 +338,9 @@ export function localStore(
       }
       return Promise.resolve(undefined);
     },
-    ownerForSession: (runId, sessionId) =>
+    sessionBelongsTo: (owner, runId, sessionId) =>
       Promise.resolve(
-        journals().some((j) => j.runId === runId && j.sessionId === sessionId) ? LOCAL : undefined,
+        owner === LOCAL && journals().some((j) => j.runId === runId && j.sessionId === sessionId),
       ),
     runsFor: () => Promise.resolve(new Set(journals().map((j) => j.runId))),
     sessionsByRun: (_owner, runIds) => {

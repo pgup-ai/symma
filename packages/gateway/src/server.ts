@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createGzip } from 'node:zlib';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
@@ -247,7 +248,7 @@ async function handleEndpointIngest(
         if (applied && control.kind === 'refused' && refusedRun)
           storeWrite(
             `deleteSessionRow ${control.sessionId}`,
-            store.deleteSessionRow(control.sessionId, refusedRun),
+            store.deleteSessionRow(control.sessionId, refusedRun, id),
           );
       } else if (control.kind === 'close') {
         relay.endpointClose(id, control.sessionId, control.reason ?? 'closed by endpoint');
@@ -310,7 +311,10 @@ async function handleSessionIngest(
       const accepted = relay.openSession(control, sendToSession(sid), owner);
       // Reserved but refused: release it, or the id is unopenable from here on.
       if (!accepted)
-        storeWrite(`deleteSessionRow ${sid}`, store.deleteSessionRow(sid, control.runId));
+        storeWrite(
+          `deleteSessionRow ${sid}`,
+          store.deleteSessionRow(sid, control.runId, control.endpoint),
+        );
       // maySession keeps a stranger from registering while someone holds the
       // id, but a registration can still interleave with the await above, when
       // neither the relay nor the map has a claim yet. Evict what that leaves.
@@ -523,8 +527,8 @@ function maySession(owner: Owner, sessionId: string): boolean {
 }
 
 /** 404 rather than 403 throughout: whether a session exists is itself owned. */
-async function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<boolean> {
-  return (await store.ownerForSession(runId, sessionId)) === owner;
+function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<boolean> {
+  return store.sessionBelongsTo(owner, runId, sessionId);
 }
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -785,7 +789,7 @@ function forgetSessions(doomed: SessionRef[]): void {
 // cannot reach has no owners, and silently falling back would serve every
 // tenant's journals to whoever asked.
 store = databaseUrl
-  ? await openStore(databaseUrl, new URL('./schema.sql', import.meta.url).pathname)
+  ? await openStore(databaseUrl, fileURLToPath(new URL('./schema.sql', import.meta.url)))
   : localStore(token, endpointTokens, () => listJournals(dataDir));
 
 if (retentionDays > 0) {

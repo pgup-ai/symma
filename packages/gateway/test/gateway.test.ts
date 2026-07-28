@@ -222,8 +222,8 @@ describe('gateway', () => {
         store
           .endpointForToken('endpoint-secret')
           .then((e) => assert.deepEqual(e, { endpoint: 'box', owner: 'local' })),
-        store.ownerForSession('run-a', 'sid-a').then((o) => assert.equal(o, 'local')),
-        store.ownerForSession('run-a', 'nope').then((o) => assert.equal(o, undefined)),
+        store.sessionBelongsTo('local', 'run-a', 'sid-a').then((ok) => assert.equal(ok, true)),
+        store.sessionBelongsTo('local', 'run-a', 'nope').then((ok) => assert.equal(ok, false)),
         // Retention runs here too — this was skipped entirely without a database.
         store
           .expireSessions(31, [])

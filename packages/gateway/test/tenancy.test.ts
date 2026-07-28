@@ -199,8 +199,8 @@ describe('tenancy', () => {
       );
       try {
         assert.equal(
-          await store.ownerForSession('run-bob', 'sid-bob'),
-          undefined,
+          await store.sessionBelongsTo(alice.owner, 'run-bob', 'sid-bob'),
+          false,
           'a refused open records no session',
         );
       } finally {
@@ -472,7 +472,7 @@ describe('tenancy', () => {
           join(import.meta.dirname, '../src/schema.sql'),
         );
         try {
-          assert.equal(await store.ownerForSession('run-live', 'sid-live'), dana.owner);
+          assert.equal(await store.sessionBelongsTo(dana.owner, 'run-live', 'sid-live'), true);
         } finally {
           await store.close();
         }
@@ -573,37 +573,40 @@ describe('tenancy', () => {
     }
   });
 
-  it('refuses to reuse a session id whose row outlived it', async () => {
-    // ON CONFLICT DO NOTHING kept the old row, so a reused id left the new
-    // session authorized against whoever owned it last.
+  it('scopes session id reuse to one endpoint, so tenants cannot collide', async () => {
+    // Both ids come from the caller. A global key made their choices a shared
+    // namespace: one tenant reusing an id blocked another, and with ~32 bits of
+    // entropy that is a birthday problem rather than an attack.
     const url = pg.getConnectionUri();
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const session = (endpoint: string, runId: string) => ({
+      id: 'sid-shared',
+      runId,
+      endpoint,
+      agent: 'kilo',
+    });
     try {
-      await store.recordSession({
-        id: 'sid-reused',
-        runId: 'run-one',
-        endpoint: 'frank-laptop',
-        agent: 'kilo',
-      });
-      await assert.rejects(
-        store.recordSession({
-          id: 'sid-reused',
-          runId: 'run-two',
-          endpoint: 'gina-box',
-          agent: 'kilo',
-        }),
+      await store.recordSession(session('frank-laptop', 'run-same'));
+
+      // Another tenant, same id and same run: no conflict, and each sees only
+      // its own. Under a global key this refused.
+      await store.recordSession(session('gina-box', 'run-same'));
+      assert.equal(await store.sessionBelongsTo('u-tee-frank', 'run-same', 'sid-shared'), true);
+      assert.equal(await store.sessionBelongsTo('u-shared-gina', 'run-same', 'sid-shared'), true);
+      assert.equal(await store.sessionBelongsTo('u-shared-hank', 'run-same', 'sid-shared'), false);
+
+      // The same owner reusing it is still a conflict, which is what stops a
+      // stale row authorizing new frames.
+      await assert.rejects(store.recordSession(session('frank-laptop', 'run-same')));
+
+      // And releasing it takes the whole key, not just the id.
+      await store.deleteSessionRow('sid-shared', 'run-same', 'frank-laptop');
+      assert.equal(await store.sessionBelongsTo('u-tee-frank', 'run-same', 'sid-shared'), false);
+      assert.equal(
+        await store.sessionBelongsTo('u-shared-gina', 'run-same', 'sid-shared'),
+        true,
+        "gina's row survived frank's delete",
       );
-      // Still the first owner's, not silently reattributed to the second.
-      assert.equal(await store.ownerForSession('run-two', 'sid-reused'), undefined);
-      // And a refused open frees the id rather than blocking it forever.
-      await store.deleteSessionRow('sid-reused', 'run-one');
-      await store.recordSession({
-        id: 'sid-reused',
-        runId: 'run-two',
-        endpoint: 'gina-box',
-        agent: 'kilo',
-      });
-      assert.equal(await store.ownerForSession('run-two', 'sid-reused'), 'u-shared-gina');
     } finally {
       await store.close();
     }
