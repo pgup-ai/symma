@@ -289,6 +289,44 @@ symma` is secondary for the Node crowd and nearly free from the same codebase.
   "Staying attached" below for why it is a _user_ service and what it cannot
   cover.
 
+### The four built-ins are a hardening list, not a compatibility list
+
+Worth stating because the natural reading is the other one, and the other one is
+wrong in both directions. `SYMMA_COMPANION_AGENTS=name=cmd args` already runs any
+ACP binary — that path exists today as the test seam and needs no work to become
+a supported tier. Conversely, `codex`/`cursor`/`devin`/`kilo` are not "the agents
+that work". They are the agents someone has done four specific pieces of work
+for:
+
+|                                               | built-in spec                                      | any ACP binary                      |
+| --------------------------------------------- | -------------------------------------------------- | ----------------------------------- |
+| detected, with a reason when it is absent     | yes — and §2 makes that string the onboarding copy | no                                  |
+| per-spawn credential isolation                | temp `HOME`/`CODEX_HOME`, cleanup after            | inherits the environment            |
+| ambient-key shadowing handled                 | yes                                                | n/a — nothing is injected to shadow |
+| model selection through the ACP config option | where the CLI's own flags do not reach the session | no                                  |
+| **read-only layers (invariant 1)**            | **all three**                                      | **the client floor only**           |
+
+The first four are conveniences. The last row is not, and it is the reason this
+distinction has to be visible rather than implied. A built-in gets the client
+permission floor _plus_ an agent-side layer — codex's OS sandbox, or
+`requirePlanMode` for the ones without one. A custom binary gets the floor and
+nothing else, because the spec that would declare `requirePlanMode` is
+constructed by the companion from a command line that has no field for it.
+
+That gap should be closed by the first custom agent that needs it, not before —
+declaring an option nobody sets is how a config format grows fields that never
+mean anything. But it must not close by accident: **an unhardened agent is
+acceptable on M3's DM path, where §4 lifts read-only inside an allowlisted
+workspace root anyway, and is not acceptable on a review path that depends on
+invariant 1.**
+
+**Add built-ins on demand.** Each one is a credential path, an isolation story
+and a read-only story, plus a standing maintenance liability the next time that
+CLI changes its auth layout. The four here exist because jbot-review drives them,
+which is a real caller and the right reason. Claude Code and Gemini CLI have ACP
+adapters and are the obvious next candidates — worth checking their current shape
+before committing to either.
+
 **`curl | sh` plus self-update is a supply-chain boundary, so it needs the
 supply-chain treatment.** We are asking non-technical people to run our script
 and then letting it replace its own binary forever after:
@@ -530,6 +568,15 @@ something an `OpenControl` can ask for.
 The gap in every shipped Slack agent bot, including Codex's and Claude's: tag it
 in a public thread and it publishes whatever it produces. No review, no
 follow-up, no chance to catch a weak first draft.
+
+LobeHub confirms it at the top of the market and goes further than the others:
+a channel mention is answered with `chat.postMessage` into that thread, partials
+stream by editing the message in place, and **tool calls and permission prompts
+are surfaced publicly too** (`displayToolCalls`). Only the unlinked-user case
+gets an ephemeral reply. Unlike the personal-routing claim in "The bet", this one
+survived contact — and the stronger form of the argument is not draft quality but
+content: tool output carries file paths, source and error text, and publishing it
+into a channel by default is a disclosure decision nobody made.
 
 > **Invoking the agent is not consent to publish its response.**
 
