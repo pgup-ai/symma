@@ -868,4 +868,87 @@ describe('tenancy', () => {
       await store.close();
     }
   });
+
+  it('spends a pairing code once, and takes the retyping a member will do', async () => {
+    const url = pg.getConnectionUri();
+    const nel = await provision(url, { team: 'pair', slackUser: 'nel', endpoint: 'nel-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const code = await store.mintPairingCode(nel.owner);
+      // Four groups of four from an alphabet with no I, L, O or U — 80 bits,
+      // and nothing in it that a person reads back as a different character.
+      assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
+      // Hashed like a token: the plaintext is returned once and never stored.
+      const { rows } = await pool.query(`SELECT code_hash FROM pairings WHERE user_id = $1`, [
+        nel.owner,
+      ]);
+      assert.equal(rows.length, 1);
+      assert.notEqual(rows[0].code_hash, code);
+
+      // Typed back off a phone: lowercase, hyphens dropped, O for 0, l for 1.
+      const retyped = code.toLowerCase().replace(/-/g, '').replace(/0/g, 'O').replace(/1/g, 'l');
+      assert.deepEqual(await store.redeemPairingCode(retyped), { ok: true, owner: nel.owner });
+      // Single-use, and a code nobody minted is the mistyped case, not a stale
+      // one — the member sees the same words, the log does not.
+      assert.deepEqual(await store.redeemPairingCode(code), { ok: false, why: 'spent' });
+      assert.deepEqual(await store.redeemPairingCode('ZZZZ-ZZZZ-ZZZZ-ZZZZ'), {
+        ok: false,
+        why: 'unknown',
+      });
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('retires a code when it expires or when the next one is minted', async () => {
+    const url = pg.getConnectionUri();
+    const ora = await provision(url, { team: 'pair', slackUser: 'ora', endpoint: 'ora-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const stale = await store.mintPairingCode(ora.owner);
+      await pool.query(
+        `UPDATE pairings SET expires_at = now() - interval '1 second' WHERE user_id = $1`,
+        [ora.owner],
+      );
+      assert.deepEqual(await store.redeemPairingCode(stale), { ok: false, why: 'spent' });
+
+      // Minting supersedes: the member who clicks twice has one live code, not
+      // two, so there is only ever one thing to guess at.
+      const first = await store.mintPairingCode(ora.owner);
+      const second = await store.mintPairingCode(ora.owner);
+      assert.deepEqual(await store.redeemPairingCode(first), { ok: false, why: 'unknown' });
+      assert.deepEqual(await store.redeemPairingCode(second), { ok: true, owner: ora.owner });
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('lets exactly one of two racing redeems win the same code', async () => {
+    // The whole of single-use rests on this: the check and the claim are one
+    // statement, so the loser reads the winner's consumed_at rather than a
+    // snapshot taken before it.
+    const url = pg.getConnectionUri();
+    const rai = await provision(url, { team: 'pair', slackUser: 'rai', endpoint: 'rai-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      const code = await store.mintPairingCode(rai.owner);
+      // Two, issued in one tick on separate pooled connections. More racers
+      // prove nothing further and widen the pool past what close() reliably
+      // tears down before the container goes away.
+      const racers = await Promise.all([
+        store.redeemPairingCode(code),
+        store.redeemPairingCode(code),
+      ]);
+      assert.deepEqual(
+        racers.filter((r) => r.ok),
+        [{ ok: true, owner: rai.owner }],
+      );
+    } finally {
+      await store.close();
+    }
+  });
 });

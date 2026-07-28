@@ -259,7 +259,7 @@ users        (id, workspace_id, slack_user_id)
 endpoints    (id, user_id, device_name, agents[], workspaces[], max_sessions,
               public_key, last_seen_at, protocol_version)
 tokens       (id, endpoint_id | user_id, kind, hash, expires_at, revoked_at)
-pairings     (code_hash, user_id, expires_at, consumed_at, attempts)
+pairings     (code_hash, user_id, expires_at, consumed_at)   -- one live per user (§2)
 key_changes  (endpoint_id, proposed_public_key, fingerprint, expires_at,
               consumed_at)   -- at most one pending per endpoint (§3)
 
@@ -274,8 +274,16 @@ sessions     (id, endpoint_id, agent, model, status, started/ended)
 frames       (session_id, seq, ts, dir, sig, payload)     -- or blob + metadata
 ```
 
-Tokens and pairing codes stored hashed. `pairings` is single-use, short-TTL, and
-counts `attempts` so a guessable code cannot be brute-forced.
+Tokens and pairing codes stored hashed. `pairings` is single-use and short-TTL,
+and minting supersedes the member's outstanding code, so there is never more than
+one live code per member to guess at.
+
+**Corrected 2026-07-28, on building it:** an earlier draft counted `attempts` per
+row "so a guessable code cannot be brute-forced". It cannot do that — a wrong
+guess matches no row, so it counts against nothing, and a right guess is spent on
+its first presentation and never reaches a cap. Guessing is answered by the
+code's entropy offline and by per-IP throttling at the redeem route online. The
+column is not built.
 
 **Delivery is a state machine, not a boolean.** Per turn:
 `private → post_when_ready → posted | cancelled`, advanced atomically, with the
@@ -362,7 +370,10 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
 
    The code is display-chunked but high-entropy (≥64 bits). Short codes are only
    safe behind throttling, and throttling alone is a weak place to put the whole
-   guarantee.
+   guarantee. **Shipped as 16 Crockford base32 characters in four groups — 80
+   bits.** The example above is 12 characters, which is 60 bits in that alphabet
+   and under the floor this line sets. Crockford because it drops I, L, O and U,
+   so nothing a member retypes off a phone screen reads as something else.
 
 4. The companion detects locally authenticated ACP agents, dials out, exchanges
    the code for a durable endpoint token, persists it `0600`, installs a login

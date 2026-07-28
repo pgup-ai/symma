@@ -6,4 +6,15 @@
 // nothing else, so an operator who keeps only the rows leaves frames on disk
 // that retention can no longer reach.
 export { deleteJournals, readJournalLines } from './journal.js';
-export { openStore, provision, type Owner, type SessionRef, type Store } from './store.js';
+// Minting is on `Store` rather than beside `provision`: pairing replaces
+// provision-per-endpoint, and until §2's DM button exists an operator mints the
+// code the member types. `PairingResult` comes with it because `Store` is
+// exported and a consumer cannot name a redeem's result otherwise.
+export {
+  openStore,
+  provision,
+  type Owner,
+  type PairingResult,
+  type SessionRef,
+  type Store,
+} from './store.js';

@@ -56,5 +56,25 @@ CREATE TABLE IF NOT EXISTS sessions (
   ended_at    timestamptz
 );
 
+-- §2 pairing. The code is the whole credential the exchange presents, so it is
+-- stored hashed like a token and spent once: `consumed_at` is decided under the
+-- row's lock, so two redeems of one code cannot both win.
+--
+-- One row per member: minting supersedes, taking the spent row with it, so the
+-- table is bounded by membership rather than by how often anyone re-pairs, and
+-- the cascade retires it with the user.
+--
+-- No `attempts` column: §1's shape carried one to answer brute force, but a
+-- wrong guess matches no row and so counts against nothing, and a right one is
+-- spent on its first presentation and can never reach a cap. Guessing is
+-- answered by the code's 80 bits and by per-IP throttling at the route.
+CREATE TABLE IF NOT EXISTS pairings (
+  code_hash   text PRIMARY KEY,
+  user_id     text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at  timestamptz NOT NULL,
+  consumed_at timestamptz
+);
+
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);
 CREATE INDEX IF NOT EXISTS endpoints_user_idx ON endpoints (user_id);
+CREATE INDEX IF NOT EXISTS pairings_user_idx ON pairings (user_id);
