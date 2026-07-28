@@ -51,6 +51,10 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Pr
 describe('remote acp prompt', () => {
   it('runs a prompt through gateway + companion and journals the session', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'symma-remote-'));
+    // The companion writes a signing key under HOME on startup; give it a
+    // throwaway one, or the suite leaves real key material in the developer's
+    // own ~/.local/share and reuses it across runs.
+    const companionHome = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
     const agentPath = join(dataDir, 'review-agent.mjs');
     writeFileSync(agentPath, REVIEW_AGENT);
     const port = 24000 + Math.floor(Math.random() * 2000);
@@ -95,6 +99,7 @@ describe('remote acp prompt', () => {
         {
           env: {
             ...process.env,
+            HOME: companionHome,
             SYMMA_COMPANION_GATEWAY: base,
             SYMMA_COMPANION_TOKEN: 'endpoint-tok',
             SYMMA_COMPANION_ENDPOINT: 'box',
@@ -151,6 +156,7 @@ describe('remote acp prompt', () => {
       companion?.kill('SIGKILL');
       gateway?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
+      rmSync(companionHome, { recursive: true, force: true });
     }
   });
 });

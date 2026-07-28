@@ -57,6 +57,10 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Pr
 describe('relay e2e', () => {
   it('relays a full session client → gateway → companion → agent and back', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'symma-relay-e2e-'));
+    // The companion writes a signing key under HOME on startup; give it a
+    // throwaway one, or the suite leaves real key material in the developer's
+    // own ~/.local/share and reuses it across runs.
+    const companionHome = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
     const agentPath = join(dataDir, 'echo-agent.mjs');
     writeFileSync(agentPath, ECHO_AGENT);
     const port = 22000 + Math.floor(Math.random() * 2000);
@@ -109,6 +113,7 @@ describe('relay e2e', () => {
         {
           env: {
             ...process.env,
+            HOME: companionHome,
             SYMMA_COMPANION_GATEWAY: base,
             SYMMA_COMPANION_TOKEN: 'endpoint-tok',
             SYMMA_COMPANION_ENDPOINT: 'e2e',
@@ -244,6 +249,7 @@ describe('relay e2e', () => {
       companion?.kill('SIGKILL');
       gateway?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
+      rmSync(companionHome, { recursive: true, force: true });
     }
   });
 });
