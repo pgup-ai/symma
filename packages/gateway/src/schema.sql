@@ -1,6 +1,7 @@
 -- M3a. Only what owner-scoping needs; pairings and key_changes arrive with M3b,
--- conversations and turns with M3d.
-CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY);
+-- conversations and turns with M3d. openStore applies this file as-is, so every
+-- statement is IF NOT EXISTS; a real migration runner arrives with the first
+-- change that cannot be expressed that way.
 
 CREATE TABLE IF NOT EXISTS workspaces (
   id            text PRIMARY KEY,

@@ -188,8 +188,13 @@ token is scoped to an owner. Three enforcement points:
 2. Journal reads filter by owner.
 3. Endpoint listing shows only the caller's own endpoints.
 
-All three ship, plus run listing, which the original three missed — `/api/runs`
-would otherwise have enumerated every tenant's run ids.
+All three ship, plus two the original list missed. `/api/runs` would otherwise
+have enumerated every tenant's run ids. And **the live session routes are the
+sharper omission**: `/api/sessions/:sid/stream` is last-connection-wins, so an
+unchecked connect does not merely read another tenant's frames, it takes their
+client leg away — and the ingest path would have let them close the session or
+inject frames the endpoint treats as the owner's. A session belongs to whoever
+`openSession` accepted, and every later touch is checked against that.
 
 **Someone else's endpoint answers exactly like one that is away** (`offline`),
 and someone else's journal answers `404`, not `403`. Which endpoints and
@@ -272,7 +277,7 @@ and enforced:
 | retention    | **shipped** — `SYMMA_GATEWAY_RETENTION_DAYS`, 30 by default, swept hourly and once at boot so a gateway that restarts often still forgets |
 | deletion     | **shipped** for a session — `DELETE /api/runs/:run/sessions/:sid/journal`, owner-scoped inside the query. Conversations arrive with M3d   |
 | uninstall    | **shipped** — `deleteWorkspace` takes users, endpoints, sessions, frames and tokens; tokens need deleting explicitly, see below           |
-| user removal | **shipped** — `deactivateUser` revokes both token kinds and drops the endpoints; journals survive as the workspace's record               |
+| user removal | **shipped** — `deactivateUser` revokes both token kinds, drops the endpoints and returns their sessions so the frames go too              |
 | encryption   | at rest via the database; secrets (tokens, pairing codes) stored hashed, never plaintext                                                  |
 | logs         | holds — gateway logs carry ids, counts and outcomes; no path logs a frame, a prompt or a token                                            |
 | training     | never. No model training, no fine-tuning, no human review of customer content                                                             |

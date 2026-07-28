@@ -34,7 +34,7 @@ export interface Store {
   expireSessions(olderThanDays: number): Promise<SessionRef[]>;
   deleteSession(owner: Owner, runId: string, sessionId: string): Promise<SessionRef[]>;
   deleteWorkspace(slackTeamId: string): Promise<SessionRef[]>;
-  deactivateUser(slackTeamId: string, slackUserId: string): Promise<void>;
+  deactivateUser(slackTeamId: string, slackUserId: string): Promise<SessionRef[]>;
   close(): Promise<void>;
 }
 
@@ -160,9 +160,20 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       }
     },
     async deactivateUser(slackTeamId, slackUserId) {
-      // Tokens revoked and endpoints unpaired, but their journals survive: a
-      // departing member's runs are still the workspace's record until
-      // retention or an uninstall takes them.
+      // Dropping the endpoints cascades their sessions away, so the frames go
+      // with them. Leaving the files behind would strand them: no row means no
+      // API path reaches them and retention, which reads sessions.started_at,
+      // never finds them either.
+      const doomed = refs(
+        await pool.query(
+          `SELECT s.id, s.run_id FROM sessions s
+             JOIN endpoints e ON e.id = s.endpoint_id
+             JOIN users u ON u.id = e.user_id
+             JOIN workspaces w ON w.id = u.workspace_id
+            WHERE w.slack_team_id = $1 AND u.slack_user_id = $2`,
+          [slackTeamId, slackUserId],
+        ),
+      );
       await pool.query(
         `WITH target AS (
            UPDATE users u SET deactivated_at = now()
@@ -178,6 +189,7 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
          DELETE FROM endpoints WHERE user_id IN (SELECT id FROM target)`,
         [slackTeamId, slackUserId],
       );
+      return doomed;
     },
     close: () => pool.end(),
   };

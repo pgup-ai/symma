@@ -335,11 +335,102 @@ describe('tenancy', () => {
     const store = await openStore(url, schema);
     try {
       assert.equal(await store.ownerForClientToken(carol.clientToken), carol.owner);
-      await store.deactivateUser('other', 'carol');
+      appendEnvelope(dataDir, {
+        v: 1,
+        runId: 'run-carol',
+        sessionId: 'sid-carol',
+        seq: 1,
+        ts: 1,
+        agent: 'kilo',
+        label: 'review',
+        dir: 'out',
+        frame: {},
+      });
+      await store.recordSession({
+        id: 'sid-carol',
+        runId: 'run-carol',
+        endpoint: 'carol-laptop',
+        agent: 'kilo',
+      });
+      // Dropping her endpoints cascades the rows away, so the frames have to
+      // come back or they are stranded: unreachable by any route and invisible
+      // to retention, which reads sessions.started_at.
+      const doomed = await store.deactivateUser('other', 'carol');
+      assert.deepEqual(doomed, [{ runId: 'run-carol', sessionId: 'sid-carol' }]);
+      forget(doomed);
+      assert.deepEqual(readJournalLines(dataDir, 'run-carol', 'sid-carol'), []);
       assert.equal(await store.ownerForClientToken(carol.clientToken), undefined);
       assert.equal(await store.endpointForToken(carol.endpointToken), undefined);
     } finally {
       await store.close();
+    }
+  });
+
+  it("keeps another owner off a live session's leg, frames and close", async () => {
+    // Ownership was enforced on the observer routes and not on /api/sessions,
+    // where the damage is worse: the stream is last-connection-wins, so an
+    // unchecked connect takes the owner's leg away as well as reading it.
+    // Own tenants: the uninstall case above deletes the acme workspace, so
+    // alice and bob no longer exist by the time this runs.
+    const url = pg.getConnectionUri();
+    const dana = await provision(url, { team: 'live', slackUser: 'dana', endpoint: 'dana-laptop' });
+    const eve = await provision(url, { team: 'live', slackUser: 'eve', endpoint: 'eve-laptop' });
+    const detach = await attach(dana.endpointToken, 'dana-laptop');
+    try {
+      // The stub companion never acks, so `opened` never comes back — what
+      // matters is that the relay accepted it and the session now has an owner.
+      await as(dana.clientToken, '/api/sessions/sid-live/ingest', {
+        method: 'POST',
+        body: `${JSON.stringify({
+          kind: 'open',
+          sessionId: 'sid-live',
+          runId: 'run-live',
+          endpoint: 'dana-laptop',
+          agent: 'kilo',
+        })}\n`,
+      });
+      const live = async (): Promise<number> =>
+        (
+          (await (await as(dana.clientToken, '/api/endpoints')).json()) as {
+            activeSessions: number;
+          }[]
+        )[0]!.activeSessions;
+      await waitFor(async () => ((await live()) === 1 ? true : undefined), 'dana opened hers');
+
+      assert.equal(
+        (
+          await as(eve.clientToken, '/api/sessions/sid-live/stream', {
+            headers: { accept: 'text/event-stream' },
+          })
+        ).status,
+        404,
+        "eve cannot take dana's client leg",
+      );
+
+      // A close and a frame are accepted at the transport and dropped inside:
+      // answering differently would confirm the session exists.
+      for (const body of [
+        JSON.stringify({ kind: 'close', sessionId: 'sid-live', reason: 'bye' }),
+        JSON.stringify({
+          v: 1,
+          runId: 'run-live',
+          sessionId: 'sid-live',
+          seq: 1,
+          ts: 1,
+          agent: 'kilo',
+          label: 'l',
+          dir: 'out',
+          frame: {},
+        }),
+      ]) {
+        await as(eve.clientToken, '/api/sessions/sid-live/ingest', {
+          method: 'POST',
+          body: `${body}\n`,
+        });
+      }
+      assert.equal(await live(), 1, "eve's close did not end dana's session");
+    } finally {
+      detach();
     }
   });
 });

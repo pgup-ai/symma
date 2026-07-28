@@ -208,4 +208,24 @@ describe('relay', () => {
     relay.endpointAck('laptop', ack, JSON.stringify(ack));
     assert.deepEqual(JSON.parse(toClient.at(-1)!), ack);
   });
+
+  it("hides and refuses another owner's endpoint", () => {
+    // Every other case here is one tenant, so the ownership branches in
+    // openSession and listEndpoints are only exercised by the tenancy suite —
+    // which needs Docker. This pins them without it.
+    const relay = createRelay();
+    const toClient: string[] = [];
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    relay.openSession(open(), (line) => toClient.push(line), 'u-someone-else');
+    assert.deepEqual(JSON.parse(toClient[0]!), {
+      kind: 'refused',
+      sessionId: 'sid-1',
+      code: 'offline',
+      reason: 'endpoint offline',
+    });
+    assert.deepEqual(relay.listEndpoints('u-someone-else'), []);
+    assert.equal(relay.listEndpoints(OWNER).length, 1);
+    // And the refusal left no session behind for its owner to trip over.
+    assert.equal(relay.sessionOwner('sid-1'), undefined);
+  });
 });

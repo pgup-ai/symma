@@ -275,6 +275,10 @@ async function handleSessionIngest(
           }),
         );
       }
+    } else if (!maySession(owner, sid)) {
+      // Everything past the open touches a session that already has an owner:
+      // a close ends it, a frame is forwarded to the endpoint as if the owner
+      // sent it. Drop both silently rather than confirm the session exists.
     } else if (control?.kind === 'close' && control.sessionId === sid) {
       relay.closeSession(sid, control.reason ?? 'closed by client');
     } else if (!control) {
@@ -451,6 +455,14 @@ function handleStream(res: ServerResponse, runId: string, sessionId: string): vo
   res.on('error', cleanup);
 }
 
+/** A live session belongs to whoever opened it. Unknown means not open yet —
+ * clients connect their leg before sending the open — so it cannot be a
+ * refusal, and `openSession` is what authorizes the open itself. */
+function maySession(owner: Owner, sessionId: string): boolean {
+  const held = relay.sessionOwner(sessionId);
+  return held === undefined || held === owner;
+}
+
 /** 404 rather than 403 throughout: whether a session exists is itself owned. */
 async function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<boolean> {
   if (!store) return true;
@@ -520,6 +532,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return;
     }
     if (mode === 'stream' && req.method === 'GET') {
+      // registerPeerStream is last-connection-wins, so an unchecked connect
+      // does not just read someone else's frames — it takes their leg away.
+      if (!maySession(owner, sid)) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end('not found');
+        return;
+      }
       // Client leg (re)connected: cancel any pending client-side resume, then
       // arm it again if this leg drops — symmetric with the endpoint side, so a
       // blip or the SIGTERM drain doesn't kill the session outright.

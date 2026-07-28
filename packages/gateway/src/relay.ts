@@ -45,6 +45,9 @@ type ResumeLeg = 'endpointResume' | 'clientResume';
 interface Session {
   runId: string;
   endpoint: string;
+  /** The caller openSession accepted. Every later touch of this session — the
+   * client leg, its frames, its close — is checked against it. */
+  owner: string;
   clientSend: SendLine;
   // A leg's timer is armed while that peer is disconnected; either firing
   // fails the session past the window. Both legs get the same grace.
@@ -139,6 +142,12 @@ export function createRelay(options: RelayOptions = {}) {
       if (session) disarm(session, 'clientResume');
     },
 
+    /** Undefined while no session by that id is open, which is the normal state
+     * when a client connects its leg before sending the open. */
+    sessionOwner(sessionId: string): string | undefined {
+      return sessions.get(sessionId)?.owner;
+    },
+
     listEndpoints(owner: string): EndpointPresence[] {
       return [...endpoints.values()]
         .filter((a) => a.owner === owner)
@@ -177,6 +186,7 @@ export function createRelay(options: RelayOptions = {}) {
       sessions.set(control.sessionId, {
         runId: control.runId,
         endpoint: control.endpoint,
+        owner: caller,
         clientSend,
       });
       attachment.sessions.add(control.sessionId);
