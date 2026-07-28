@@ -55,8 +55,10 @@ let store: Store;
 // §1: "frames expire on a default window (start at 30 days)". 0 disables.
 const retentionDays = Number(process.env.SYMMA_GATEWAY_RETENTION_DAYS ?? 30);
 const RETENTION_SWEEP_MS = 60 * 60 * 1000;
-// Tighter than retention: this is how long a revoked companion keeps working.
-const REVOCATION_SWEEP_MS = 30 * 1000;
+// Tighter than retention: this is how long a revoked peer keeps working. `||`,
+// not `??`: setInterval reads a NaN delay as 1ms, so a typo here would be a
+// self-inflicted hot loop against the database.
+const REVOCATION_SWEEP_MS = Number(process.env.SYMMA_GATEWAY_REVOCATION_MS) || 30_000;
 
 const log = (msg: string): void => {
   console.log(`[symma-gateway] ${msg}`);
@@ -135,16 +137,16 @@ const sendToSession =
     if (res) sseWrite(res, line);
   };
 
-/** The owner this request speaks for, or undefined if it speaks for nobody. */
-async function callerOwner(req: IncomingMessage, url: URL): Promise<Owner | undefined> {
+function bearerToken(req: IncomingMessage): string | undefined {
   const header = req.headers.authorization;
-  const bearer =
-    typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined;
-  // Query token is for EventSource/browser GETs only (they cannot set headers);
-  // ingest (POST) must use the Authorization header so the token never lands in
-  // access logs or proxy caches.
-  const presented = bearer ?? (req.method === 'GET' ? (url.searchParams.get('token') ?? '') : '');
-  return store.ownerForClientToken(presented);
+  return typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined;
+}
+
+/** Query token is for EventSource/browser GETs only (they cannot set headers);
+ * ingest (POST) must use the Authorization header so the token never lands in
+ * access logs or proxy caches. */
+function clientToken(req: IncomingMessage, url: URL): string {
+  return bearerToken(req) ?? (req.method === 'GET' ? (url.searchParams.get('token') ?? '') : '');
 }
 
 // SSE writes must never throw: a subscriber can disconnect between the
@@ -342,17 +344,37 @@ async function handleSessionIngest(
   overflowOr(res, req, overflow);
 }
 
-// Header-only: the companion is a fetch client (unlike a browser EventSource
-// viewer), so its token never needs the ?token= query form that lands in logs.
-async function endpointOwner(req: IncomingMessage, id: string): Promise<Owner | undefined> {
-  const header = req.headers.authorization;
-  const presented =
-    typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : '';
-  if (!presented) return undefined;
-  // The token names the endpoint it may speak for; a token for one endpoint
-  // cannot attach as another (§1: the owner is never read off `hello`).
-  const found = await store.endpointForToken(presented);
+/** The token names the endpoint it may speak for; a token for one endpoint
+ * cannot attach as another (§1: the owner is never read off `hello`). Takes the
+ * token rather than the request because a held leg re-runs it on the sweep —
+ * and its callers pass the header only, since a companion is a fetch client and
+ * never needs the ?token= query form that lands in logs. */
+async function endpointOwner(token: string, id: string): Promise<Owner | undefined> {
+  const found = await store.endpointForToken(token);
   return found?.endpoint === id ? found.owner : undefined;
+}
+
+/**
+ * Every other authorization check runs per request, but a stream or an ingest
+ * body is admitted once and then lives for hours, so revoking its token,
+ * deactivating its owner or uninstalling the workspace left it serving.
+ * Invariant 3 says compromise means shutdown, which a revocation that only
+ * reaches the next request does not deliver.
+ *
+ * Held legs re-run the exact check that admitted them, so revoking one of an
+ * endpoint's tokens drops the legs that token opened and leaves the rest — and
+ * every long-lived leg is held, because covering one kind just moves the
+ * survivor to another.
+ */
+interface HeldLeg {
+  what: string;
+  admits: () => Promise<boolean>;
+}
+const heldLegs = new Map<ServerResponse, HeldLeg>();
+
+function holdLeg(res: ServerResponse, what: string, admits: () => Promise<boolean>): void {
+  heldLegs.set(res, { what, admits });
+  res.on('close', () => heldLegs.delete(res));
 }
 
 /** One live SSE leg per peer; last connection wins, cleanup only clears the
@@ -545,17 +567,22 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const endpointRoute = url.pathname.match(/^\/api\/endpoints\/([^/]+)\/(stream|ingest)$/);
   if (endpointRoute) {
     const [, id, mode] = endpointRoute;
-    const endpointOwned = isSafeId(id) ? await endpointOwner(req, id) : undefined;
+    const token = bearerToken(req) ?? '';
+    const endpointOwned = isSafeId(id) ? await endpointOwner(token, id) : undefined;
     if (!endpointOwned) {
       res.writeHead(401, { 'content-type': 'text/plain' });
       res.end('unauthorized');
       return;
     }
+    const stillEndpoint = async (): Promise<boolean> =>
+      (await endpointOwner(token, id)) === endpointOwned;
     if (mode === 'stream' && req.method === 'GET') {
       registerPeerStream(endpointStreams, id, res, () => relay.detachEndpoint(id));
+      holdLeg(res, `endpoint ${id} stream`, stillEndpoint);
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
+      holdLeg(res, `endpoint ${id} ingest`, stillEndpoint);
       void handleEndpointIngest(req, res, id, endpointOwned).catch(() => res.destroy());
       return;
     }
@@ -563,12 +590,15 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.end('not found');
     return;
   }
-  const owner = await callerOwner(req, url);
+  const token = clientToken(req, url);
+  const owner = await store.ownerForClientToken(token);
   if (!owner) {
     res.writeHead(401, { 'content-type': 'text/plain' });
     res.end('unauthorized');
     return;
   }
+  const stillClient = async (): Promise<boolean> =>
+    (await store.ownerForClientToken(token)) === owner;
   if (req.method === 'GET' && url.pathname === '/') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(VIEWER_HTML);
@@ -636,9 +666,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // After registering, not before: evicting the previous leg runs its
       // cleanup, which would delete the entry this line sets.
       sessionStreamOwners.set(sid, owner);
+      holdLeg(res, `session ${sid} stream`, stillClient);
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
+      holdLeg(res, `session ${sid} ingest`, stillClient);
       void handleSessionIngest(req, res, sid, owner).catch(() => res.destroy());
       return;
     }
@@ -696,6 +728,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return;
     }
     handleStream(res, runId, sessionId);
+    holdLeg(res, `journal ${runId}/${sessionId}`, stillClient);
     return;
   }
   if (req.method === 'POST' && url.pathname === '/api/ingest' && databaseUrl) {
@@ -794,30 +827,21 @@ store = databaseUrl
   ? await openStore(databaseUrl, fileURLToPath(new URL('./schema.sql', import.meta.url)))
   : localStore(token, endpointTokens, () => listJournals(dataDir));
 
-/**
- * Every other authorization check runs per request, but a companion's SSE leg is
- * admitted once and then lives for hours — so revoking its token, deactivating
- * its owner or uninstalling the workspace left it delivering opens. Invariant 3
- * says compromise means shutdown, which a revocation that only reaches the next
- * request does not deliver.
- */
-function dropRevokedEndpoints(): void {
+/** Destroy, not end: a revocation is a shutdown, and a half-closed response
+ * still leaves the peer's request body streaming in. Cleanup runs off `close`,
+ * which detaches the relay and drops the leg from `heldLegs`. */
+function dropRevokedLegs(): void {
   void (async () => {
-    const attached = relay.attachedEndpoints();
-    if (attached.length === 0) return;
-    const live = await store.stillAuthorized(attached);
-    for (const endpoint of attached) {
-      if (live.has(endpoint)) continue;
-      log(`endpoint ${endpoint} is no longer authorized; dropping`);
-      relay.detachEndpoint(endpoint);
-      endpointStreams.get(endpoint)?.end();
-      endpointStreams.delete(endpoint);
+    for (const [res, leg] of heldLegs) {
+      if (await leg.admits()) continue;
+      log(`${leg.what} is no longer authorized; dropping`);
+      res.destroy();
     }
   })().catch((error: unknown) =>
     log(`revocation sweep failed: ${error instanceof Error ? error.message : String(error)}`),
   );
 }
-setInterval(dropRevokedEndpoints, REVOCATION_SWEEP_MS).unref();
+setInterval(dropRevokedLegs, REVOCATION_SWEEP_MS).unref();
 
 if (retentionDays > 0) {
   // A sweep that fails is a promise unkept, not a reason to stop serving — same

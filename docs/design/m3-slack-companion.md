@@ -297,15 +297,16 @@ The service processes and stores selected Slack context, prompts, agent output
 and reasoning — which can contain source code. That has to be stated, defaulted,
 and enforced:
 
-|              | position                                                                                                                                                       |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| retention    | **shipped** — `SYMMA_GATEWAY_RETENTION_DAYS`, 30 by default, swept hourly and once at boot so a gateway that restarts often still forgets                      |
-| deletion     | **shipped** for a session — `DELETE /api/runs/:run/sessions/:sid/journal`, owner-scoped inside the query. Conversations arrive with M3d                        |
-| uninstall    | **shipped** as `deleteWorkspace`; its trigger is Slack's `app_uninstalled` event, so until M3d an operator runs it. Tokens need deleting explicitly, see below |
-| user removal | **shipped** as `deactivateUser`, triggered the same way at M3d. Revokes both token kinds, drops the endpoints and returns their sessions so the frames go too  |
-| encryption   | at rest via the database; secrets (tokens, pairing codes) stored hashed, never plaintext                                                                       |
-| logs         | holds — gateway logs carry ids, counts and outcomes; no path logs a frame, a prompt or a token                                                                 |
-| training     | never. No model training, no fine-tuning, no human review of customer content                                                                                  |
+|              | position                                                                                                                                                                                                           |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| retention    | **shipped** — `SYMMA_GATEWAY_RETENTION_DAYS`, 30 by default, swept hourly and once at boot so a gateway that restarts often still forgets                                                                          |
+| deletion     | **shipped** for a session — `DELETE /api/runs/:run/sessions/:sid/journal`, owner-scoped inside the query. Conversations arrive with M3d                                                                            |
+| uninstall    | **shipped** as `deleteWorkspace`; its trigger is Slack's `app_uninstalled` event, so until M3d an operator runs it. Tokens need deleting explicitly, see below                                                     |
+| user removal | **shipped** as `deactivateUser`, triggered the same way at M3d. Revokes both token kinds, drops the endpoints and returns their sessions so the frames go too                                                      |
+| revocation   | **shipped** — every long-lived leg re-runs the check that admitted it on a sweep (`SYMMA_GATEWAY_REVOCATION_MS`, 30s), so revoking a token reaches the streams and ingest bodies it already opened, and only those |
+| encryption   | at rest via the database; secrets (tokens, pairing codes) stored hashed, never plaintext                                                                                                                           |
+| logs         | holds — gateway logs carry ids, counts and outcomes; no path logs a frame, a prompt or a token                                                                                                                     |
+| training     | never. No model training, no fine-tuning, no human review of customer content                                                                                                                                      |
 
 M2 deferred retention on a files-and-cron argument. In a store it stops being an
 ops chore and starts being a product promise, so it lands with M3a.

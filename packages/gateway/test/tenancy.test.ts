@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,6 +55,8 @@ before(
           SYMMA_GATEWAY_HOST: '127.0.0.1',
           SYMMA_GATEWAY_TOKEN: 'unused-when-a-store-is-configured',
           SYMMA_GATEWAY_DATABASE_URL: url,
+          // Production waits 30s to drop a revoked leg; a test cannot.
+          SYMMA_GATEWAY_REVOCATION_MS: '150',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -123,6 +126,11 @@ const onceOnStream = async (
     abort.abort();
   }
 };
+
+/** The store's own hashing, repeated rather than exported: revoking one of an
+ * endpoint's tokens needs to name the row, and the scheme changing under a
+ * stored hash is a breaking change this test should fail on. */
+const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 const as = (token: string, path: string, init?: RequestInit): Promise<Response> =>
   fetch(`${base}${path}`, {
@@ -762,39 +770,79 @@ describe('tenancy', () => {
     }
   });
 
-  it('stops authorizing an endpoint once its owner or token is gone', async () => {
-    // Every other check runs per request, but a companion's SSE leg is admitted
-    // once and lives for hours. Without this, revocation only reached the next
-    // request the companion happened to make — which for a listener is never.
+  it('drops every leg a revoked token opened, and only those', async () => {
+    // The sweep is the only check these get again: a stream and an ingest body
+    // are admitted once and then live for hours. Asserted here rather than on a
+    // store predicate, because a predicate over endpoint ids cannot see which
+    // legs exist — which is how the ingest body and the whole client side stayed
+    // open through a revocation that the store-level test called covered.
     const url = pg.getConnectionUri();
-    const all = ['nia-box', 'omar-box', 'pia-box'];
-    for (const [slackUser, endpoint] of [
-      ['nia', 'nia-box'],
-      ['omar', 'omar-box'],
-      ['pia', 'pia-box'],
-    ] as const) {
-      await provision(url, { team: 'revoke', slackUser, endpoint });
-    }
-    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
-    const pool = new Pool({ connectionString: url });
+    const nia = await provision(url, { team: 'revoke', slackUser: 'nia', endpoint: 'nia-box' });
+    // A second provisioning of the same endpoint issues a second token: revoking
+    // one must drop the legs it opened and leave its siblings serving.
+    const again = await provision(url, { team: 'revoke', slackUser: 'nia', endpoint: 'nia-box' });
+
+    const legs = new AbortController();
+    /** True if the leg closed within `ms`, false if it is still serving. */
+    const closes = (leg: Promise<unknown>, ms: number): Promise<boolean> =>
+      Promise.race([
+        leg.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+      ]);
+    const drain = (res: Response): Promise<unknown> => res.body!.pipeTo(new WritableStream());
     try {
-      assert.deepEqual([...(await store.stillAuthorized(all))].sort(), all);
+      // A `hello` and then a body that never ends: the already-authenticated
+      // leg an SSE-only sweep leaves usable for frames and for a re-`hello`.
+      // The hello also flushes the request headers, which undici holds back
+      // until the body writes.
+      const doomedIngest = fetch(`${base}/api/endpoints/nia-box/ingest`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${nia.endpointToken}` },
+        body: new ReadableStream({
+          start: (c: ReadableStreamDefaultController<Uint8Array>) =>
+            c.enqueue(
+              new TextEncoder().encode(
+                `${JSON.stringify({
+                  kind: 'hello',
+                  endpoint: 'nia-box',
+                  device: 'nia-box',
+                  agents: [{ agent: 'kilo' }],
+                  maxSessions: 2,
+                })}\n`,
+              ),
+            ),
+        }),
+        duplex: 'half',
+        signal: legs.signal,
+      } as RequestInit);
+      const survivor = await fetch(`${base}/api/endpoints/nia-box/stream`, {
+        headers: { authorization: `Bearer ${again.endpointToken}` },
+        signal: legs.signal,
+      });
+      const doomedClient = await fetch(`${base}/api/sessions/sid-nia/stream`, {
+        headers: { authorization: `Bearer ${nia.clientToken}` },
+        signal: legs.signal,
+      });
 
-      // Deactivation takes the endpoint row with it.
-      await store.deactivateUser('revoke', 'omar');
-      // A plain revoke leaves the endpoint and kills only its token, which is
-      // the path §3's revoke-from-the-DM will use.
-      await pool.query(
-        `UPDATE tokens SET revoked_at = now() WHERE subject_kind = 'endpoint' AND subject_id = $1`,
-        ['pia-box'],
-      );
+      const pool = new Pool({ connectionString: url });
+      try {
+        await pool.query(`UPDATE tokens SET revoked_at = now() WHERE hash = ANY($1)`, [
+          [nia.endpointToken, nia.clientToken].map(tokenHash),
+        ]);
+      } finally {
+        await pool.end();
+      }
 
-      assert.deepEqual([...(await store.stillAuthorized(all))], ['nia-box']);
-      // And an endpoint nobody ever provisioned is not authorized either.
-      assert.deepEqual([...(await store.stillAuthorized(['ghost-box']))], []);
+      assert.equal(await closes(doomedIngest, 3000), true, 'ingest leg outlived its token');
+      assert.equal(await closes(drain(doomedClient), 3000), true, 'client leg outlived its token');
+      // Same endpoint, different token, still serving: a revocation that took
+      // the siblings with it would be an outage dressed as a security fix.
+      assert.equal(await closes(drain(survivor), 400), false, 'sibling token dropped too');
     } finally {
-      await pool.end();
-      await store.close();
+      legs.abort();
     }
   });
 

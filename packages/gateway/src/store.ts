@@ -20,10 +20,6 @@ export interface LiveSession extends SessionRef {
 
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
-  /** Still-authorized endpoints from the given set. Every other check here runs
-   * per request, but an attached SSE leg outlives the one that admitted it —
-   * this is what lets a revocation reach a connection already open. */
-  stillAuthorized(endpoints: string[]): Promise<Set<string>>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   /** The authorization question itself, not the owner to compare outside: with
@@ -81,20 +77,6 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [hashToken(token)],
       );
       return row?.subject_id;
-    },
-    async stillAuthorized(endpoints) {
-      const { rows } = await pool.query(
-        // Existence covers uninstall and deactivation, which both take the
-        // endpoint row with them; the token check is what a plain revoke uses.
-        `SELECT e.id FROM endpoints e
-          WHERE e.id = ANY($1)
-            AND EXISTS (SELECT 1 FROM tokens t
-                         WHERE t.subject_kind = 'endpoint' AND t.subject_id = e.id
-                           AND t.revoked_at IS NULL
-                           AND (t.expires_at IS NULL OR t.expires_at > now()))`,
-        [endpoints],
-      );
-      return new Set(rows.map((r: { id: string }) => r.id));
     },
     async endpointForToken(token) {
       const row = await one<{ subject_id: string; user_id: string }>(
@@ -412,8 +394,6 @@ export function localStore(
       }
       return Promise.resolve(byRun);
     },
-    // One tenant with no revocation model, so nothing is ever de-authorized.
-    stillAuthorized: (endpoints) => Promise.resolve(new Set(endpoints)),
     // Ownership is universal here, so there is nothing to record or release.
     recordSession: () => Promise.resolve(),
     // Nothing is recorded here, so nothing is released — the journal is
