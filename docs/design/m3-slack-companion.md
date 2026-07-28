@@ -12,8 +12,8 @@ to **their** agent, with **their** credentials, on **their** machine.
 ### The category exists; the identity model does not
 
 Surveyed **2026-07-26**. Every project below connects Slack to _an_ ACP agent.
-None of _these_ routes each Slack actor to that person's separately
-authenticated machine — but the survey was incomplete, see below.
+The survey did not identify one that routes each Slack actor to that person's
+separately authenticated machine — and it was incomplete, see below.
 
 Star counts and repo status drift, so treat them as a snapshot of that date, not
 a fact. Before citing this table again, re-check the repos and record URLs and
@@ -33,9 +33,16 @@ commit SHAs alongside the claims.
 **The survey missed the largest player, and it does route per user.** Added
 2026-07-28 after this section had already been written against the table above.
 
-| project             | what matches                                                                                                                                                                                                                                        | how it differs                                                                                                                                                      |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **LobeHub** (~81k★) | `lh connect` is an outbound-dial daemon on the user's machine that spawns local agent CLIs (claude-code, codex, amp) and strips ambient provider keys so each uses its own subscription. Slack and Discord channels, device presence, pairing codes | routing is a per-user _preference_ (`AgentDeviceOverride` overriding `boundDeviceId`) layered on a shared agent, and `requestedDeviceId` on a request wins outright |
+| project             | what matches                                                                                                                                                                                                                                        | how it differs                                                                                                                                                                                                         |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **LobeHub** (~81k★) | `lh connect` is an outbound-dial daemon on the user's machine that spawns local agent CLIs (claude-code, codex, amp) and strips ambient provider keys so each uses its own subscription. Slack and Discord channels, device presence, pairing codes | routing is a per-user _preference_ (`AgentDeviceOverride` overriding `boundDeviceId` via `resolveAgencyConfig`) layered on a shared agent, and inside routing selection an explicit `requestedDeviceId` wins over both |
+
+[github.com/lobehub/lobehub](https://github.com/lobehub/lobehub) @ `a5769c22b6a8`
+(`main`, 2026-07-28), read through DeepWiki rather than a clone — so the symbol
+names above are the evidence and the line numbers are not pinned. **Nothing here
+is a claim about their authorization.** `canUseDevice` gates whether a sender may
+reach a device at all and is a separate check; `requestedDeviceId` winning is
+about which device routing picks once that check has passed.
 
 So the claim this section was built on — that nobody routes Alice to Alice's
 laptop and Bob to Bob's — **is false.** LobeHub does, through per-user overrides
@@ -59,10 +66,11 @@ What is left is narrower and better:
 The distinction is worth being precise about, because "we route per user" is now
 a thing to say _second_. LobeHub routes per user by letting each user override a
 shared agent's bound device; the authorization question — may this sender use
-that device — is a separate `canUseDevice` check beside it, and an explicit
-`requestedDeviceId` on a request wins outright. In §1's model the two are the
-same question: `openSession` refuses when `caller.owner !== endpoint.owner`, so a
-request naming someone else's endpoint has nothing left to fall back on.
+that device — is a separate `canUseDevice` check beside it, and once that check
+passes an explicit `requestedDeviceId` decides which device. Two questions, two
+places. In §1's model they are one: `openSession` refuses when
+`caller.owner !== endpoint.owner`, so a request naming someone else's endpoint
+has nothing left to fall back on.
 
 That is a security posture rather than a feature, which makes it harder to
 demo and harder to copy back out of.
@@ -153,6 +161,8 @@ endpoints    (id, user_id, device_name, agents[], workspaces[], max_sessions,
               public_key, last_seen_at, protocol_version)
 tokens       (id, endpoint_id | user_id, kind, hash, expires_at, revoked_at)
 pairings     (code_hash, user_id, expires_at, consumed_at, attempts)
+key_changes  (endpoint_id, proposed_public_key, fingerprint, expires_at,
+              consumed_at)   -- at most one pending per endpoint (§3)
 
 conversations   (id, user_id, dm_channel_id, root_thread_ts,
                  source_channel_id, source_thread_ts,
@@ -204,8 +214,10 @@ ops chore and starts being a product promise, so it lands with M3a.
 ## 2. Pairing and onboarding — the product
 
 The beta targets non-technical people, so this flow _is_ the product. Every
-surveyed competitor requires building a Slack app, copying tokens, editing
-config, and keeping a daemon alive. cc-connect has the best of them and still
+_self-hosted_ competitor requires building a Slack app, copying tokens, editing
+config, and keeping a daemon alive. LobeHub is the exception and shows the bar
+is reachable: one shared bot, a pairing code, no app to create. cc-connect has
+the best of the self-hosted ones and still
 needs: create app → scopes → enable Socket Mode → app token → event subscriptions
 → install → copy bot token → paste both → keep running.
 
@@ -235,10 +247,21 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
 5. **The endpoint id is derived, never typed.** M2 has the operator choose it
    (`laptop`), which is one more field in a flow whose bar is zero fields — and
    it changes when someone reinstalls, orphaning the endpoint the gateway knows.
-   Derive it from the machine id, with a per-install connection id beside it so
-   two companions on one machine stay distinguishable. Borrowed from LobeHub's
-   `lh connect`, which does exactly this. The **device label** stays free text
-   ("Jingbo's MacBook Pro") because that one is for humans.
+   Borrowed from LobeHub's `lh connect`, which derives from the machine id.
+
+   **It is one composite value, not two keys.** `hash(machine id + install id)`,
+   so a second companion on the same machine gets a different endpoint and the
+   relay needs no change: `attachEndpoint` still keys by `endpoint` alone, and
+   `hello` still carries one id. Splitting them into an endpoint plus a separate
+   connection id would put a second routing key into the store, the control
+   protocol and every ownership check, to distinguish two things the relay
+   already distinguishes. Reinstalling deliberately produces a new endpoint —
+   which is why revoke and re-pair (§3) exist, and is better than silently
+   inheriting the old one's grants.
+
+   The **device label** stays free text ("Jingbo's MacBook Pro"): humans need it,
+   nothing routes on it, and two machines may honestly share one.
+
 6. The gateway records
    `(team_id, user_id) → owner → companion devices`, plus the member's default
    device and agent. **Provider credentials never enter Slack or the gateway.**
@@ -356,6 +379,20 @@ long-lived by definition, so the trigger has fired:
   also how an attacker with one pairing code would cut _the owner_ off. First
   pair is code-only; **replacing an existing key needs a confirmation in the
   owner's DM.**
+
+  **The approval binds to one key, or it is theatre.** A prompt saying "approve
+  the new key?" that resolves to whatever arrived last is a confused deputy: two
+  concurrent re-pairs and the owner approves one while the other lands. So the
+  request is a row, not a flag — `key_changes` in §1's store, keyed by endpoint
+  and carrying the proposed key with the fingerprint the owner was shown — and
+  approving consumes _that_ row and installs _that_ key. Owner is read through
+  the endpoint rather than restated on the row, so the two cannot disagree.
+
+  A second request for the same endpoint supersedes the first rather than
+  queueing beside it, so there is never more than one pending key an owner could
+  be confused about, and the superseded one is dead even if its message is still
+  on screen. The DM shows the fingerprint, because
+  approving a key you were not shown is the same as not approving one.
 
 Invariant 11 already says compromise means shutdown and token rotation, which is
 not a thing you can honour without a rotation path.
@@ -711,8 +748,8 @@ Consequences:
     COMPANION  — none. Outbound only, as in M2
 
   Bob tags the same thread → ② resolves to BOB's endpoint → his agent, his
-  subscription, his machine. Two agents, one context — the thing no competitor
-  can express.
+  subscription, his machine. Two agents, one context — and ② is an ownership
+  lookup, not a per-user setting that could be pointed elsewhere.
 ```
 
 Why each number matters:
