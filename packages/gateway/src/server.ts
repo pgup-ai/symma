@@ -37,8 +37,12 @@ const token = process.env.SYMMA_GATEWAY_TOKEN?.trim() || '';
 // cannot override that. With a token the default is all interfaces; behind a
 // local TLS proxy (deploy/observer), SYMMA_GATEWAY_HOST=127.0.0.1 keeps token
 // auth while making the proxy the only public door, firewall or not.
-const host = token ? process.env.SYMMA_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
 const databaseUrl = process.env.SYMMA_GATEWAY_DATABASE_URL?.trim() || '';
+// A database is authentication too, so it unlocks the configured bind exactly
+// as the shared token does — otherwise a multi-tenant deployment has to invent
+// a dummy token it never uses to become reachable.
+const host =
+  token || databaseUrl ? process.env.SYMMA_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
 // Without a database there is one tenant, which is what M2 was. Every check
 // below still runs; they all compare against this instead of a users row.
 const LOCAL_OWNER: Owner = 'local';
@@ -263,17 +267,24 @@ async function handleSessionIngest(
       // Only a session the relay accepted may leave a row. A refused open that
       // recorded one would put a run in its owner's listing whose journal never
       // existed, and every read of it 404s.
-      if (relay.sessionRun(sid)) {
-        storeWrite(
-          `recordSession ${sid}`,
-          store?.recordSession({
+      if (relay.sessionRun(sid) && store) {
+        // Without this row the session's frames are unreadable, undeletable and
+        // invisible to retention, so they would outlive the window silently.
+        // Losing the session is the lesser failure, and a loud one.
+        void store
+          .recordSession({
             id: sid,
             runId: control.runId,
             endpoint: control.endpoint,
             agent: control.agent,
             model: control.model,
-          }),
-        );
+          })
+          .catch((error: unknown) => {
+            log(
+              `recordSession ${sid} failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            relay.closeSession(sid, 'session could not be recorded');
+          });
       }
     } else if (!maySession(owner, sid)) {
       // Everything past the open touches a session that already has an owner:
@@ -603,6 +614,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return;
     }
     handleStream(res, runId, sessionId);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/ingest' && store) {
+    // The observer tee journals sessions this gateway never routed, so its
+    // runId and sessionId are whatever the caller says — there is nothing to
+    // check them against, and unchecked they write into another tenant's
+    // journal. Multi-tenant frames arrive through the relay, which knows whose
+    // session they belong to.
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
     return;
   }
   if (req.method === 'POST' && url.pathname === '/api/ingest') {

@@ -217,11 +217,22 @@ export async function provision(
        ON CONFLICT DO NOTHING`,
       [owner, workspace, spec.slackUser],
     );
-    await pool.query(
+    // Never reassign: the id is already on historical sessions, so moving it
+    // would hand their journals to the new owner and leave the old owner's
+    // endpoint token authenticating as them.
+    const claimed = await pool.query(
       `INSERT INTO endpoints (id, user_id, device_name) VALUES ($1, $2, $3)
-       ON CONFLICT (id) DO UPDATE SET user_id = EXCLUDED.user_id`,
+       ON CONFLICT (id) DO NOTHING RETURNING id`,
       [spec.endpoint, owner, spec.device ?? spec.endpoint],
     );
+    if (claimed.rowCount === 0) {
+      const { rows } = await pool.query(`SELECT user_id FROM endpoints WHERE id = $1`, [
+        spec.endpoint,
+      ]);
+      if (rows[0]?.user_id !== owner) {
+        throw new Error(`endpoint ${spec.endpoint} already belongs to ${rows[0]?.user_id}`);
+      }
+    }
     await pool.query(
       `INSERT INTO tokens (id, subject_kind, subject_id, hash) VALUES
          ($1, 'client', $2, $3), ($4, 'endpoint', $5, $6)`,

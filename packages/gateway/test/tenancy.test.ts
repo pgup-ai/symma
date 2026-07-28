@@ -433,4 +433,43 @@ describe('tenancy', () => {
       detach();
     }
   });
+
+  it('refuses the observer tee and endpoint theft in multi-tenant mode', async () => {
+    // /api/ingest journals sessions this gateway never routed, so its runId and
+    // sessionId are whatever the caller says — there is nothing to check them
+    // against, and unchecked any tenant writes into another's journal.
+    // Fresh tenant: the uninstall case deleted acme, so alice and bob are gone.
+    const frank = await provision(pg.getConnectionUri(), {
+      team: 'tee',
+      slackUser: 'frank',
+      endpoint: 'frank-laptop',
+    });
+    const res = await as(frank.clientToken, '/api/ingest', {
+      method: 'POST',
+      body: `${JSON.stringify({
+        v: 1,
+        runId: 'run-alice',
+        sessionId: 'sid-alice',
+        seq: 99,
+        ts: 1,
+        agent: 'kilo',
+        label: 'l',
+        dir: 'out',
+        frame: {},
+      })}\n`,
+    });
+    assert.equal(res.status, 404);
+
+    // And an endpoint id is claimed once: reassigning it would hand its
+    // historical journals to the new owner and leave the old owner's token
+    // authenticating as them.
+    await assert.rejects(
+      provision(pg.getConnectionUri(), {
+        team: 'live',
+        slackUser: 'mallory',
+        endpoint: 'dana-laptop',
+      }),
+      /already belongs to/,
+    );
+  });
 });

@@ -226,7 +226,16 @@ who owns them.
 **Without `SYMMA_GATEWAY_DATABASE_URL` the gateway is single-tenant**, as M2
 was. Every check still runs — they compare against one implicit owner instead of
 a `users` row — so there is no unscoped code path, only a store with one tenant
-in it.
+in it. A database counts as authentication, so it unlocks the configured bind
+the same way the shared token does; otherwise a multi-tenant deployment has to
+invent a token it never uses to become reachable.
+
+**The M1 observer tee (`POST /api/ingest`) is single-tenant only** and 404s once
+a store is configured. It journals sessions the gateway never routed, so its
+`runId` and `sessionId` are whatever the caller says and there is nothing to
+check them against — unchecked, any tenant writes into another's journal.
+Multi-tenant frames arrive through the relay, which knows whose session they
+belong to.
 
 ```
 workspaces   (id, slack_team_id, install_kind, installed_at, bot_token_ref)
