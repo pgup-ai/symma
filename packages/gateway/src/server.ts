@@ -708,6 +708,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       spent.owner,
       typeof device === 'string' ? device : '',
     );
+    // Deactivated between the redeem and here. Their code is spent and their
+    // membership is gone, so this is the same answer a code that never worked
+    // gets — not a 500, which would say retry.
+    if (!claimed) return sendJson(res, 401, { error: 'code' });
     log(`paired endpoint ${claimed.endpoint}`);
     return sendJson(res, 200, claimed);
   }

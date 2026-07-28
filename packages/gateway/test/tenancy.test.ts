@@ -1073,13 +1073,14 @@ describe('tenancy', () => {
       await assert.rejects(store.mintPairingCode(sev.owner), /no active member/);
       // Nor an endpoint. Deactivation deletes them, and claiming takes the same
       // member lock, so a pair in flight cannot leave one behind it.
-      await assert.rejects(store.claimEndpoint(sev.owner, 'late laptop'), /no active member/);
+      assert.equal(await store.claimEndpoint(sev.owner, 'late laptop'), undefined);
 
       // And an endpoint token stops authenticating the moment its member is
       // deactivated, whether or not the row was cleaned up. Planted, because
       // with the lock in place a claim cannot outrun the cleanup that would.
       await pool.query(`UPDATE users SET deactivated_at = NULL WHERE id = $1`, [sev.owner]);
       const late = await store.claimEndpoint(sev.owner, 'late laptop');
+      assert.ok(late);
       assert.equal((await store.endpointForToken(late.token))?.endpoint, late.endpoint);
       await pool.query(`UPDATE users SET deactivated_at = now() WHERE id = $1`, [sev.owner]);
       assert.equal(await store.endpointForToken(late.token), undefined);

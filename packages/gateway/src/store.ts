@@ -33,8 +33,16 @@ export interface Store {
   /** The other half of pairing: an endpoint for this member and the token it
    * presents, both returned once. The id is assigned, not taken from an
    * unauthenticated request body, where it would be a valid code away from
-   * someone else's endpoint (§2). Throws if the member is gone. */
-  claimEndpoint(owner: Owner, device: string): Promise<{ endpoint: string; token: string }>;
+   * someone else's endpoint (§2).
+   *
+   * Undefined if the member is gone by the time this runs. Unlike
+   * `mintPairingCode`, whose caller names a member it should know, this one
+   * just watched a redeem find them alive — so their absence is a race to
+   * answer, not a caller's mistake to throw at. A store failure still throws. */
+  claimEndpoint(
+    owner: Owner,
+    device: string,
+  ): Promise<{ endpoint: string; token: string } | undefined>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   /** The authorization question itself, not the owner to compare outside: with
@@ -183,8 +191,7 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
          SELECT $4, 'endpoint', id, $5 FROM claimed`,
         [endpoint, owner, device, randomUUID(), hashToken(token)],
       );
-      if (!rowCount) throw new Error(`no active member ${owner} to pair`);
-      return { endpoint, token };
+      return rowCount ? { endpoint, token } : undefined;
     },
     async endpointForToken(token) {
       const row = await one<{ subject_id: string; user_id: string }>(
