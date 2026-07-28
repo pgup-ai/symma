@@ -12,7 +12,8 @@ to **their** agent, with **their** credentials, on **their** machine.
 ### The category exists; the identity model does not
 
 Surveyed **2026-07-26**. Every project below connects Slack to _an_ ACP agent.
-None routes each Slack actor to that person's separately authenticated machine.
+The survey did not identify one that routes each Slack actor to that person's
+separately authenticated machine — and it was incomplete, see below.
 
 Star counts and repo status drift, so treat them as a snapshot of that date, not
 a fact. Before citing this table again, re-check the repos and record URLs and
@@ -29,19 +30,52 @@ commit SHAs alongside the claims.
 | **OpenHands Agent Canvas** (~225★) | local agent server, Claude Code/Codex over ACP                                                                                               | its Slack path is a cron automation that posts a final result, not a live client                                                         |
 | **Juan**                           | "Slack as ACP Client", Socket Mode                                                                                                           | archived March 2026, single machine                                                                                                      |
 
-The shape they share: **one shared agent identity, machine, credentials and
-workspace — with isolated conversations per user.** A shared Mac mini is the
-natural deployment. Nobody dynamically routes Alice to Alice's laptop and Bob to
-Bob's.
+**The survey missed the largest player, and it does route per user.** Added
+2026-07-28 after this section had already been written against the table above.
+
+| project             | what matches                                                                                                                                                                                                                                        | how it differs                                                                                                                                                                                                         |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **LobeHub** (~81k★) | `lh connect` is an outbound-dial daemon on the user's machine that spawns local agent CLIs (claude-code, codex, amp) and strips ambient provider keys so each uses its own subscription. Slack and Discord channels, device presence, pairing codes | routing is a per-user _preference_ (`AgentDeviceOverride` overriding `boundDeviceId` via `resolveAgencyConfig`) layered on a shared agent, and inside routing selection an explicit `requestedDeviceId` wins over both |
+
+[github.com/lobehub/lobehub](https://github.com/lobehub/lobehub) @ `a5769c22b6a8`
+(`main`, 2026-07-28), read through DeepWiki rather than a clone — so the symbol
+names above are the evidence and the line numbers are not pinned. **Nothing here
+is a claim about their authorization.** `canUseDevice` gates whether a sender may
+reach a device at all and is a separate check; `requestedDeviceId` winning is
+about which device routing picks once that check has passed.
+
+So the claim this section was built on — that nobody routes Alice to Alice's
+laptop and Bob to Bob's — **is false.** LobeHub does, through per-user overrides
+merged into a shared agent config, with `RequestTrigger.Bot` upgrading a `local`
+target to `device`.
+
+The shape the _rest_ share still holds: one shared agent identity, machine,
+credentials and workspace, with isolated conversations per user. A shared Mac
+mini is the natural deployment. But "nobody has built personal routing" is no
+longer the thing to say.
 
 ### So the differentiator is not "ACP agent in Slack"
 
-That has been built several times. It is:
+That has been built several times, and since LobeHub, so has personal routing.
+What is left is narrower and better:
 
-> One shared Slack app, but every invocation resolves the actor to **their own**
-> signed, outbound-dial companion — their credentials, subscription, machine.
+> Ownership is the routing rule, not a setting on top of it. An endpoint belongs
+> to `(workspace_id, slack_user_id)`, and there is no configuration in which
+> Alice's invocation reaches Bob's laptop.
 
-What that buys, which none of the above can express:
+The distinction is worth being precise about, because "we route per user" is now
+a thing to say _second_. LobeHub routes per user by letting each user override a
+shared agent's bound device; the authorization question — may this sender use
+that device — is a separate `canUseDevice` check beside it, and once that check
+passes an explicit `requestedDeviceId` decides which device. Two questions, two
+places. In §1's model they are one: `openSession` refuses when
+`caller.owner !== endpoint.owner`, so a request naming someone else's endpoint
+has nothing left to fall back on.
+
+That is a security posture rather than a feature, which makes it harder to
+demo and harder to copy back out of.
+
+What still follows from it:
 
 - Alice and Bob invoke _different_ personal agents in the same thread.
 - No workspace-wide shared agent credentials.
@@ -52,6 +86,12 @@ What that buys, which none of the above can express:
 The third bullet is deliberately narrow. "We never see your code" would be false:
 relayed frames carry prompts, output and reasoning, and we store them. The
 credential is what stays on the machine — see Data lifecycle.
+
+Nor is it uniquely ours: LobeHub strips `ANTHROPIC_API_KEY` from its spawned
+CLIs for the same reason `codex.ts` and `kilo.ts` do here — so the agent falls
+back to the user's own subscription instead of a stray ambient key. Two
+independent arrivals at the same non-obvious fix is evidence it is a real
+hazard, not a nicety.
 
 ACP does not solve this layer — it is point-to-point. Routing, reconnection and
 ownership are gateway responsibilities. **The defendable product is the
@@ -121,6 +161,8 @@ endpoints    (id, user_id, device_name, agents[], workspaces[], max_sessions,
               public_key, last_seen_at, protocol_version)
 tokens       (id, endpoint_id | user_id, kind, hash, expires_at, revoked_at)
 pairings     (code_hash, user_id, expires_at, consumed_at, attempts)
+key_changes  (endpoint_id, proposed_public_key, fingerprint, expires_at,
+              consumed_at)   -- at most one pending per endpoint (§3)
 
 conversations   (id, user_id, dm_channel_id, root_thread_ts,
                  source_channel_id, source_thread_ts,
@@ -172,8 +214,10 @@ ops chore and starts being a product promise, so it lands with M3a.
 ## 2. Pairing and onboarding — the product
 
 The beta targets non-technical people, so this flow _is_ the product. Every
-surveyed competitor requires building a Slack app, copying tokens, editing
-config, and keeping a daemon alive. cc-connect has the best of them and still
+_self-hosted_ competitor requires building a Slack app, copying tokens, editing
+config, and keeping a daemon alive. LobeHub is the exception and shows the bar
+is reachable: one shared bot, a pairing code, no app to create. cc-connect has
+the best of the self-hosted ones and still
 needs: create app → scopes → enable Socket Mode → app token → event subscriptions
 → install → copy bot token → paste both → keep running.
 
@@ -200,10 +244,28 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
 4. The companion detects locally authenticated ACP agents, dials out, exchanges
    the code for a durable endpoint token, persists it `0600`, installs a login
    service, and attaches.
-5. The gateway records
+5. **The endpoint id is derived, never typed.** M2 has the operator choose it
+   (`laptop`), which is one more field in a flow whose bar is zero fields — and
+   it changes when someone reinstalls, orphaning the endpoint the gateway knows.
+   Borrowed from LobeHub's `lh connect`, which derives from the machine id.
+
+   **It is one composite value, not two keys.** `hash(machine id + install id)`,
+   so a second companion on the same machine gets a different endpoint and the
+   relay needs no change: `attachEndpoint` still keys by `endpoint` alone, and
+   `hello` still carries one id. Splitting them into an endpoint plus a separate
+   connection id would put a second routing key into the store, the control
+   protocol and every ownership check, to distinguish two things the relay
+   already distinguishes. Reinstalling deliberately produces a new endpoint —
+   which is why revoke and re-pair (§3) exist, and is better than silently
+   inheriting the old one's grants.
+
+   The **device label** stays free text ("Jingbo's MacBook Pro"): humans need it,
+   nothing routes on it, and two machines may honestly share one.
+
+6. The gateway records
    `(team_id, user_id) → owner → companion devices`, plus the member's default
    device and agent. **Provider credentials never enter Slack or the gateway.**
-6. The DM shows the selected agent and live presence, with controls to switch
+7. The DM shows the selected agent and live presence, with controls to switch
    default, add a device, disconnect, or revoke a lost one. Presence needs no new
    machinery — `/api/endpoints` already reports `online`, agents and free
    capacity; it only needs scoping per user.
@@ -250,6 +312,44 @@ symma` is secondary for the Node crowd and nearly free from the same codebase.
   "Staying attached" below for why it is a _user_ service and what it cannot
   cover.
 
+### The four built-ins are a hardening list, not a compatibility list
+
+Worth stating because the natural reading is the other one, and the other one is
+wrong in both directions. `SYMMA_COMPANION_AGENTS=name=cmd args` already runs any
+ACP binary — that path exists today as the test seam and needs no work to become
+a supported tier. Conversely, `codex`/`cursor`/`devin`/`kilo` are not "the agents
+that work". They are the agents someone has done four specific pieces of work
+for:
+
+|                                               | built-in spec                                      | any ACP binary                      |
+| --------------------------------------------- | -------------------------------------------------- | ----------------------------------- |
+| detected, with a reason when it is absent     | yes — and §2 makes that string the onboarding copy | no                                  |
+| per-spawn credential isolation                | temp `HOME`/`CODEX_HOME`, cleanup after            | inherits the environment            |
+| ambient-key shadowing handled                 | yes                                                | n/a — nothing is injected to shadow |
+| model selection through the ACP config option | where the CLI's own flags do not reach the session | no                                  |
+| **read-only layers (invariant 1)**            | **all three**                                      | **the client floor only**           |
+
+The first four are conveniences. The last row is not, and it is the reason this
+distinction has to be visible rather than implied. A built-in gets the client
+permission floor _plus_ an agent-side layer — codex's OS sandbox, or
+`requirePlanMode` for the ones without one. A custom binary gets the floor and
+nothing else, because the spec that would declare `requirePlanMode` is
+constructed by the companion from a command line that has no field for it.
+
+That gap should be closed by the first custom agent that needs it, not before —
+declaring an option nobody sets is how a config format grows fields that never
+mean anything. But it must not close by accident: **an unhardened agent is
+acceptable on M3's DM path, where §4 lifts read-only inside an allowlisted
+workspace root anyway, and is not acceptable on a review path that depends on
+invariant 1.**
+
+**Add built-ins on demand.** Each one is a credential path, an isolation story
+and a read-only story, plus a standing maintenance liability the next time that
+CLI changes its auth layout. The four here exist because jbot-review drives them,
+which is a real caller and the right reason. Claude Code and Gemini CLI have ACP
+adapters and are the obvious next candidates — worth checking their current shape
+before committing to either.
+
 **`curl | sh` plus self-update is a supply-chain boundary, so it needs the
 supply-chain treatment.** We are asking non-technical people to run our script
 and then letting it replace its own binary forever after:
@@ -270,6 +370,29 @@ long-lived by definition, so the trigger has fired:
 - **Revoke** from the DM invalidates the endpoint token and unpins the key.
 - **Re-pair replaces** the key rather than adding one, so a lost laptop cannot
   keep signing after it is revoked.
+- **Re-pair is confirmed in the DM, not silently by holding a code.** LobeHub's
+  pairing mode does this well: the requester gets a code and the _owner_ approves
+  it from the chat surface they are already in (`/approve <code>`). Their reason
+  is a shared bot needing per-user access control, which §1's ownership model
+  makes moot — but the shape transfers to the case that is genuinely dangerous
+  here. Replacing a signing key is how a stolen laptop gets cut off, and it is
+  also how an attacker with one pairing code would cut _the owner_ off. First
+  pair is code-only; **replacing an existing key needs a confirmation in the
+  owner's DM.**
+
+  **The approval binds to one key, or it is theatre.** A prompt saying "approve
+  the new key?" that resolves to whatever arrived last is a confused deputy: two
+  concurrent re-pairs and the owner approves one while the other lands. So the
+  request is a row, not a flag — `key_changes` in §1's store, keyed by endpoint
+  and carrying the proposed key with the fingerprint the owner was shown — and
+  approving consumes _that_ row and installs _that_ key. Owner is read through
+  the endpoint rather than restated on the row, so the two cannot disagree.
+
+  A second request for the same endpoint supersedes the first rather than
+  queueing beside it, so there is never more than one pending key an owner could
+  be confused about, and the superseded one is dead even if its message is still
+  on screen. The DM shows the fingerprint, because
+  approving a key you were not shown is the same as not approving one.
 
 Invariant 11 already says compromise means shutdown and token rotation, which is
 not a thing you can honour without a rotation path.
@@ -292,10 +415,28 @@ The consequence is worth stating rather than engineering around: **the companion
 runs while its owner is logged in.** Log out and it stops. That is the same
 boundary that keeps the credentials on the machine, seen from the other side.
 
-`RunAtLoad` plus `KeepAlive` covers crash and reboot. Everything below that is
-already built and needs no M3 work: the companion reconnects with exponential
-backoff (1s→30s, reset on success) and both legs hold a 60s resume window, so a
-wifi blip does not kill an in-flight review.
+`RunAtLoad` plus `KeepAlive` covers crash and reboot. Reconnect needs no M3 work
+either: the companion backs off exponentially (1s→30s, reset on success) and both
+legs hold a 60s resume window, so a wifi blip does not kill an in-flight review.
+
+**One transport gap does need closing, and it is the same gap twice.** The
+gateway sends SSE heartbeats every 25s, but nothing on the companion side reads
+them — `connectOnce()` returns when the stream ends, and a half-open TCP
+connection never ends. A sleeping laptop whose NAT entry expired sends no FIN, so
+the companion sits believing it is attached while the gateway sees nothing, and
+does not reconnect until something else forces it. Track last-byte-received and
+drop the connection past ~2.5 heartbeats; the existing backoff loop does the
+rest.
+
+This is the one thing WebSocket ping/pong would have given for free, and it is
+worth naming as _that_ rather than as an argument for switching. M2 chose the
+SSE + NDJSON pair for reasons that still hold — both halves already
+production-tested, no new dependency in the two published packages, resume and
+journal-replay semantics built against it — and set the revisit trigger at
+sub-frame latency or binary frames, which ACP does not need. A liveness timer is
+a few lines against a proven transport. Swapping transports to obtain one would
+re-test resume, drain, backpressure and journaling to end up where a timer
+already gets us.
 
 **A closed laptop is not running anything.** No supervisor changes that. The two
 technical escapes both lose: clamshell dictates the member's desk, and a
@@ -346,7 +487,7 @@ uninstall.
 **Not building:** wake-on-LAN, or a "keep my laptop awake" toggle. Both spend the
 member's hardware to paper over a boundary that is honest. Anyone who genuinely
 wants 24/7 runs the same companion on a desktop or VPS — multiple devices
-already attach, and §2 step 6 already has the default-device picker.
+already attach, and §2 step 7 already has the default-device picker.
 
 ## 4. Conversation model — one DM thread = one conversation
 
@@ -464,6 +605,15 @@ something an `OpenControl` can ask for.
 The gap in every shipped Slack agent bot, including Codex's and Claude's: tag it
 in a public thread and it publishes whatever it produces. No review, no
 follow-up, no chance to catch a weak first draft.
+
+LobeHub confirms it at the top of the market and goes further than the others:
+a channel mention is answered with `chat.postMessage` into that thread, partials
+stream by editing the message in place, and **tool calls and permission prompts
+are surfaced publicly too** (`displayToolCalls`). Only the unlinked-user case
+gets an ephemeral reply. Unlike the personal-routing claim in "The bet", this one
+survived contact — and the stronger form of the argument is not draft quality but
+content: tool output carries file paths, source and error text, and publishing it
+into a channel by default is a disclosure decision nobody made.
 
 > **Invoking the agent is not consent to publish its response.**
 
@@ -598,8 +748,8 @@ Consequences:
     COMPANION  — none. Outbound only, as in M2
 
   Bob tags the same thread → ② resolves to BOB's endpoint → his agent, his
-  subscription, his machine. Two agents, one context — the thing no competitor
-  can express.
+  subscription, his machine. Two agents, one context — and ② is an ownership
+  lookup, not a per-user setting that could be pointed elsewhere.
 ```
 
 Why each number matters:

@@ -54,6 +54,41 @@ usage, never by security.** Owner-scoped endpoints, signed envelopes and the
 read-only floor are not upsells. A free tier that is less safe is a free tier
 that eventually becomes an incident with our name on it.
 
+### There is no inference to resell, and that is the whole constraint
+
+LobeHub is the sharpest illustration because it does both things in one app, and
+prices only one of them. Its credits meter **its own** hosted inference — model
+calls, image and video generation, vector storage — on tiers where "message
+requests" are unlimited and credits are the only cap, with credits-per-dollar
+improving as the tier rises. That is token arbitrage with a volume discount.
+
+`lh connect` — the part that overlaps with us — **consumes no credits at all.**
+A device-executed agent runs on the user's own subscription, and there is a BYOK
+path that bypasses the credit system entirely. The local-agent feature routes
+around their own billing on purpose.
+
+Two things follow, and the second is the uncomfortable one.
+
+**We cannot price like that even if we wanted to.** Reselling tokens requires
+holding the credential, and §"The bet" spends that option deliberately —
+credentials never leave the companion. So the coordination layer is not one
+revenue option among several; it is the only one. That is a firmer reason for
+the levers above than "usage tracks cost".
+
+**And a competitor can give our entire product away indefinitely.** For LobeHub,
+`lh connect` costs almost nothing and makes the chat app stickier, so free is
+rational for them forever. Pricing against that is not winnable. What is
+defensible is what a loss-leader inside someone else's chat app cannot be:
+
+- not conditional on adopting a chat product alongside it
+- ownership as the authorization boundary, not a per-user preference on a shared
+  agent (see §"The bet")
+- an actual service commitment, which a feature funded by an adjacent business
+  does not carry
+
+None of those are pricing arguments, which is the point. If the pitch ever
+becomes "cheaper than LobeHub", it has already lost.
+
 ## The open/closed line
 
 Already half-drawn: `@symma/protocol` and `@symma/client` are MIT on npm.
