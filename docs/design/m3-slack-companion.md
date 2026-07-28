@@ -359,8 +359,14 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
    **Add to Slack** belong to the multi-workspace beta. Do not read step 1 as
    OAuth-from-day-one.
 2. A member DMs the bot and clicks **Connect my agent**. The gateway mints a
-   single-use, short-TTL pairing code bound to `(team_id, user_id)`, with
-   per-user and per-IP attempt throttling and a hard attempt cap.
+   single-use, short-TTL pairing code bound to `(team_id, user_id)`.
+
+   **The two limits sit on opposite sides.** Minting is throttled per member,
+   and a new code supersedes the last, so a member has one live code however
+   often they click. Redeeming is throttled and hard-capped per IP, which is the
+   only side a guesser is on — they present codes for members they cannot name,
+   so there is no member to throttle them as.
+
 3. On the machine where their agents are already logged in, the member runs the
    installer, which pairs as part of the same run — one line, not two:
 
