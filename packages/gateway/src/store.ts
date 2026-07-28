@@ -18,18 +18,16 @@ export interface LiveSession extends SessionRef {
   endpoint: string;
 }
 
-/** Why a redeem failed. §2 gives expired and already-used the same words, so a
- * route has one message for `spent` either way; `unknown` is the mistyped or
- * never-minted case, which is the one worth telling apart in a support log. */
+/** §2 gives expired and already-used the same words, so `spent` covers both;
+ * `unknown` is the mistyped code, which a log is worth telling apart. */
 export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unknown' | 'spent' };
 
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
-  /** §2 pairing. Returns the plaintext once — the row keeps only its hash, like
-   * a token — and supersedes this owner's outstanding code. */
+  /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
+   * supersedes this owner's outstanding code. */
   mintPairingCode(owner: Owner): Promise<string>;
-  /** Spends a code. Single-use is decided inside the claim itself, so two
-   * redeems of one code cannot both come back `ok`. */
+  /** Spends a code. Two redeems of one code cannot both come back `ok`. */
   redeemPairingCode(code: string): Promise<PairingResult>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
@@ -70,25 +68,22 @@ export interface Store {
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 
-// Crockford base32 — no I, L, O or U, so nothing a member retypes off a phone
-// screen reads as something else. 256 is a whole multiple of 32, so taking a
-// random byte modulo the alphabet is unbiased.
+// Crockford base32: no I, L, O or U, so nothing retyped off a screen reads as
+// another character. 256 is a whole multiple of its 32 symbols, so a random
+// byte taken modulo the alphabet is unbiased.
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 /** 16 × 5 bits = 80, past §2's ≥64-bit floor. */
 const CODE_LENGTH = 16;
 const PAIRING_TTL_MINUTES = 10;
 
 function newPairingCode(): string {
-  const chars = Array.from(
-    randomBytes(CODE_LENGTH),
-    (b) => CODE_ALPHABET[b % CODE_ALPHABET.length],
-  );
-  // Grouped for reading aloud and typing back; normalizeCode undoes it.
-  return chars.join('').replace(/(.{4})(?=.)/g, '$1-');
+  const pick = (b: number): string => CODE_ALPHABET[b % CODE_ALPHABET.length];
+  const code = Array.from(randomBytes(CODE_LENGTH), pick).join('');
+  return code.replace(/(.{4})(?=.)/g, '$1-'); // grouped to read aloud
 }
 
-/** Crockford's decode, because a member retyping a code sends what they see: I
- * or l for 1, O for 0, and whatever they did with our grouping hyphens. */
+/** Crockford's decode: a retyped code arrives with I or l for 1 and O for 0,
+ * and our grouping hyphens wherever the member left them. */
 const normalizeCode = (code: string): string =>
   code
     .toUpperCase()
@@ -117,14 +112,10 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async mintPairingCode(owner) {
       const code = newPairingCode();
-      // Superseding rather than queueing: several live codes for one member is
-      // several chances for the wrong one to land, and §2's copy for a stale
-      // code already tells them to ask for another.
-      //
-      // One statement, so the two cannot come apart. The CTE is unreferenced on
-      // purpose — a data-modifying WITH runs to completion whether or not the
-      // primary query reads it, which is what makes this a single delete-then-
-      // insert rather than two statements needing a transaction around them.
+      // Supersede rather than queue: several live codes for one member is
+      // several chances for the wrong one to land. The CTE is unreferenced on
+      // purpose — a data-modifying WITH always runs — which is what keeps the
+      // delete and the insert one statement instead of a transaction.
       await pool.query(
         `WITH superseded AS (DELETE FROM pairings WHERE user_id = $2)
          INSERT INTO pairings (code_hash, user_id, expires_at)
@@ -135,9 +126,8 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async redeemPairingCode(code) {
       const hash = hashToken(normalizeCode(code));
-      // The claim is the UPDATE: single-use and expiry live in its WHERE, and
-      // Postgres re-checks that against the committed row once it has the lock,
-      // so of two redeems racing for one code exactly one gets a row back.
+      // The claim is the UPDATE: its WHERE is re-checked against the committed
+      // row once it holds the lock, so of two racing redeems exactly one wins.
       const won = await one<{ user_id: string }>(
         `UPDATE pairings SET consumed_at = now()
           WHERE code_hash = $1 AND consumed_at IS NULL AND expires_at > now()
@@ -497,8 +487,7 @@ export function localStore(
       ),
     deleteWorkspace: needsDatabase,
     deactivateUser: needsDatabase,
-    // There is one member here and they configured the token themselves, so
-    // there is no second party for a code to introduce.
+    // One member, holding a token they configured: nobody to introduce.
     mintPairingCode: needsDatabase,
     redeemPairingCode: needsDatabase,
     close: () => Promise.resolve(),

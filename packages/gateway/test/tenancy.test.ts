@@ -127,9 +127,9 @@ const onceOnStream = async (
   }
 };
 
-/** The store's own hashing, repeated rather than exported: revoking one of an
- * endpoint's tokens needs to name the row, and the scheme changing under a
- * stored hash is a breaking change this test should fail on. */
+/** The store's own hashing, repeated rather than exported: naming a token or a
+ * pairing row means naming its hash, and the scheme changing under a stored one
+ * is a breaking change these tests should fail on. */
 const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
 
 const as = (token: string, path: string, init?: RequestInit): Promise<Response> =>
@@ -876,21 +876,19 @@ describe('tenancy', () => {
     const pool = new Pool({ connectionString: url });
     try {
       const code = await store.mintPairingCode(nel.owner);
-      // Four groups of four from an alphabet with no I, L, O or U — 80 bits,
-      // and nothing in it that a person reads back as a different character.
+      // Four groups of four, from an alphabet with no I, L, O or U — 80 bits.
       assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
-      // Hashed like a token: the plaintext is returned once and never stored.
+      // Returned once and stored only as a hash, like a token.
       const { rows } = await pool.query(`SELECT code_hash FROM pairings WHERE user_id = $1`, [
         nel.owner,
       ]);
       assert.equal(rows.length, 1);
-      assert.notEqual(rows[0].code_hash, code);
+      assert.equal(rows[0].code_hash, tokenHash(code.replace(/-/g, '')));
 
       // Typed back off a phone: lowercase, hyphens dropped, O for 0, l for 1.
       const retyped = code.toLowerCase().replace(/-/g, '').replace(/0/g, 'O').replace(/1/g, 'l');
       assert.deepEqual(await store.redeemPairingCode(retyped), { ok: true, owner: nel.owner });
-      // Single-use, and a code nobody minted is the mistyped case, not a stale
-      // one — the member sees the same words, the log does not.
+      // Spent once; a code nobody minted is the mistyped case, not a stale one.
       assert.deepEqual(await store.redeemPairingCode(code), { ok: false, why: 'spent' });
       assert.deepEqual(await store.redeemPairingCode('ZZZZ-ZZZZ-ZZZZ-ZZZZ'), {
         ok: false,
@@ -928,17 +926,15 @@ describe('tenancy', () => {
   });
 
   it('lets exactly one of two racing redeems win the same code', async () => {
-    // The whole of single-use rests on this: the check and the claim are one
-    // statement, so the loser reads the winner's consumed_at rather than a
-    // snapshot taken before it.
+    // Single-use rests on the check and the claim being one statement, so the
+    // loser reads the winner's consumed_at, not a snapshot taken before it.
     const url = pg.getConnectionUri();
     const rai = await provision(url, { team: 'pair', slackUser: 'rai', endpoint: 'rai-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     try {
       const code = await store.mintPairingCode(rai.owner);
-      // Two, issued in one tick on separate pooled connections. More racers
-      // prove nothing further and widen the pool past what close() reliably
-      // tears down before the container goes away.
+      // Two, in one tick on separate pooled connections. More prove nothing
+      // further and widen the pool past what close() tears down in time.
       const racers = await Promise.all([
         store.redeemPairingCode(code),
         store.redeemPairingCode(code),
