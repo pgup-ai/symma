@@ -25,7 +25,8 @@ export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unkn
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
-   * supersedes this owner's outstanding code. */
+   * supersedes this owner's outstanding code. Throws if they are not a member
+   * here any more, rather than handing back a code that can only fail later. */
   mintPairingCode(owner: Owner): Promise<string>;
   /** Spends a code. Two redeems of one code cannot both come back `ok`. */
   redeemPairingCode(code: string): Promise<PairingResult>;
@@ -117,17 +118,24 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       // `user_id` rather than delete-then-insert, so two mints racing leave one
       // row rather than each finding nothing to delete and inserting its own.
       //
-      // Whether the member is still one is redeem's question, not this one —
-      // same as a token, which is minted once and checked at every use.
-      await pool.query(
+      // `FOR UPDATE` on the member is what orders this against deactivation,
+      // which takes the same row lock: either it waits and then deletes this
+      // code with the rest, or it went first and there is no live member here
+      // to select. Unlocked, a mint could land a fresh code behind a cleanup
+      // that had already run.
+      const { rowCount } = await pool.query(
         `INSERT INTO pairings (code_hash, user_id, expires_at)
-         VALUES ($1, $2, now() + make_interval(mins => $3))
+         SELECT $1, u.id, now() + make_interval(mins => $3)
+           FROM users u WHERE u.id = $2 AND u.deactivated_at IS NULL FOR UPDATE
          ON CONFLICT (user_id) DO UPDATE
             SET code_hash = EXCLUDED.code_hash,
                 expires_at = EXCLUDED.expires_at,
                 consumed_at = NULL`,
         [hashToken(normalizeCode(code)), owner, PAIRING_TTL_MINUTES],
       );
+      // Loud rather than a code that can only fail later: the caller asked to
+      // pair someone who is not a member here.
+      if (!rowCount) throw new Error(`no active member ${owner} to pair`);
       return code;
     },
     async redeemPairingCode(code) {
@@ -336,6 +344,9 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
             WHERE w.id = u.workspace_id AND w.slack_team_id = $1 AND u.slack_user_id = $2
            RETURNING u.id
          ), unpaired AS (
+           -- Their code goes with the tokens. The target CTE holds the member
+           -- row, which is also the lock mintPairingCode waits on to stay
+           -- ordered against this.
            DELETE FROM pairings WHERE user_id IN (SELECT id FROM target)
          ), revoked AS (
            UPDATE tokens SET revoked_at = now()

@@ -371,15 +371,16 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
    installer, which pairs as part of the same run — one line, not two:
 
    ```
-   curl -fsSL https://symma.dev/install.sh | sh -s -- pair FROG-2481-QK7M
+   curl -fsSL https://symma.dev/install.sh | sh -s -- pair BPB1-9W92-HTZJ-RA19
    ```
 
    The code is display-chunked but high-entropy (≥64 bits). Short codes are only
    safe behind throttling, and throttling alone is a weak place to put the whole
    guarantee. **Shipped as 16 Crockford base32 characters in four groups — 80
-   bits.** The example above is 12 characters, which is 60 bits in that alphabet
-   and under the floor this line sets. Crockford because it drops I, L, O and U,
-   so nothing a member retypes off a phone screen reads as something else.
+   bits.** Sixteen, not the twelve an earlier draft of the example above showed:
+   that is 60 bits in this alphabet, under the floor this same line sets.
+   Crockford because it drops I, L, O and U, so nothing a member retypes off a
+   phone screen reads as something else.
 
 4. The companion detects locally authenticated ACP agents, dials out, exchanges
    the code for a durable endpoint token, persists it `0600`, installs a login

@@ -945,6 +945,7 @@ describe('tenancy', () => {
     const url = pg.getConnectionUri();
     const sev = await provision(url, { team: 'pair', slackUser: 'sev', endpoint: 'sev-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
     try {
       const code = await store.mintPairingCode(sev.owner);
       await store.deactivateUser('pair', 'sev');
@@ -952,12 +953,25 @@ describe('tenancy', () => {
       // credential the way it revokes the others.
       assert.deepEqual(await store.redeemPairingCode(code), { ok: false, why: 'unknown' });
 
-      // And a code minted after the fact is still refused, which is the half
-      // deleting on deactivation cannot cover: a queued Slack event or an
-      // operator working from a stale list mints against a member who is gone.
-      const late = await store.mintPairingCode(sev.owner);
-      assert.deepEqual(await store.redeemPairingCode(late), { ok: false, why: 'spent' });
+      // Nor is a new one issued to a queued Slack event or an operator working
+      // off a stale list: minting takes the member row lock that deactivation
+      // takes, so it cannot land a code behind a cleanup that already ran.
+      await assert.rejects(store.mintPairingCode(sev.owner), /no active member/);
+      const left = await pool.query(`SELECT 1 FROM pairings WHERE user_id = $1`, [sev.owner]);
+      assert.equal(left.rowCount, 0, 'a refused mint left a row behind');
+
+      // Redeem asks whether the member is live regardless, the way every token
+      // check does. Planted directly, because with mint locked out of it there
+      // is nothing left that produces this row.
+      const planted = 'BPB1-9W92-HTZJ-RA19';
+      await pool.query(
+        `INSERT INTO pairings (code_hash, user_id, expires_at)
+         VALUES ($1, $2, now() + interval '10 minutes')`,
+        [tokenHash(planted.replace(/-/g, '')), sev.owner],
+      );
+      assert.deepEqual(await store.redeemPairingCode(planted), { ok: false, why: 'spent' });
     } finally {
+      await pool.end();
       await store.close();
     }
   });
