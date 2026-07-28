@@ -248,7 +248,7 @@ async function handleEndpointIngest(
         if (applied && control.kind === 'refused' && refusedRun)
           storeWrite(
             `deleteSessionRow ${control.sessionId}`,
-            store.deleteSessionRow(control.sessionId, refusedRun, id),
+            store.deleteSessionRow(control.sessionId, refusedRun, id).then(forgetSessions),
           );
       } else if (control.kind === 'close') {
         relay.endpointClose(id, control.sessionId, control.reason ?? 'closed by endpoint');
@@ -313,7 +313,7 @@ async function handleSessionIngest(
       if (!accepted)
         storeWrite(
           `deleteSessionRow ${sid}`,
-          store.deleteSessionRow(sid, control.runId, control.endpoint),
+          store.deleteSessionRow(sid, control.runId, control.endpoint).then(forgetSessions),
         );
       // maySession keeps a stranger from registering while someone holds the
       // id, but a registration can still interleave with the await above, when

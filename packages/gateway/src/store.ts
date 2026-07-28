@@ -39,8 +39,10 @@ export interface Store {
   }): Promise<void>;
   markSeen(endpoint: string): Promise<void>;
   /** For an open the companion went on to refuse: the row outlives the relay's
-   * in-memory session otherwise, and blocks the id from ever being reused. */
-  deleteSessionRow(id: string, runId: string, endpoint: string): Promise<void>;
+   * in-memory session otherwise, and blocks the id from ever being reused.
+   * Returns what it removed, like every other delete here — frames can already
+   * have been journaled between the open and the refusal. */
+  deleteSessionRow(id: string, runId: string, endpoint: string): Promise<SessionRef[]>;
   /** §1 data lifecycle. Each returns the sessions whose frames the caller must
    * now delete from disk — the row and the file are one unit, and only the
    * caller knows where the files live. */
@@ -120,11 +122,13 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async deleteSessionRow(id, runId, endpoint) {
       // The whole key: the same id names a different session under another
       // endpoint or run, and a partial match would strip that one instead.
-      await pool.query(`DELETE FROM sessions WHERE id = $1 AND run_id = $2 AND endpoint_id = $3`, [
-        id,
-        runId,
-        endpoint,
-      ]);
+      return refs(
+        await pool.query(
+          `DELETE FROM sessions WHERE id = $1 AND run_id = $2 AND endpoint_id = $3
+           RETURNING id, run_id`,
+          [id, runId, endpoint],
+        ),
+      );
     },
     async recordSession({ id, runId, endpoint, agent, model }) {
       // No ON CONFLICT: a reused id must not silently keep the old row, or the
@@ -368,7 +372,9 @@ export function localStore(
     },
     // Ownership is universal here, so there is nothing to record or release.
     recordSession: () => Promise.resolve(),
-    deleteSessionRow: () => Promise.resolve(),
+    // Nothing is recorded here, so nothing is released — the journal is
+    // reached and expired through the filesystem either way.
+    deleteSessionRow: () => Promise.resolve([]),
     markSeen: () => Promise.resolve(),
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;

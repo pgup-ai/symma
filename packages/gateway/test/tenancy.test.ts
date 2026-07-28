@@ -725,4 +725,38 @@ describe('tenancy', () => {
       await store.close();
     }
   });
+
+  it('takes the frames when a refused open releases its row', async () => {
+    // The relay accepts an open before the companion sees it, so frames can be
+    // journaled before a refusal arrives. Deleting only the row leaves a file
+    // no owner-scoped route reaches and retention never sees, which a
+    // misbehaving companion could repeat until the disk is gone.
+    const url = pg.getConnectionUri();
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    try {
+      appendEnvelope(dataDir, {
+        v: 1,
+        runId: 'run-refused',
+        sessionId: 'sid-refused',
+        seq: 1,
+        ts: 1,
+        agent: 'kilo',
+        label: 'l',
+        dir: 'in',
+        frame: {},
+      });
+      await store.recordSession({
+        id: 'sid-refused',
+        runId: 'run-refused',
+        endpoint: 'gina-box',
+        agent: 'kilo',
+      });
+      const released = await store.deleteSessionRow('sid-refused', 'run-refused', 'gina-box');
+      assert.deepEqual(released, [{ runId: 'run-refused', sessionId: 'sid-refused' }]);
+      forget(released);
+      assert.deepEqual(readJournalLines(dataDir, 'run-refused', 'sid-refused'), []);
+    } finally {
+      await store.close();
+    }
+  });
 });
