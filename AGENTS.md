@@ -69,10 +69,6 @@ extraction fixes, prevented from recurring.
    That path does not exist in code yet, so this invariant is unconditional
    today; whoever builds it amends this entry in the same commit.
 
-   _Copied code cites this as "invariant #8", its number in jbot-review's
-   AGENTS.md. Those references point across repos until the originals are
-   deleted (§8, step 6), when they get renumbered._
-
 2. **Auxiliary sessions fail open.** A broken precision filter must never
    become a recall hole.
 
@@ -91,10 +87,16 @@ extraction fixes, prevented from recurring.
    bug, not the boundary. Timeouts and retry policy are caller concerns —
    the protocol surfaces transport facts and lets the caller set deadlines.
 
-6. **Fixes flow symma → jbot-review, never the reverse** (§8). Two copies exist
-   until the originals are deleted, and jbot-review's are frozen for that
-   window. A fix that cannot wait lands here first and is re-copied; the other
-   direction makes the extraction inherit drift.
+6. **Fixes to extracted code land here** (§8). jbot-review holds no copies of
+   `@symma/protocol` or `@symma/client` any more, so a fix reaches it as a
+   release _and_ a pin bump there — the pins are exact, and publishing alone
+   moves nothing. Patching its copy re-forks the code that was just unforked.
+
+   **`gateway` and `companion` are outside this.** They publish nothing, so
+   jbot-review still runs its own, and the two have already drifted: symma's
+   `server.ts` has a cross-run guard, a fail-open journal write and a
+   `q=0`-aware `acceptsGzip` that jbot-review's does not. Whoever ships those
+   packages reconciles the drift and extends this entry to cover them.
 
 ## Conventions
 
@@ -144,12 +146,5 @@ without losing behavior, it should not have been written.
    workspace pins must equal the workspace version exactly; `*` resolves to the
    registry copy instead of the local one.
 5. Only now touch jbot-review: swap imports, keeping the local files in place.
-   If the suite goes red, revert one import line. Read §8 "Step 5 readiness"
-   first — swapping `acp-protocol` silently stops the observer tee unless the
-   call site passes `tee:` in the same commit.
-6. Cross-repo green → delete the originals. Deleting earlier turns a packaging
-   mistake into a bisect across two repositories.
-
-jbot-review is not touched until symma is fully tested. It runs reviews daily
-and has a deployed App; destabilising it for a refactor that serves a _different_
-product is risk with no upside for it.
+   **done** — jbot-review#125 and #126.
+6. Cross-repo green → delete the originals. **done** — jbot-review#127.
