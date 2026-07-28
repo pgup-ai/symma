@@ -49,4 +49,24 @@ describe('relay control parsing', () => {
       assert.equal(parseRelayControl(bad), undefined, bad);
     }
   });
+
+  it('keeps a known refusal code and drops an unknown one', () => {
+    const parse = (code: unknown): unknown =>
+      (
+        parseRelayControl(JSON.stringify({ kind: 'refused', sessionId: 'sid-1', code })) as
+          { code?: string } | undefined
+      )?.code;
+    assert.equal(parse('offline'), 'offline');
+    assert.equal(parse('at_capacity'), 'at_capacity');
+    // A relay that learns a new code must not make the frame unreadable to a
+    // client that has not; the refusal still arrives, just uncoded.
+    assert.equal(parse('brand_new_reason'), undefined);
+    assert.equal(
+      (
+        parseRelayControl(JSON.stringify({ kind: 'refused', sessionId: 'sid-1', code: 'nope' })) as
+          { kind?: string } | undefined
+      )?.kind,
+      'refused',
+    );
+  });
 });

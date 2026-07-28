@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import type { ObserverEnvelope } from '@symma/protocol';
 
+import { localStore } from '../src/store.js';
 import {
   appendEnvelope,
+  listJournals,
   journalPath,
   listRuns,
   parseRunControl,
@@ -181,6 +183,92 @@ describe('gateway', () => {
     } finally {
       child?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('answers the same questions with no database behind it', async () => {
+    // The single-tenant path used to be an `if (store)` else-branch at nine
+    // call sites, so retention and delete each shipped on one side only. It is
+    // the same contract now, backed by the journal directory.
+    const dir = mkdtempSync(join(tmpdir(), 'symma-local-store-'));
+    try {
+      const frame = (runId: string, sessionId: string): void =>
+        appendEnvelope(dir, {
+          v: 1,
+          runId,
+          sessionId,
+          seq: 1,
+          ts: 1,
+          agent: 'kilo',
+          label: 'l',
+          dir: 'out',
+          frame: {},
+        });
+      const journals: [string, string][] = [
+        ['run-a', 'sid-a'],
+        ['run-b', 'sid-b'],
+        // Same session id under a different run: one being live must not shield
+        // the other, which keying the exclusion on the id alone would do.
+        ['run-b', 'sid-a'],
+      ];
+      // Backdated explicitly: expiring at zero days races the mtime the file
+      // was written with a moment earlier.
+      const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+      for (const [runId, sessionId] of journals) {
+        frame(runId, sessionId);
+        utimesSync(journalPath(dir, runId, sessionId), old, old);
+      }
+      // Failed before its first ACP session: a status and no journal at all.
+      writeRunStatus(dir, { v: 1, kind: 'run', runId: 'run-early', status: 'failed', ts: 1 });
+      const store = localStore(
+        'secret',
+        new Map([['box', 'endpoint-secret']]),
+        () => listJournals(dir),
+        () => listRuns(dir).map((r) => r.runId),
+      );
+
+      await Promise.all([
+        // One tenant, so every journal is theirs — and a wrong token is nobody.
+        store.ownerForClientToken('secret').then((o) => assert.equal(o, 'local')),
+        store.ownerForClientToken('wrong').then((o) => assert.equal(o, undefined)),
+        store
+          .endpointForToken('endpoint-secret')
+          .then((e) => assert.deepEqual(e, { endpoint: 'box', owner: 'local' })),
+        store.sessionBelongsTo('local', 'run-a', 'sid-a').then((ok) => assert.equal(ok, true)),
+        store.sessionBelongsTo('local', 'run-a', 'nope').then((ok) => assert.equal(ok, false)),
+        // Ownership spans every run on disk, not just those with journals: the
+        // viewer filters its listing through this, so a run that failed before
+        // its first session would be the one failure nobody could open.
+        store
+          .runsFor('local')
+          .then((runs) => assert.deepEqual([...runs].sort(), ['run-a', 'run-b', 'run-early'])),
+        // Retention runs here too — this was skipped entirely without a database.
+        store
+          .expireSessions(31, [])
+          .then((doomed) =>
+            assert.deepEqual(doomed.map((d) => `${d.runId}/${d.sessionId}`).sort(), [
+              'run-a/sid-a',
+              'run-b/sid-a',
+              'run-b/sid-b',
+            ]),
+          ),
+        store
+          .expireSessions(31, [{ endpoint: 'box', runId: 'run-a', sessionId: 'sid-a' }])
+          .then((doomed) =>
+            assert.deepEqual(doomed.map((d) => `${d.runId}/${d.sessionId}`).sort(), [
+              'run-b/sid-a',
+              'run-b/sid-b',
+            ]),
+          ),
+        store.expireSessions(90, []).then((doomed) => assert.deepEqual(doomed, [])),
+        // And delete reports what it removed, so the caller ends the session.
+        store
+          .deleteSession('local', 'run-a', 'sid-a')
+          .then((gone) => assert.deepEqual(gone, [{ runId: 'run-a', sessionId: 'sid-a' }])),
+        store.deleteSession('local', 'run-a', 'gone').then((g) => assert.deepEqual(g, [])),
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

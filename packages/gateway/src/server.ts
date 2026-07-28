@@ -1,5 +1,6 @@
-import { timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createGzip } from 'node:zlib';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
@@ -7,13 +8,17 @@ import {
   isSafeId,
   parseEnvelope,
   parseRelayControl,
+  type AckControl,
+  type RefusalCode,
   readNdjsonBody,
   type ObserverEnvelope,
 } from '@symma/protocol';
 
 import {
   appendEnvelope,
+  deleteJournals,
   journalPath,
+  listJournals,
   listRuns,
   parseRunControl,
   readJournalLines,
@@ -22,6 +27,7 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
+import { localStore, openStore, type Owner, type SessionRef, type Store } from './store.js';
 import { VIEWER_HTML } from './viewer.js';
 
 // SSE comment ping; keeps idle viewer connections alive through proxies.
@@ -35,10 +41,36 @@ const token = process.env.SYMMA_GATEWAY_TOKEN?.trim() || '';
 // cannot override that. With a token the default is all interfaces; behind a
 // local TLS proxy (deploy/observer), SYMMA_GATEWAY_HOST=127.0.0.1 keeps token
 // auth while making the proxy the only public door, firewall or not.
-const host = token ? process.env.SYMMA_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
+const databaseUrl = process.env.SYMMA_GATEWAY_DATABASE_URL?.trim() || '';
+// A database is authentication too, so it unlocks the configured bind exactly
+// as the shared token does — otherwise a multi-tenant deployment has to invent
+// a dummy token it never uses to become reachable.
+const host =
+  token || databaseUrl ? process.env.SYMMA_GATEWAY_HOST?.trim() || '0.0.0.0' : '127.0.0.1';
+// Always present. Without a database it is the journal directory with one
+// implicit tenant — the same contract, not a bypass. `if (store)` used to fork
+// nine call sites, and a behaviour written on one side kept shipping without
+// the other.
+let store: Store;
+// §1: "frames expire on a default window (start at 30 days)". 0 disables.
+const retentionDays = Number(process.env.SYMMA_GATEWAY_RETENTION_DAYS ?? 30);
+const RETENTION_SWEEP_MS = 60 * 60 * 1000;
+// Tighter than retention: this is how long a revoked peer keeps working. `||`,
+// not `??`: setInterval reads a NaN delay as 1ms, so a typo here would be a
+// self-inflicted hot loop against the database.
+const REVOCATION_SWEEP_MS = Number(process.env.SYMMA_GATEWAY_REVOCATION_MS) || 30_000;
 
 const log = (msg: string): void => {
   console.log(`[symma-gateway] ${msg}`);
+};
+
+/** Same fail-open contract as journalWrite, for the store's fire-and-forget
+ * writes: a failed recordSession costs its owner the journal, so it must be
+ * loud in the log even though nothing here can retry it. */
+const storeWrite = (what: string, write: Promise<void>): void => {
+  void write.catch((error: unknown) =>
+    log(`${what} failed: ${error instanceof Error ? error.message : String(error)}`),
+  );
 };
 
 /** Journaling is observability: a write failure (ENOSPC, EACCES) must never
@@ -105,28 +137,16 @@ const sendToSession =
     if (res) sseWrite(res, line);
   };
 
-// Constant-time compare so tokens can't be recovered by timing. Length is not
-// secret; unequal lengths short out.
-function tokenMatches(candidate: string, expected = token): boolean {
-  const a = Buffer.from(candidate);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+function bearerToken(req: IncomingMessage): string | undefined {
+  const header = req.headers.authorization;
+  return typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined;
 }
 
-function authorized(req: IncomingMessage, url: URL): boolean {
-  if (!token) return true;
-  const header = req.headers.authorization;
-  if (typeof header === 'string' && header.startsWith('Bearer ') && tokenMatches(header.slice(7))) {
-    return true;
-  }
-  // Query token is for EventSource/browser GETs only (they cannot set headers);
-  // ingest (POST) must use the Authorization header so the token never lands in
-  // access logs or proxy caches.
-  if (req.method === 'GET') {
-    const q = url.searchParams.get('token');
-    if (q && tokenMatches(q)) return true;
-  }
-  return false;
+/** Query token is for EventSource/browser GETs only (they cannot set headers);
+ * ingest (POST) must use the Authorization header so the token never lands in
+ * access logs or proxy caches. */
+function clientToken(req: IncomingMessage, url: URL): string {
+  return bearerToken(req) ?? (req.method === 'GET' ? (url.searchParams.get('token') ?? '') : '');
 }
 
 // SSE writes must never throw: a subscriber can disconnect between the
@@ -210,14 +230,30 @@ async function handleEndpointIngest(
   req: IncomingMessage,
   res: ServerResponse,
   id: string,
+  owner: Owner,
 ): Promise<void> {
   const { overflow } = await readNdjsonBody(req, (line) => {
     const control = parseRelayControl(line);
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
-        relay.attachEndpoint(control, sendToEndpoint(id));
+        relay.attachEndpoint(control, sendToEndpoint(id), owner);
+        storeWrite(`markSeen ${id}`, store.markSeen(id));
       } else if (control.kind === 'opened' || control.kind === 'refused') {
-        relay.endpointAck(id, control, line);
+        // Only on an ack the relay actually applied: a companion naming
+        // another endpoint's session is ignored there, and deleting its row
+        // anyway would strip the real owner's authorization and retention.
+        // Captured before the ack removes the session: the delete is scoped by
+        // run so it cannot strip a historical row that reuses the id.
+        const refusedRun = relay.sessionRun(control.sessionId);
+        const applied = relay.endpointAck(id, control, line);
+        // The relay accepted this open before the companion saw it; a refusal
+        // now leaves a row with no session, which both shows as an empty run
+        // and blocks the id from being opened again.
+        if (applied && control.kind === 'refused' && refusedRun)
+          storeWrite(
+            `deleteSessionRow ${control.sessionId}`,
+            store.deleteSessionRow(control.sessionId, refusedRun, id).then(forgetSessions),
+          );
       } else if (control.kind === 'close') {
         relay.endpointClose(id, control.sessionId, control.reason ?? 'closed by endpoint');
       }
@@ -231,15 +267,82 @@ async function handleEndpointIngest(
 
 // Client upstream: open pairs, frames relay, close tears down. The path sid
 // is the authority for every line.
+/** Postgres codes the reservation can answer instead of failing on: the id is
+ * already taken (23505), or the endpoint row went away under a concurrent
+ * delete (23503) — which is the fact the attachment check reports as offline,
+ * arriving one layer down because that check reads the relay, not the store. */
+const INSERT_REFUSALS: Record<string, [RefusalCode, string] | undefined> = {
+  23505: ['session_in_use', 'session id in use'],
+  23503: ['offline', 'endpoint offline'],
+};
+
 async function handleSessionIngest(
   req: IncomingMessage,
   res: ServerResponse,
   sid: string,
+  owner: Owner,
 ): Promise<void> {
-  const { overflow } = await readNdjsonBody(req, (line) => {
+  const { overflow } = await readNdjsonBody(req, async (line) => {
     const control = parseRelayControl(line);
     if (control?.kind === 'open' && control.sessionId === sid) {
-      relay.openSession(control, sendToSession(sid));
+      // Ownership before the write. The reserve below names the endpoint the
+      // caller asked for, so checking it only in openSession lets a caller
+      // insert a row against someone else's endpoint — which then blocks that
+      // id for its real owner and shows up in their listing.
+      if (relay.endpointOwner(control.endpoint) !== owner) {
+        refuseToSender(sid, owner, 'offline', 'endpoint offline');
+        return;
+      }
+      // Reserve before dispatching. The insert is what rejects a reused id, and
+      // until it lands the session is open, the companion has the open, and a
+      // frame later in this same body would journal into whoever owned that id
+      // last. A conflict here refuses instead.
+      {
+        try {
+          await store.recordSession({
+            id: sid,
+            runId: control.runId,
+            endpoint: control.endpoint,
+            agent: control.agent,
+            model: control.model,
+          });
+        } catch (error) {
+          // Both are the caller's answer and neither is retryable. Anything
+          // else is our outage, and refusing would tell them not to retry
+          // something that clears on its own — so it throws.
+          const refusal = INSERT_REFUSALS[(error as { code?: string }).code ?? ''];
+          log(
+            `recordSession ${sid} ${refusal ? 'refused' : 'failed'}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          if (!refusal) throw error;
+          refuseToSender(sid, owner, ...refusal);
+          return;
+        }
+      }
+      const accepted = relay.openSession(control, sendToSession(sid), owner);
+      // Reserved but refused: release it, or the id is unopenable from here on.
+      if (!accepted)
+        storeWrite(
+          `deleteSessionRow ${sid}`,
+          store.deleteSessionRow(sid, control.runId, control.endpoint).then(forgetSessions),
+        );
+      // maySession keeps a stranger from registering while someone holds the
+      // id, but a registration can still interleave with the await above, when
+      // neither the relay nor the map has a claim yet. Evict what that leaves.
+      if (accepted && sessionStreamOwners.get(sid) !== owner) {
+        sessionStreams.get(sid)?.end();
+        sessionStreams.delete(sid);
+        sessionStreamOwners.delete(sid);
+      }
+      // Only a session the relay accepted may leave a row. A refused open that
+      // recorded one would put a run in its owner's listing whose journal never
+      // existed, and every read of it 404s.
+    } else if (!maySession(owner, sid)) {
+      // Everything past the open touches a session that already has an owner:
+      // a close ends it, a frame is forwarded to the endpoint as if the owner
+      // sent it. Drop both silently rather than confirm the session exists.
     } else if (control?.kind === 'close' && control.sessionId === sid) {
       relay.closeSession(sid, control.reason ?? 'closed by client');
     } else if (!control) {
@@ -250,17 +353,37 @@ async function handleSessionIngest(
   overflowOr(res, req, overflow);
 }
 
-// Header-only: the companion is a fetch client (unlike a browser EventSource
-// viewer), so its token never needs the ?token= query form that lands in logs.
-function authorizedEndpoint(req: IncomingMessage, id: string): boolean {
-  const expected = endpointTokens.get(id);
-  if (!expected) return false;
-  const header = req.headers.authorization;
-  return (
-    typeof header === 'string' &&
-    header.startsWith('Bearer ') &&
-    tokenMatches(header.slice(7), expected)
-  );
+/** The token names the endpoint it may speak for; a token for one endpoint
+ * cannot attach as another (§1: the owner is never read off `hello`). Takes the
+ * token rather than the request because a held leg re-runs it on the sweep —
+ * and its callers pass the header only, since a companion is a fetch client and
+ * never needs the ?token= query form that lands in logs. */
+async function endpointOwner(token: string, id: string): Promise<Owner | undefined> {
+  const found = await store.endpointForToken(token);
+  return found?.endpoint === id ? found.owner : undefined;
+}
+
+/**
+ * Every other authorization check runs per request, but a stream or an ingest
+ * body is admitted once and then lives for hours, so revoking its token,
+ * deactivating its owner or uninstalling the workspace left it serving.
+ * Invariant 3 says compromise means shutdown, which a revocation that only
+ * reaches the next request does not deliver.
+ *
+ * Held legs re-run the exact check that admitted them, so revoking one of an
+ * endpoint's tokens drops the legs that token opened and leaves the rest — and
+ * every long-lived leg is held, because covering one kind just moves the
+ * survivor to another.
+ */
+interface HeldLeg {
+  what: string;
+  admits: () => Promise<boolean>;
+}
+const heldLegs = new Map<ServerResponse, HeldLeg>();
+
+function holdLeg(res: ServerResponse, what: string, admits: () => Promise<boolean>): void {
+  heldLegs.set(res, { what, admits });
+  res.on('close', () => heldLegs.delete(res));
 }
 
 /** One live SSE leg per peer; last connection wins, cleanup only clears the
@@ -412,7 +535,36 @@ function handleStream(res: ServerResponse, runId: string, sessionId: string): vo
   res.on('error', cleanup);
 }
 
-function route(req: IncomingMessage, res: ServerResponse): void {
+/** A live session belongs to whoever opened it. Unknown means not open yet —
+ * clients connect their leg before sending the open — so it cannot be a
+ * refusal, and `openSession` is what authorizes the open itself. */
+const sessionStreamOwners = new Map<string, Owner>();
+
+/** A refusal the relay never saw, so it has no clientSend to use. Goes out only
+ * down a leg this caller holds: sendToSession resolves whichever stream is
+ * registered, and for a contested id that is someone else's — whose client
+ * reads any refusal as its own session failing. */
+function refuseToSender(sid: string, owner: Owner, code: RefusalCode, reason: string): void {
+  if (sessionStreamOwners.get(sid) !== owner) return;
+  sendToSession(sid)(
+    JSON.stringify({ kind: 'refused', sessionId: sid, code, reason } satisfies AckControl),
+  );
+}
+
+function maySession(owner: Owner, sessionId: string): boolean {
+  // Before the open there is no relay owner, so the leg itself is the claim:
+  // otherwise a second caller registers over the first and ends it, and the
+  // client treats its stream ending as the session failing.
+  const held = relay.sessionOwner(sessionId) ?? sessionStreamOwners.get(sessionId);
+  return held === undefined || held === owner;
+}
+
+/** 404 rather than 403 throughout: whether a session exists is itself owned. */
+function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<boolean> {
+  return store.sessionBelongsTo(owner, runId, sessionId);
+}
+
+async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method === 'GET' && url.pathname === '/healthz') {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -424,41 +576,78 @@ function route(req: IncomingMessage, res: ServerResponse): void {
   const endpointRoute = url.pathname.match(/^\/api\/endpoints\/([^/]+)\/(stream|ingest)$/);
   if (endpointRoute) {
     const [, id, mode] = endpointRoute;
-    if (!isSafeId(id) || !authorizedEndpoint(req, id)) {
+    const token = bearerToken(req) ?? '';
+    const endpointOwned = isSafeId(id) ? await endpointOwner(token, id) : undefined;
+    if (!endpointOwned) {
       res.writeHead(401, { 'content-type': 'text/plain' });
       res.end('unauthorized');
       return;
     }
+    const stillEndpoint = async (): Promise<boolean> =>
+      (await endpointOwner(token, id)) === endpointOwned;
     if (mode === 'stream' && req.method === 'GET') {
       registerPeerStream(endpointStreams, id, res, () => relay.detachEndpoint(id));
+      holdLeg(res, `endpoint ${id} stream`, stillEndpoint);
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
-      void handleEndpointIngest(req, res, id).catch(() => res.destroy());
+      holdLeg(res, `endpoint ${id} ingest`, stillEndpoint);
+      void handleEndpointIngest(req, res, id, endpointOwned).catch(() => res.destroy());
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
     return;
   }
-  if (!authorized(req, url)) {
+  const token = clientToken(req, url);
+  const owner = await store.ownerForClientToken(token);
+  if (!owner) {
     res.writeHead(401, { 'content-type': 'text/plain' });
     res.end('unauthorized');
     return;
   }
+  const stillClient = async (): Promise<boolean> =>
+    (await store.ownerForClientToken(token)) === owner;
   if (req.method === 'GET' && url.pathname === '/') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(VIEWER_HTML);
     return;
   }
   if (req.method === 'GET' && url.pathname === '/api/runs') {
+    // Runs the caller owns, intersected with what is on disk — a run with no
+    // session row belongs to nobody and is listed by nobody.
+    const mine = await store.runsFor(owner);
+    const runs = listRuns(dataDir).filter((r) => mine.has(r.runId));
+    // A runId is caller-chosen, so two tenants can share one run directory and
+    // the listing would name the other's sessions. One query for all of them:
+    // per-run would grow with a tenant's history on every viewer refresh.
+    {
+      const owned = await store.sessionsByRun(
+        owner,
+        runs.map((r) => r.runId),
+      );
+      for (const run of runs) {
+        const mineHere = owned.get(run.runId) ?? new Set<string>();
+        run.sessions = run.sessions.filter((sid) => mineHere.has(sid));
+        // updatedAt came from every journal in the shared directory, so it
+        // reported when the other tenant last wrote. Recompute from ours.
+        run.updatedAt = journalsUpdatedAt(
+          dataDir,
+          run.runId,
+          run.sessions,
+          run.status !== undefined,
+        );
+      }
+    }
+    // Only now: a store failure above still has to be able to answer 500, and
+    // once the head is out the outer handler can only end a 200 mid-body.
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
-    res.end(JSON.stringify(listRuns(dataDir)));
+    res.end(JSON.stringify(runs));
     return;
   }
   if (req.method === 'GET' && url.pathname === '/api/endpoints') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
-    res.end(JSON.stringify(relay.listEndpoints()));
+    res.end(JSON.stringify(relay.listEndpoints(owner)));
     return;
   }
   const sessionRoute = url.pathname.match(/^\/api\/sessions\/([^/]+)\/(stream|ingest)$/);
@@ -470,15 +659,30 @@ function route(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     if (mode === 'stream' && req.method === 'GET') {
+      // registerPeerStream is last-connection-wins, so an unchecked connect
+      // does not just read someone else's frames — it takes their leg away.
+      if (!maySession(owner, sid)) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end('not found');
+        return;
+      }
       // Client leg (re)connected: cancel any pending client-side resume, then
       // arm it again if this leg drops — symmetric with the endpoint side, so a
       // blip or the SIGTERM drain doesn't kill the session outright.
       relay.attachClient(sid);
-      registerPeerStream(sessionStreams, sid, res, () => relay.detachClient(sid));
+      registerPeerStream(sessionStreams, sid, res, () => {
+        relay.detachClient(sid);
+        if (sessionStreams.get(sid) === undefined) sessionStreamOwners.delete(sid);
+      });
+      // After registering, not before: evicting the previous leg runs its
+      // cleanup, which would delete the entry this line sets.
+      sessionStreamOwners.set(sid, owner);
+      holdLeg(res, `session ${sid} stream`, stillClient);
       return;
     }
     if (mode === 'ingest' && req.method === 'POST') {
-      void handleSessionIngest(req, res, sid).catch(() => res.destroy());
+      holdLeg(res, `session ${sid} ingest`, stillClient);
+      void handleSessionIngest(req, res, sid, owner).catch(() => res.destroy());
       return;
     }
   }
@@ -490,7 +694,35 @@ function route(req: IncomingMessage, res: ServerResponse): void {
       res.end('bad id');
       return;
     }
+    if (!(await ownsSession(owner, runId, sessionId))) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
     handleJournal(req, res, runId, sessionId);
+    return;
+  }
+  if (req.method === 'DELETE' && journal) {
+    const [, runId, sessionId] = journal;
+    if (!isSafeId(runId) || !isSafeId(sessionId)) {
+      res.writeHead(400, { 'content-type': 'text/plain' });
+      res.end('bad id');
+      return;
+    }
+    const gone = await store.deleteSession(owner, runId, sessionId);
+    if (gone.length === 0) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
+    // Ending it is part of deleting it. A live session keeps journaling, so the
+    // next frame recreates the file with nothing behind it — unreadable,
+    // undeletable, and past retention's reach, which turns a delete into a
+    // permanent retention leak.
+    relay.closeSession(sessionId, 'session deleted by its owner');
+    forgetSessions(gone);
+    res.writeHead(204);
+    res.end();
     return;
   }
   const stream = url.pathname.match(/^\/api\/runs\/([^/]+)\/sessions\/([^/]+)\/stream$/);
@@ -501,7 +733,23 @@ function route(req: IncomingMessage, res: ServerResponse): void {
       res.end('bad id');
       return;
     }
+    if (!(await ownsSession(owner, runId, sessionId))) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('not found');
+      return;
+    }
     handleStream(res, runId, sessionId);
+    holdLeg(res, `journal ${runId}/${sessionId}`, stillClient);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/ingest' && databaseUrl) {
+    // The observer tee journals sessions this gateway never routed, so its
+    // runId and sessionId are whatever the caller says — there is nothing to
+    // check them against, and unchecked they write into another tenant's
+    // journal. Multi-tenant frames arrive through the relay, which knows whose
+    // session they belong to.
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
     return;
   }
   if (req.method === 'POST' && url.pathname === '/api/ingest') {
@@ -516,16 +764,14 @@ function route(req: IncomingMessage, res: ServerResponse): void {
 }
 
 const server = createServer((req, res) => {
-  // The handlers do synchronous fs reads (journals, run status, listing); a
-  // corrupt file or permission/disk error must return 500, never crash the
-  // long-lived gateway out of the request listener.
-  try {
-    route(req, res);
-  } catch (error) {
+  // Handlers do synchronous fs reads and now await the store; either a corrupt
+  // file or an unreachable database must return 500, never crash the long-lived
+  // gateway. route() is async, so this catches the rejection, not a throw.
+  void route(req, res).catch((error: unknown) => {
     log(`request failed: ${error instanceof Error ? error.message : String(error)}`);
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain' });
     res.end('internal error');
-  }
+  });
 });
 // The ingest POST streams for a whole review (often >5min); Node's default
 // 300s requestTimeout would sever it mid-review, dropping trailing frames and
@@ -544,11 +790,104 @@ process.on('SIGTERM', () => {
   setTimeout(() => process.exit(0), 3000).unref();
 });
 
+/** Frames and their row are one unit; deleting either alone leaves a journal
+ * nobody can reach or a row pointing at nothing. */
+/** Newest mtime across just these journals, plus the run's status file when it
+ * has one — the same inputs listRuns uses, narrowed to what the caller owns. */
+function journalsUpdatedAt(
+  dir: string,
+  runId: string,
+  sessions: string[],
+  withStatus: boolean,
+): number {
+  const times = sessions.map((sid) => {
+    try {
+      return statSync(journalPath(dir, runId, sid)).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+  if (withStatus) {
+    try {
+      times.push(statSync(join(dir, runId, 'status')).mtimeMs);
+    } catch {
+      /* status vanished mid-list */
+    }
+  }
+  return times.length > 0 ? Math.max(...times) : 0;
+}
+
+function forgetSessions(doomed: SessionRef[]): void {
+  // Loud, never silent: the row is already gone, so a file left here sits
+  // outside authorization and retention both.
+  for (const orphan of deleteJournals(dataDir, doomed))
+    log(`orphaned journal ${orphan.runId}/${orphan.sessionId}: ${orphan.reason}`);
+}
+
+// Fail to start rather than start unscoped: a gateway told to use a database it
+// cannot reach has no owners, and silently falling back would serve every
+// tenant's journals to whoever asked.
+store = databaseUrl
+  ? await openStore(databaseUrl, fileURLToPath(new URL('./schema.sql', import.meta.url)))
+  : localStore(
+      token,
+      endpointTokens,
+      () => listJournals(dataDir),
+      () => listRuns(dataDir).map((r) => r.runId),
+    );
+
+/** Destroy, not end: a revocation is a shutdown, and a half-closed response
+ * still leaves the peer's request body streaming in. Cleanup runs off `close`,
+ * which detaches the relay and drops the leg from `heldLegs`. */
+function dropRevokedLegs(): void {
+  void (async () => {
+    for (const [res, leg] of heldLegs) {
+      // Caught per leg, not per sweep: one unreachable-database rejection must
+      // not skip every leg after it in iteration order, which is a revocation
+      // deferred to the next tick with nothing to say it was. Fail open and
+      // retry there — the same contract retention runs under.
+      const admitted = await leg.admits().catch((error: unknown) => {
+        log(
+          `recheck for ${leg.what} failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return true;
+      });
+      if (admitted) continue;
+      log(`${leg.what} is no longer authorized; dropping`);
+      res.destroy();
+    }
+  })().catch((error: unknown) =>
+    log(`revocation sweep failed: ${error instanceof Error ? error.message : String(error)}`),
+  );
+}
+setInterval(dropRevokedLegs, REVOCATION_SWEEP_MS).unref();
+
+if (retentionDays > 0) {
+  // A sweep that fails is a promise unkept, not a reason to stop serving — same
+  // fail-open contract as the journal, and identical at boot and on the
+  // interval so a transient failure does not decide whether we start.
+  const sweep = (): void => {
+    void (async () => {
+      const doomed = await store.expireSessions(retentionDays, relay.liveSessions());
+      forgetSessions(doomed);
+      if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+    })().catch((error: unknown) =>
+      log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
+    );
+  };
+  // Both modes, at boot as well as on the interval: retention is a product
+  // promise (§1), and a gateway that restarts often still has to forget.
+  sweep();
+  setInterval(sweep, RETENTION_SWEEP_MS).unref();
+}
+
 server.listen(port, host, () => {
   log(`listening on http://${host}:${port} (data: ${dataDir})`);
   log(
-    token
-      ? 'token auth enabled; ingest needs Authorization: Bearer, viewers ?token='
-      : 'local mode: loopback only, no auth (set SYMMA_GATEWAY_TOKEN to expose)',
+    databaseUrl
+      ? 'multi-tenant: endpoints, journals and listings are owner-scoped'
+      : token
+        ? 'single tenant, token auth; ingest needs Authorization: Bearer, viewers ?token='
+        : 'single tenant, local mode: loopback only, no auth',
   );
 });

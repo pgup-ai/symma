@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
   type Dirent,
@@ -89,6 +90,38 @@ export interface RunSummary {
   status?: RunStatus;
 }
 
+/** Remove one session's frames. The row is deleted separately; a missing file
+ * is the expected case when a session never produced any. */
+export function deleteJournal(dataDir: string, runId: string, sessionId: string): void {
+  rmSync(journalPath(dataDir, runId, sessionId), { force: true });
+}
+
+/** The other half of every lifecycle delete: the store's methods return the
+ * sessions they removed, and their frames are on disk, so a caller that keeps
+ * only the rows leaves files no retention sweep can still reach — it joins
+ * sessions, and those rows are gone.
+ *
+ * Returns the ones it could not remove, for the caller to log. They are past
+ * authorization and retention both, and nothing here can fix that. */
+export function deleteJournals(
+  dataDir: string,
+  sessions: { runId: string; sessionId: string }[],
+): { runId: string; sessionId: string; reason: string }[] {
+  const orphans = [];
+  for (const { runId, sessionId } of sessions) {
+    try {
+      deleteJournal(dataDir, runId, sessionId);
+    } catch (error) {
+      orphans.push({
+        runId,
+        sessionId,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return orphans;
+}
+
 /** Newest-first run listing from the plain directory layout — no index, no DB.
  * fs errors on any single run are skipped, never thrown, so one bad directory
  * can't take down the listing (or the gateway). */
@@ -137,6 +170,28 @@ export function listRuns(dataDir: string): RunSummary[] {
     }
   }
   return runs.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Every journal on disk with its mtime. The filesystem is the session index
+ * when there is no database, so retention and ownership read it directly. */
+export function listJournals(
+  dataDir: string,
+): { runId: string; sessionId: string; mtimeMs: number }[] {
+  return listRuns(dataDir).flatMap((run) =>
+    run.sessions.flatMap((sessionId) => {
+      try {
+        return [
+          {
+            runId: run.runId,
+            sessionId,
+            mtimeMs: statSync(journalPath(dataDir, run.runId, sessionId)).mtimeMs,
+          },
+        ];
+      } catch {
+        return [];
+      }
+    }),
+  );
 }
 
 /** Journal replay as raw NDJSON lines (already-validated envelopes). */

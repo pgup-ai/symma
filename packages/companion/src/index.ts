@@ -39,6 +39,7 @@ import {
   type HelloControl,
   type ObserverEnvelope,
   type OpenControl,
+  type RefusalCode,
   type RelayControl,
 } from '@symma/protocol';
 
@@ -373,15 +374,18 @@ function endSession(sessionId: string, reason: string, notify: boolean): void {
 }
 
 async function openSession(control: OpenControl): Promise<void> {
-  const refuse = (reason: string): void => {
-    sendControl({ kind: 'refused', sessionId: control.sessionId, reason });
+  // The relay forwards this ack verbatim, so a code set here is the one the
+  // client sees. Setup and spawn failures below carry none: they are this
+  // machine's problem and no code in the set describes them.
+  const refuse = (reason: string, code?: RefusalCode): void => {
+    sendControl({ kind: 'refused', sessionId: control.sessionId, reason, ...(code && { code }) });
     log(`refused ${control.sessionId}: ${reason}`);
   };
-  if (sessions.size + pending.size >= maxSessions) return refuse('at capacity');
+  if (sessions.size + pending.size >= maxSessions) return refuse('at capacity', 'at_capacity');
   if (sessions.has(control.sessionId) || pending.has(control.sessionId))
-    return refuse('session id in use');
+    return refuse('session id in use', 'session_in_use');
   const spec = agents.get(control.agent);
-  if (!spec) return refuse(`agent ${control.agent} not offered`);
+  if (!spec) return refuse(`agent ${control.agent} not offered`, 'no_such_agent');
 
   const model = control.model ?? 'default';
   const workspace = mkdtempSync(join(tmpdir(), 'symma-companion-'));

@@ -11,7 +11,9 @@ Section references below (§N) are to that document.
 
 ## Commands
 
-- `npm test` — all tests (node:test via tsx); single file:
+- `npm test` — all tests (node:test via tsx). **Needs Docker running**: the
+  gateway's tenancy test starts a throwaway Postgres via testcontainers, because
+  owner scoping is only worth asserting against a real database. Single file:
   `node --conditions=symma-source --import tsx --test packages/<pkg>/test/<file>.test.ts`
   (the condition is what resolves `@symma/*` to source)
 - `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`

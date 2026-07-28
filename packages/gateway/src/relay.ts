@@ -12,6 +12,7 @@ import {
   type CloseControl,
   type HelloControl,
   type OpenControl,
+  type RefusalCode,
   type SendLine,
 } from '@symma/protocol';
 
@@ -31,6 +32,9 @@ export function parseEndpointTokens(raw: string | undefined): Map<string, string
 
 interface Attachment {
   hello: HelloControl;
+  /** Assigned from the endpoint's token at attach — never read off `hello`,
+   * which is companion-declared and so attacker-controlled (§1). */
+  owner: string;
   send: SendLine;
   sessions: Set<string>;
   online: boolean;
@@ -41,6 +45,9 @@ type ResumeLeg = 'endpointResume' | 'clientResume';
 interface Session {
   runId: string;
   endpoint: string;
+  /** The caller openSession accepted. Every later touch of this session — the
+   * client leg, its frames, its close — is checked against it. */
+  owner: string;
   clientSend: SendLine;
   // A leg's timer is armed while that peer is disconnected; either firing
   // fails the session past the window. Both legs get the same grace.
@@ -91,7 +98,7 @@ export function createRelay(options: RelayOptions = {}) {
     /** Companion (re)attached. Sessions the companion still declares resume
      * (cancel their resume timers); any it dropped — e.g. after a restart —
      * fail loudly instead of lingering as zombies that hold capacity. */
-    attachEndpoint(hello: HelloControl, send: SendLine): void {
+    attachEndpoint(hello: HelloControl, send: SendLine, owner: string): void {
       const existing = endpoints.get(hello.endpoint);
       const declared = new Set(hello.sessions ?? [...(existing?.sessions ?? [])]);
       const carried = new Set<string>();
@@ -104,7 +111,7 @@ export function createRelay(options: RelayOptions = {}) {
         const session = sessions.get(sessionId);
         if (session) disarm(session, 'endpointResume');
       }
-      endpoints.set(hello.endpoint, { hello, send, sessions: carried, online: true });
+      endpoints.set(hello.endpoint, { hello, send, owner, sessions: carried, online: true });
       // A companion may still be running agents for sessions the relay already
       // failed (resume window elapsed while it was gone) — tell it to close them.
       for (const sessionId of hello.sessions ?? []) {
@@ -135,53 +142,92 @@ export function createRelay(options: RelayOptions = {}) {
       if (session) disarm(session, 'clientResume');
     },
 
-    listEndpoints(): EndpointPresence[] {
-      return [...endpoints.values()].map(({ hello, sessions: active, online }) => ({
-        endpoint: hello.endpoint,
-        device: hello.device,
-        agents: hello.agents,
-        maxSessions: hello.maxSessions,
-        activeSessions: active.size,
-        online,
-        ...(hello.publicKey ? { publicKey: hello.publicKey } : {}),
+    /** Who an attached endpoint belongs to; undefined if it is not attached. */
+    endpointOwner(endpoint: string): string | undefined {
+      return endpoints.get(endpoint)?.owner;
+    },
+
+    /** Undefined while no session by that id is open, which is the normal state
+     * when a client connects its leg before sending the open. */
+    sessionOwner(sessionId: string): string | undefined {
+      return sessions.get(sessionId)?.owner;
+    },
+
+    /** Sessions retention must leave alone: their frames are still arriving.
+     * Whole keys, not ids — an id alone names a different session under another
+     * endpoint, and would shield it from ever expiring. */
+    liveSessions(): { endpoint: string; runId: string; sessionId: string }[] {
+      return [...sessions.entries()].map(([sessionId, s]) => ({
+        endpoint: s.endpoint,
+        runId: s.runId,
+        sessionId,
       }));
     },
 
-    /** Route a client's open to its endpoint, or refuse synchronously. */
-    openSession(control: OpenControl, clientSend: SendLine): void {
-      const refuse = (reason: string): void =>
+    listEndpoints(owner: string): EndpointPresence[] {
+      return [...endpoints.values()]
+        .filter((a) => a.owner === owner)
+        .map(({ hello, sessions: active, online }) => ({
+          endpoint: hello.endpoint,
+          device: hello.device,
+          agents: hello.agents,
+          maxSessions: hello.maxSessions,
+          activeSessions: active.size,
+          online,
+          ...(hello.publicKey ? { publicKey: hello.publicKey } : {}),
+        }));
+    },
+
+    /** Route a client's open to its endpoint, or refuse synchronously. Returns
+     * whether it was accepted — `sessionRun` cannot answer that, since a
+     * `session_in_use` refusal means someone else's session holds the id. */
+    openSession(control: OpenControl, clientSend: SendLine, caller: string): boolean {
+      const refuse = (code: RefusalCode, reason: string): false => {
         clientSend(
           JSON.stringify({
             kind: 'refused',
             sessionId: control.sessionId,
+            code,
             reason,
           } satisfies AckControl),
         );
+        return false;
+      };
       const attachment = endpoints.get(control.endpoint);
-      if (!attachment?.online) return refuse('endpoint offline');
-      if (sessions.has(control.sessionId)) return refuse('session id in use');
-      if (attachment.sessions.size >= attachment.hello.maxSessions) return refuse('at capacity');
+      // Someone else's endpoint is indistinguishable from one that is away:
+      // which endpoints exist is not the caller's to learn by probing.
+      if (!attachment?.online || attachment.owner !== caller)
+        return refuse('offline', 'endpoint offline');
+      if (sessions.has(control.sessionId)) return refuse('session_in_use', 'session id in use');
+      if (attachment.sessions.size >= attachment.hello.maxSessions)
+        return refuse('at_capacity', 'at capacity');
       if (!attachment.hello.agents.some((a) => a.agent === control.agent))
-        return refuse(`agent ${control.agent} not offered`);
+        return refuse('no_such_agent', `agent ${control.agent} not offered`);
       sessions.set(control.sessionId, {
         runId: control.runId,
         endpoint: control.endpoint,
+        owner: caller,
         clientSend,
       });
       attachment.sessions.add(control.sessionId);
       attachment.send(JSON.stringify(control));
+      return true;
     },
 
     /** opened/refused from the companion; a refusal frees the slot. Ignored
      * unless the session belongs to this endpoint (no cross-endpoint spoofing). */
-    endpointAck(endpoint: string, control: AckControl, line: string): void {
+    endpointAck(endpoint: string, control: AckControl, line: string): boolean {
       const session = sessions.get(control.sessionId);
-      if (session?.endpoint !== endpoint) return;
+      // A companion naming a session it does not hold is ignored, and the
+      // caller must learn that: acting on a forged refusal would delete the
+      // real owner's row.
+      if (session?.endpoint !== endpoint) return false;
       session.clientSend(line);
       if (control.kind === 'refused') {
         sessions.delete(control.sessionId);
         endpoints.get(endpoint)?.sessions.delete(control.sessionId);
       }
+      return true;
     },
 
     /** Frame from the companion side, relayed to its session's client. A
