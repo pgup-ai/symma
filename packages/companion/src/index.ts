@@ -6,8 +6,10 @@
  * never authorize writes on this machine.
  * Spec: docs/design/m2-acp-gateway.md (M2a).
  */
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
+  accessSync,
+  constants,
   existsSync,
   linkSync,
   mkdirSync,
@@ -47,6 +49,20 @@ const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 // Must-deliver buffer while the gateway is away; overflow fails sessions loud.
 const MAX_OUTBOX_LINES = 10_000;
+/**
+ * How long the down leg may say nothing before we treat it as dead. The gateway
+ * heartbeats every 25s, so silence past two of them is not a quiet period.
+ *
+ * Without this a half-open socket is invisible: a slept laptop whose NAT entry
+ * expired never sees a FIN, so `reader.read()` stays pending forever and the
+ * companion keeps believing it is attached while the gateway has long since
+ * dropped it. Tunable because it is really a question about the network in
+ * between, not about us.
+ */
+const STREAM_IDLE_MS =
+  Number(process.env.SYMMA_COMPANION_IDLE_MS) > 0
+    ? Number(process.env.SYMMA_COMPANION_IDLE_MS)
+    : 70_000;
 
 const gatewayUrl = (process.env.SYMMA_COMPANION_GATEWAY ?? '').trim().replace(/\/+$/, '');
 const token = (process.env.SYMMA_COMPANION_TOKEN ?? '').trim();
@@ -118,6 +134,42 @@ if (!gatewayUrl || !token || !endpointId) {
 // After the config guard, so a misconfigured start writes no key material.
 const signingKeys = loadSigningKeys();
 
+/**
+ * Absolute path for a command, or undefined. Agent specs name bare binaries
+ * (`kilo`, `codex-acp`), which resolve fine from a terminal and not at all from
+ * a login service: launchd hands an agent a minimal PATH, so anything under
+ * nvm, `/opt/homebrew/bin` or `~/.local/bin` is simply absent. The login-shell
+ * fallback is how those get found — it is where the user's PATH is actually
+ * written — and it costs a subprocess, so it only runs when the cheap lookup
+ * has already failed.
+ */
+function resolveBin(bin: string): string | undefined {
+  const runnable = (path: string): boolean => {
+    try {
+      accessSync(path, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (bin.includes('/')) return runnable(bin) ? bin : undefined;
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (dir && runnable(join(dir, bin))) return join(dir, bin);
+  }
+  const shell = process.env.SHELL;
+  if (!shell) return undefined;
+  // Interactive as well as login: nvm and friends are sourced from .zshrc, not
+  // .zprofile. The name travels as an argument, never interpolated into the
+  // script, so a custom agent entry cannot smuggle shell syntax in here.
+  const found = spawnSync(shell, ['-lic', 'command -v -- "$1"', shell, bin], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const path = found.stdout?.trim().split('\n').pop()?.trim();
+  return path && path.startsWith('/') && runnable(path) ? path : undefined;
+}
+
 /** Built-ins use the machine's ambient auth; `name=cmd arg…` entries add any
  * ACP binary (also the test seam). Returns an error string when auth is absent. */
 function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | string {
@@ -163,8 +215,19 @@ function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | str
 const agents = new Map<string, AcpAgentSpec>();
 for (const entry of agentNames) {
   const resolved = resolveAgent(entry);
-  if (typeof resolved === 'string') log(`skipping agent — ${resolved}`);
-  else agents.set(resolved.name, resolved.spec);
+  if (typeof resolved === 'string') {
+    log(`skipping agent — ${resolved}`);
+    continue;
+  }
+  // Credentials were checked above; the binary was not. Detecting on auth alone
+  // reports an agent as ready and then fails at spawn time, which is the worst
+  // shape available — it passes onboarding and breaks on first use.
+  const bin = resolveBin(resolved.spec.bin);
+  if (!bin) {
+    log(`skipping agent — ${resolved.name}: ${resolved.spec.bin} not found on PATH`);
+    continue;
+  }
+  agents.set(resolved.name, { ...resolved.spec, bin });
 }
 if (agents.size === 0) {
   console.error('No usable agents; check SYMMA_COMPANION_AGENTS and local auth.');
@@ -195,6 +258,11 @@ const encoder = new TextEncoder();
 let upstream: ReadableStreamDefaultController<Uint8Array> | undefined;
 const outbox: string[] = [];
 let shuttingDown = false;
+/** Whether this epoch got as far as attaching. main() resets backoff on it
+ * rather than on a clean stream end: a connection that attached and later went
+ * quiet leaves through the error path, and compounding its delay would make
+ * every laptop that sleeps twice slower to come back the third time. */
+let attached = false;
 /** Drops the current connection epoch; set while connected. */
 let abortEpoch: (() => void) | undefined;
 
@@ -517,15 +585,31 @@ async function connectOnce(): Promise<void> {
     .catch(failUp);
   sendControl(hello());
   while (outbox.length > 0 && upstream) sendLine(outbox.shift()!);
+  attached = true;
   log(`attached to ${gatewayUrl} as ${endpointId} (${[...agents.keys()].join(', ')})`);
 
   const reader = down.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  // Heartbeats count as traffic, so any read rearms this; only real silence
+  // fires it. Aborting the epoch is what `done`/`break` cannot do here — the
+  // read never resolves on a half-open socket — and it lands in the same
+  // teardown the clean path uses, so main()'s loop reconnects with backoff.
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  const rearm = (): void => {
+    clearTimeout(idle);
+    idle = setTimeout(() => {
+      log(`no traffic from the gateway in ${STREAM_IDLE_MS}ms; reconnecting`);
+      epoch.abort();
+    }, STREAM_IDLE_MS);
+    idle.unref?.();
+  };
   try {
+    rearm();
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      rearm();
       buffer += decoder.decode(value, { stream: true });
       let nl = buffer.indexOf('\n');
       while (nl !== -1) {
@@ -536,6 +620,7 @@ async function connectOnce(): Promise<void> {
       }
     }
   } finally {
+    clearTimeout(idle);
     // Always tear down this epoch's upstream, even on a read error, so the
     // next connectOnce() doesn't leak the prior /ingest POST.
     try {
@@ -553,13 +638,14 @@ async function connectOnce(): Promise<void> {
 async function main(): Promise<void> {
   let backoff = BACKOFF_MIN_MS;
   for (;;) {
+    attached = false;
     try {
       await connectOnce();
-      backoff = BACKOFF_MIN_MS;
       log('gateway stream ended; reconnecting');
     } catch (error) {
       log(`connect failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (attached) backoff = BACKOFF_MIN_MS;
     await new Promise((resolve) => setTimeout(resolve, backoff));
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
   }

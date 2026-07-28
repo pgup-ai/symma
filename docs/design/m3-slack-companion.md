@@ -1,7 +1,8 @@
 # symma M3 — Slack ↔ personal companion
 
 - **Date:** 2026-07-27
-- **Status:** design, no code
+- **Status:** design. One piece shipped ahead of the rest — the companion's
+  stream liveness timer (§3, "Staying attached").
 - **Builds on:** `2026-07-24-acp-gateway-m2-design.md` (M2a–M2d shipped and dogfooded)
 
 ## The bet
@@ -48,6 +49,48 @@ So the claim this section was built on — that nobody routes Alice to Alice's
 laptop and Bob to Bob's — **is false.** LobeHub does, through per-user overrides
 merged into a shared agent config, with `RequestTrigger.Bot` upgrading a `local`
 target to `device`.
+
+**Multica** (~42k★) is the same three-tier shape again — server that owns data
+and executes nothing, daemon on the user's machine, local agent CLIs — aimed at
+issues and task queues rather than a chat surface. Not a competitor for the
+Slack path, and the most useful of the three to read, because it has already hit
+problems this document only predicts.
+
+[github.com/multica-ai/multica](https://github.com/multica-ai/multica) @
+`0abee49005dd` (2026-07-28), read through DeepWiki; symbols are the evidence,
+lines are not pinned.
+
+- **PATH is not what a login service thinks it is.** Their daemon probes bare
+  command names and falls back to asking the user's _login shell_ where a
+  binary lives, because nvm, volta and friends only write PATH in shell config.
+  symma had the same bug latent: specs name bare binaries, which resolve from a
+  terminal and would not from the launchd agent §3's supervision section
+  specifies. Worse, detection checked credentials and never the binary, so an
+  agent reported ready and failed at spawn — past onboarding, on first use.
+  Fixed here, with the login-shell fallback, before the login service exists to
+  expose it.
+- **Presence is two thresholds, not one.** Heartbeat every 15s, "missing" at 45s,
+  and a server sweeper that marks a runtime offline once `last_seen_at` passes
+  150s. "Staying attached" specifies one last-seen; the split is worth copying,
+  because the number that should make a UI hedge is not the number that should
+  make the server give a session away.
+- **Work dispatched to a vanished machine fails with a _reason_, and reasons
+  drive policy.** `runtime_offline`, `runtime_recovery` and `timeout` are
+  retryable and requeue at most twice; others do not retry at all. That is worth
+  weighing against §3's "hold the request for wake": theirs keeps far less state
+  and always reaches a definite outcome, at the cost of a member having to ask
+  again. **Decide this before M3a builds the queue**, because the two designs
+  store different things.
+- **A restarting daemon reports what it was running.** Tasks it owned but never
+  finalized come back as `runtime_recovery` rather than hanging. §7's goodbye
+  control covers the clean exit; this is the crash, and it needs the same frame.
+
+Where symma is ahead is narrow and specific: **there is no read-only story
+there.** Isolation is a per-task workspace directory, and agents write code by
+design because that is the product. Nothing corresponds to invariant 1's three
+layers. Their breadth — 17 CLIs — is bought by writing a provider per tool that
+parses that tool's own output (NDJSON, JSON-RPC/ACP, or plain text), which is
+the adapter surface the "hardening list" note in §3 is about paying for.
 
 The shape the _rest_ share still holds: one shared agent identity, machine,
 credentials and workspace, with isolated conversations per user. A shared Mac
@@ -296,8 +339,9 @@ reconnect — it never runs the request on someone else's machine.
 ## 3. Companion
 
 - **Auto-detect all supported agents.** Change the default agent list from
-  `kilo` to every built-in; the resolve loop already skips unauthenticated ones
-  with a reason. Roughly a one-line change.
+  `kilo` to every built-in; the resolve loop already skips agents whose
+  credential is missing or whose binary is not on PATH, with a reason for each.
+  Roughly a one-line change.
 - **Two distribution paths, both supported.** `curl | sh` is primary because 3
   of 4 agent CLIs already install that way (devin via Homebrew, cursor-agent and
   codex via their own installers); those users may have no Node at all. `npx
@@ -416,26 +460,34 @@ runs while its owner is logged in.** Log out and it stops. That is the same
 boundary that keeps the credentials on the machine, seen from the other side.
 
 `RunAtLoad` plus `KeepAlive` covers crash and reboot. Reconnect needs no M3 work
-either: the companion backs off exponentially (1s→30s, reset on success) and both
+either: the companion backs off exponentially (1s→30s, reset once an attach
+lands rather than once a stream ends cleanly — an idle drop leaves through the
+error path, and compounding it would make a laptop that slept twice slower to
+return the third time) and both
 legs hold a 60s resume window, so a wifi blip does not kill an in-flight review.
 
-**One transport gap does need closing, and it is the same gap twice.** The
-gateway sends SSE heartbeats every 25s, but nothing on the companion side reads
-them — `connectOnce()` returns when the stream ends, and a half-open TCP
-connection never ends. A sleeping laptop whose NAT entry expired sends no FIN, so
-the companion sits believing it is attached while the gateway sees nothing, and
-does not reconnect until something else forces it. Track last-byte-received and
-drop the connection past ~2.5 heartbeats; the existing backoff loop does the
-rest.
+**One transport gap needed closing — done, ahead of the rest of M3.** The gateway
+sent SSE heartbeats every 25s and nothing on the companion side read them:
+`connectOnce()` returns when the stream ends, and a half-open TCP connection
+never ends. A sleeping laptop whose NAT entry expired sends no FIN, so the
+companion sat believing it was attached while the gateway saw nothing, and did
+not reconnect until something else forced it. Any read now rearms a timer
+(`SYMMA_COMPANION_IDLE_MS`, 70s default — past two heartbeats); silence aborts
+the epoch into the teardown the clean path already uses, and the backoff loop
+reconnects.
+
+Both directions are pinned by test, because they fail oppositely and only one is
+visible in normal operation: no timer and a dead connection is held forever, no
+rearm and a **healthy** one is dropped on a stopwatch.
 
 This is the one thing WebSocket ping/pong would have given for free, and it is
 worth naming as _that_ rather than as an argument for switching. M2 chose the
 SSE + NDJSON pair for reasons that still hold — both halves already
 production-tested, no new dependency in the two published packages, resume and
 journal-replay semantics built against it — and set the revisit trigger at
-sub-frame latency or binary frames, which ACP does not need. A liveness timer is
-a few lines against a proven transport. Swapping transports to obtain one would
-re-test resume, drain, backpressure and journaling to end up where a timer
+sub-frame latency or binary frames, which ACP does not need. The timer was a few
+lines against a proven transport; swapping transports to obtain one would have
+re-tested resume, drain, backpressure and journaling to end up where the timer
 already gets us.
 
 **A closed laptop is not running anything.** No supervisor changes that. The two
@@ -1055,6 +1107,11 @@ to anyone outside the operator.
 
 ## 10. Open / deferred
 
+- **A sleeping endpoint: hold the request, or fail it with a reason?** §3
+  proposes holding for wake with a TTL; Multica fails with `runtime_offline` and
+  requeues at most twice. Theirs stores far less and always reaches a definite
+  outcome; ours spares the member asking twice. **Decide before M3a**, since the
+  two store different things.
 - **Model enumeration** in Slack — deferred; needs a `models` control.
 - **Write-mode approvals** — the DM path writes inside an allowlisted workspace
   root (§4); what stays open is the escape case, where a request that would
