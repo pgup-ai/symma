@@ -188,9 +188,15 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async endpointForToken(token) {
       const row = await one<{ subject_id: string; user_id: string }>(
+        // Joined through to the member, so deactivation means no endpoint auth
+        // by construction rather than by every path that sets deactivated_at
+        // remembering to delete the endpoint too. Same shape as the revoked_at
+        // check beside it.
         `SELECT t.subject_id, e.user_id FROM tokens t
            JOIN endpoints e ON e.id = t.subject_id
+           JOIN users u ON u.id = e.user_id
           WHERE t.hash = $1 AND t.subject_kind = 'endpoint' AND t.revoked_at IS NULL
+            AND u.deactivated_at IS NULL
             AND (t.expires_at IS NULL OR t.expires_at > now())`,
         [hashToken(token)],
       );
@@ -344,7 +350,21 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        // Same lock, same reason as deleteWorkspace.
+        // The member first, and in a statement of its own. It is the row
+        // claimEndpoint and mintPairingCode lock, so taking it here is what
+        // orders them against this — and taking it *separately* is what makes
+        // the statements below re-read: each gets its own snapshot at read
+        // committed, so a claim that committed while this waited is visible to
+        // them. Locked inside the cleanup instead, that claim would commit
+        // behind its snapshot and keep an endpoint and a live token.
+        await client.query(
+          `SELECT u.id FROM users u JOIN workspaces w ON w.id = u.workspace_id
+            WHERE w.slack_team_id = $1 AND u.slack_user_id = $2
+            FOR UPDATE`,
+          [slackTeamId, slackUserId],
+        );
+        // Then the endpoints, same reason as deleteWorkspace: an insert into
+        // sessions takes a key-share lock on its endpoint.
         await client.query(
           `SELECT e.id FROM endpoints e
              JOIN users u ON u.id = e.user_id

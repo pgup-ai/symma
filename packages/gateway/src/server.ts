@@ -604,23 +604,38 @@ setInterval(() => {
 }, PAIR_WINDOW_MS).unref();
 
 /** Whole-body JSON, for the one route that takes an object and not a stream.
- * Undefined for oversized and unparseable alike; one answer covers both. */
+ * Undefined for oversized, unparseable and too slow alike; one answer covers
+ * them all.
+ *
+ * The deadline is not optional here. `requestTimeout` is 0 for the ingest
+ * streams that run a whole review, so this is the only unauthenticated body on
+ * the server and nothing else would ever end it — a byte cap alone lets a
+ * client hold a connection by sending under it, slowly, forever. */
 const MAX_PAIR_BYTES = 4096;
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  let body = '';
-  req.setEncoding('utf8');
-  for await (const chunk of req as AsyncIterable<string>) {
-    body += chunk;
-    if (Buffer.byteLength(body) > MAX_PAIR_BYTES) return undefined;
-  }
+const PAIR_BODY_MS = Number(process.env.SYMMA_GATEWAY_PAIR_BODY_MS) || 5_000;
+async function readPairBody(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
+  // The response, not the request: destroying it takes the socket with it and
+  // marks `res.destroyed` in the same tick, which is what sendJson reads.
+  // `req.destroyed` cannot say this — a request that arrived whole and was read
+  // to the end is destroyed too, by autoDestroy.
+  const deadline = setTimeout(() => res.destroy(), PAIR_BODY_MS);
   try {
+    let body = '';
+    req.setEncoding('utf8');
+    for await (const chunk of req as AsyncIterable<string>) {
+      body += chunk;
+      if (Buffer.byteLength(body) > MAX_PAIR_BYTES) return undefined;
+    }
     return JSON.parse(body);
   } catch {
-    return undefined;
+    return undefined; // destroyed by the deadline, or not JSON
+  } finally {
+    clearTimeout(deadline);
   }
 }
 
 function sendJson(res: ServerResponse, status: number, value: unknown): void {
+  if (res.destroyed) return; // the pair deadline took the socket
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(value));
 }
@@ -668,7 +683,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // route, since what reads it is a program.
     if (!databaseUrl) return sendJson(res, 404, { error: 'unsupported' });
     if (pairThrottled(callerIp(req))) return sendJson(res, 429, { error: 'throttled' });
-    const body = await readJsonBody(req);
+    const body = await readPairBody(req, res);
     if (typeof body !== 'object' || body === null) return sendJson(res, 400, { error: 'request' });
     const { code, device, agents } = body as {
       code?: unknown;

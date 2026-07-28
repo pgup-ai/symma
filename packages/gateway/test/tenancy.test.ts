@@ -60,6 +60,8 @@ before(
           // Short enough that the throttle test's burst does not then refuse
           // every later pair in this file — they all arrive from one address.
           SYMMA_GATEWAY_PAIR_WINDOW_MS: '300',
+          // Production gives a pair body 5s; the stalled-body test cannot wait.
+          SYMMA_GATEWAY_PAIR_BODY_MS: '300',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -946,6 +948,28 @@ describe('tenancy', () => {
     }
   });
 
+  it('ends a pair body that never arrives', async () => {
+    // The only unauthenticated body on a server that runs with requestTimeout
+    // off, so nothing but this deadline would ever close it — and a byte cap
+    // alone is no help to a client sending under it, slowly, forever.
+    const stalled = fetch(`${base}/api/pair`, {
+      method: 'POST',
+      body: new ReadableStream({
+        start: (c: ReadableStreamDefaultController<Uint8Array>) =>
+          c.enqueue(new TextEncoder().encode('{"code":')),
+      }),
+      duplex: 'half',
+    } as RequestInit).then(
+      () => 'answered',
+      () => 'closed',
+    );
+    const ended = await Promise.race([
+      stalled,
+      new Promise((resolve) => setTimeout(() => resolve('still open'), 3000)),
+    ]);
+    assert.equal(ended, 'closed');
+  });
+
   it('throttles pairing by where it came from', async () => {
     // No token to scope it by, so the limit is on the caller's address.
     for (let i = 0; i < 20; i++) {
@@ -1050,6 +1074,15 @@ describe('tenancy', () => {
       // Nor an endpoint. Deactivation deletes them, and claiming takes the same
       // member lock, so a pair in flight cannot leave one behind it.
       await assert.rejects(store.claimEndpoint(sev.owner, 'late laptop'), /no active member/);
+
+      // And an endpoint token stops authenticating the moment its member is
+      // deactivated, whether or not the row was cleaned up. Planted, because
+      // with the lock in place a claim cannot outrun the cleanup that would.
+      await pool.query(`UPDATE users SET deactivated_at = NULL WHERE id = $1`, [sev.owner]);
+      const late = await store.claimEndpoint(sev.owner, 'late laptop');
+      assert.equal((await store.endpointForToken(late.token))?.endpoint, late.endpoint);
+      await pool.query(`UPDATE users SET deactivated_at = now() WHERE id = $1`, [sev.owner]);
+      assert.equal(await store.endpointForToken(late.token), undefined);
       const left = await pool.query(`SELECT 1 FROM pairings WHERE user_id = $1`, [sev.owner]);
       assert.equal(left.rowCount, 0, 'a refused mint left a row behind');
 
