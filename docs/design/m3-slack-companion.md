@@ -630,8 +630,7 @@ instead — which works because **the tests travel with the code**: 12 files
 1. **Create `pgup-ai/symma`** — README, workspaces, this design doc. Nothing in
    jbot-review changes. **Done.**
 2. **Copy the self-contained components in, with their tests.** Green in the new
-   repo before anything else happens. **`@symma/protocol` and `@symma/gateway`
-   done; `@symma/companion` remains.**
+   repo before anything else happens. **Done.**
 3. **Do the `acp.ts` / `acp-remote.ts` split there, not here.** symma takes only
    the generic halves — local spawn/lifecycle, transport, readiness. The
    `ReviewBackend` wrappers and routing policy never leave jbot-review, so this
@@ -645,16 +644,17 @@ instead — which works because **the tests travel with the code**: 12 files
    unscoped `symma`. `gateway`'s sole export today is a test seam, which is not
    an API worth freezing at 0.1.0.
 5. **Only now touch jbot-review:** swap imports to the packages, keeping the
-   local files in place. If the suite goes red, revert one import line. See
-   "Step 5 readiness" for the two contract gaps — the observer tee is silent and
-   must be wired in the same commit as the swap.
+   local files in place. If the suite goes red, revert one import line.
+   **Done** — jbot-review#125 took `@symma/protocol`, #126 took `@symma/client`.
 6. **Cross-repo compatibility green → delete the originals.** Deleting earlier
-   turns a packaging mistake into a bisect across two repositories.
+   turns a packaging mistake into a bisect across two repositories. **Done** —
+   jbot-review#127, 1318 lines, one commit.
 
-**Divergence is the cost of this order.** Two copies exist between steps 2 and 6,
-so treat jbot-review's copies as frozen for that window. A fix that cannot wait
-lands in symma first and is re-copied — never the reverse, or the extraction
-starts inheriting drift.
+**Divergence was the cost of this order.** Two copies existed between steps 2 and
+6, so jbot-review's were frozen for that window and any fix that could not wait
+landed in symma first and was re-copied — never the reverse, or the extraction
+would have inherited drift. That window is closed: fixes now land wherever the
+code lives and reach jbot-review as a release.
 
 Step 3 was expected to be the whole risk. It was not — see the status note
 below.
@@ -663,8 +663,8 @@ below.
 `@symma/gateway` and `@symma/companion` (#2), 43 tests green. `viewer.ts` copied
 byte-identical; every other copied file differs from its origin only by an
 import line, plus the spawn paths the new layout requires. The M2 gateway design
-now lives here too, as [`m2-acp-gateway.md`](m2-acp-gateway.md) — a spec that
-stays behind dies when step 6 deletes the code it describes.
+now lives here too, as [`m2-acp-gateway.md`](m2-acp-gateway.md) — a spec left
+behind would have died with the code it describes, which step 6 deleted.
 
 The runtime graph holds: companion depends on protocol alone. It reaches
 `@symma/gateway` only as a devDependency, because its end-to-end test spawns a
@@ -698,8 +698,9 @@ symma the parameter's caller is now `runLocalAcpPrompt`.
 Nor does the product need it: the gateway _receives_ `/api/ingest`, and the
 companion sends over its relay leg, which the gateway journals directly.
 Nothing in the Slack↔companion path tees to that endpoint; its senders are
-jbot-review's tee and the demo feeder. Step 5 settles it, when the import swap
-shows what the reviewer actually wants from symma — plausibly nothing here.
+jbot-review's tee and the demo feeder. Step 5 settled it: the import swap wanted
+nothing here. `observer.ts` stayed, and jbot-review builds the tee at its own
+call site and injects it.
 
 Step 3 is therefore complete.
 
@@ -711,44 +712,40 @@ export condition while consumers get `dist`. `npm run verify:pack` is the only
 check that loads the packages the way a consumer does — everything else runs
 inside the workspace, where source resolution hides packaging faults.
 
-### Step 5 readiness
+### What step 5 actually cost
 
-Reviewed before starting, by checking every symbol jbot-review imports from a
-module that moved against what the package actually exports. Three gaps, one
-of them silent.
+The readiness audit compared every symbol jbot-review imports against what the
+package exports, and found the barrel 28 names short — the per-agent provider
+ids, CLI binaries and credential helpers its production code uses. A symbol
+exported from its module but absent from `index.ts` is invisible to consumers
+however public it looks in source, and only a consumer-shaped check finds that.
 
-- **The observer tee is the dangerous one.** jbot-review builds it _inside_
-  `acp-protocol.ts` (`options.relayed ? undefined : makeSessionTee(...)`), while
-  the package takes an injected `tee` and builds nothing. Swapping the import
-  therefore stops teeing local ACP reviews to the observer — with no type error
-  and no failing test, because the tee is env-gated and off in CI. **Step 5 must
-  pass the tee in the same commit as the import swap.** Nothing will catch
-  forgetting it. The protocol slice passes it straight to `driveAcpSession` at
-  `acp.ts`'s call site; the client slice passes it through
-  `runLocalAcpPrompt`'s options bag, which #8 added for exactly this — the
-  signature had no slot for it, so the client package's local runner could not
-  serve its only consumer.
-- **`relayed: true` fails loudly, which is fine.** `acp-remote.ts` passes it and
-  the package has no such option, so the swap is a typecheck error. Delete the
-  line: a relayed caller now passes no tee, which is what the flag encoded.
-- **28 exported symbols were unreachable through the package**, taking the
-  barrel from 34 names to 62. They are the per-agent provider ids, CLI binaries
-  and credential helpers, and the consumers are production code rather than a
-  corner: `backend-selection.ts` for the `is*Provider` predicates, `runner.ts`
-  for `writeCodexAuth`/`writeDevinCredentials`/`assertValidKiloAuth`/the model
-  listers, `companion/index.ts` for several more, plus `local/index.ts` and four
-  tests. Exported in 0.1.1. A symbol exported from its module but absent from
-  `index.ts` is invisible to consumers however public it looks in source, and
-  nothing but a consumer-shaped check finds it.
-- **`model.ts` moved in part, by design.** Only `parseModelName` is generic and
-  it is byte-identical; `resolveModelName`, `resolveAuxModelName` and
-  `formatModelName` are review policy and stay. Step 5 imports the first from the
-  package and leaves the rest local.
+Two contract changes needed handling in the same commit as the swap, and only
+one of them was loud:
+
+- **The observer tee.** jbot-review built it inside `driveAcpSession`; the
+  package takes it injected. Swapping the import alone stopped teeing local ACP
+  reviews with no type error and no failing test, because the tee is env-gated
+  and off in CI. It stopped being structural the moment it became an argument,
+  so jbot-review now pins it with a test.
+- **`relayed: true`** failed at typecheck, which is what a contract change
+  should do.
+
+`@symma/client` also could not serve its only consumer at 0.1.1:
+`runLocalAcpPrompt` had no slot for a tee, so the local runner was unusable by
+the one repo adopting it. Fixed in 0.2.0 — a break worth taking while the
+package was a day old with a single consumer mid-adoption.
 
 Intra-workspace pins must track the workspace version exactly. `*` resolves to
 the registry copy instead of the local one, which silently tests a published
 package against workspace source — the failure surfaces as a missing `src/`,
 since tarballs ship only `dist`.
+
+**Step 6 landed as jbot-review#127** — nine files, 1318 lines, one commit. Their
+tests stayed: symma has none for the four agent specs, and the `devin`/`kilo`
+ones also reach into jbot-review's own prompt and config. They are its
+compatibility suite against the dependency now, which is what a downstream
+consumer should keep.
 
 ### Repo, domains, and the name
 

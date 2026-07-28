@@ -91,10 +91,10 @@ extraction fixes, prevented from recurring.
    bug, not the boundary. Timeouts and retry policy are caller concerns —
    the protocol surfaces transport facts and lets the caller set deadlines.
 
-6. **Fixes flow symma → jbot-review, never the reverse** (§8). Two copies exist
-   until the originals are deleted, and jbot-review's are frozen for that
-   window. A fix that cannot wait lands here first and is re-copied; the other
-   direction makes the extraction inherit drift.
+6. **Fixes to extracted code land here** (§8). The extraction is done —
+   jbot-review consumes the published packages and its copies are gone — so a
+   fix reaches it as a release, not a re-copy. Patching it there instead forks
+   the code that was just unforked.
 
 ## Conventions
 
@@ -144,12 +144,5 @@ without losing behavior, it should not have been written.
    workspace pins must equal the workspace version exactly; `*` resolves to the
    registry copy instead of the local one.
 5. Only now touch jbot-review: swap imports, keeping the local files in place.
-   If the suite goes red, revert one import line. Read §8 "Step 5 readiness"
-   first — swapping `acp-protocol` silently stops the observer tee unless the
-   call site passes `tee:` in the same commit.
-6. Cross-repo green → delete the originals. Deleting earlier turns a packaging
-   mistake into a bisect across two repositories.
-
-jbot-review is not touched until symma is fully tested. It runs reviews daily
-and has a deployed App; destabilising it for a refactor that serves a _different_
-product is risk with no upside for it.
+   **done** — jbot-review#125 and #126.
+6. Cross-repo green → delete the originals. **done** — jbot-review#127.
