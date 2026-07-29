@@ -53,6 +53,20 @@ const writePairing = (home: string, contents: string): void => {
   writeFileSync(join(dir, 'pairing.json'), contents);
 };
 
+/** `settled`'s value, or 'timeout'. The timer is cleared either way, so a race
+ * the fast path wins does not then hold the loop open until it fires. */
+const within = async <T>(ms: number, settled: Promise<T>): Promise<T | 'timeout'> => {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    return await Promise.race([settled, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Promise<T> {
   for (let i = 0; i < 100; i += 1) {
     const value = await probe();
@@ -297,10 +311,7 @@ describe('relay e2e', () => {
       // Raced, because "it fails eventually" is not the property: undici's own
       // header timeout ends this after five minutes with no deadline at all,
       // which is the hang the deadline exists to prevent.
-      const ended = await Promise.race([
-        new Promise((resolve) => child.on('exit', resolve)),
-        new Promise((resolve) => setTimeout(() => resolve('still running'), 5_000)),
-      ]);
+      const ended = await within(5_000, new Promise((resolve) => child.on('close', resolve)));
       assert.equal(ended, 1, `expected a prompt refusal, got ${String(ended)} — ${said}`);
       assert.match(said, /Could not reach/);
     } finally {
@@ -349,7 +360,7 @@ describe('relay e2e', () => {
       );
       let said = '';
       pair.stderr?.on('data', (c) => (said += String(c)));
-      assert.equal(await new Promise((resolve) => pair.on('exit', resolve)), 1, said);
+      assert.equal(await new Promise((resolve) => pair.on('close', resolve)), 1, said);
       assert.match(said, /could not save it/);
       assert.match(said, /code is spent/);
       // And took the staged file with it, rather than leaving a token under a
@@ -385,7 +396,7 @@ describe('relay e2e', () => {
       let said = '';
       pair.stdout?.on('data', (c) => (said += String(c)));
       pair.stderr?.on('data', (c) => (said += String(c)));
-      assert.equal(await new Promise((resolve) => pair.on('exit', resolve)), 1);
+      assert.equal(await new Promise((resolve) => pair.on('close', resolve)), 1);
       assert.match(said, /Nothing to connect/);
       assert.match(said, /kilo: no auth/);
       // Nothing persisted at all — not the pairing, and not the signing key,
@@ -509,7 +520,7 @@ describe('relay e2e', () => {
         let out = '';
         companion.stdout?.on('data', (c) => (out += String(c)));
         companion.stderr?.on('data', (c) => (out += String(c)));
-        const code = await new Promise((resolve) => companion.on('exit', resolve));
+        const code = await new Promise((resolve) => companion.on('close', resolve));
         assert.equal(code, 1);
         assert.match(out, /Not paired\. Run `symma pair <CODE>`/);
         // And says why, so nobody re-pairs against a file that is sitting there.

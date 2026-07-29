@@ -22,6 +22,20 @@ let dataDir: string;
 let alice: Awaited<ReturnType<typeof provision>>;
 let bob: Awaited<ReturnType<typeof provision>>;
 
+/** `settled`'s value, or 'timeout'. The timer is cleared either way, so a race
+ * the fast path wins does not then hold the loop open until it fires. */
+const within = async <T>(ms: number, settled: Promise<T>): Promise<T | 'timeout'> => {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    return await Promise.race([settled, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const waitFor = async <T>(probe: () => Promise<T | undefined>, what: string): Promise<T> => {
   for (let i = 0; i < 100; i++) {
     const value = await probe().catch(() => undefined);
@@ -796,14 +810,14 @@ describe('tenancy', () => {
 
     const legs = new AbortController();
     /** True if the leg closed within `ms`, false if it is still serving. */
-    const closes = (leg: Promise<unknown>, ms: number): Promise<boolean> =>
-      Promise.race([
+    const closes = async (leg: Promise<unknown>, ms: number): Promise<boolean> =>
+      (await within(
+        ms,
         leg.then(
           () => true,
           () => true,
         ),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
-      ]);
+      )) === true;
     const drain = (res: Response): Promise<unknown> => res.body!.pipeTo(new WritableStream());
     try {
       // A `hello` and then a body that never ends: the already-authenticated
@@ -914,7 +928,7 @@ describe('tenancy', () => {
       let said = '';
       pair.stdout?.on('data', (c: Buffer) => (said += String(c)));
       pair.stderr?.on('data', (c: Buffer) => (said += String(c)));
-      assert.equal(await new Promise((r) => pair.on('exit', r)), 0, said);
+      assert.equal(await new Promise((r) => pair.on('close', r)), 0, said);
       assert.match(said, /✅ Connected — Wen's laptop · probe/);
 
       // The identity came back from the gateway; the request never named one.
@@ -941,7 +955,7 @@ describe('tenancy', () => {
       const again = runCompanion('pair', code);
       let complaint = '';
       again.stderr?.on('data', (c: Buffer) => (complaint += String(c)));
-      assert.equal(await new Promise((r) => again.on('exit', r)), 1);
+      assert.equal(await new Promise((r) => again.on('close', r)), 1);
       assert.match(complaint, /expired or been used/);
       // And left the working pairing alone: a stale code is the likeliest way
       // here, and losing the file for it would unpair a machine that was fine.
@@ -1035,11 +1049,7 @@ describe('tenancy', () => {
       () => 'answered',
       () => 'closed',
     );
-    const ended = await Promise.race([
-      stalled,
-      new Promise((resolve) => setTimeout(() => resolve('still open'), 3000)),
-    ]);
-    assert.equal(ended, 'closed');
+    assert.equal(await within(3000, stalled), 'closed');
   });
 
   it('throttles pairing by where it came from', async () => {

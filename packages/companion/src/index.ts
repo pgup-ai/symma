@@ -66,7 +66,10 @@ const STREAM_IDLE_MS =
     ? Number(process.env.SYMMA_COMPANION_IDLE_MS)
     : 70_000;
 /** How long `pair` waits on the gateway before saying so. */
-const PAIR_TIMEOUT_MS = Number(process.env.SYMMA_COMPANION_PAIR_TIMEOUT_MS) || 15_000;
+const PAIR_TIMEOUT_MS =
+  Number(process.env.SYMMA_COMPANION_PAIR_TIMEOUT_MS) > 0
+    ? Number(process.env.SYMMA_COMPANION_PAIR_TIMEOUT_MS)
+    : 15_000;
 
 const log = (msg: string): void => {
   console.log(`[symma-companion] ${msg}`);
