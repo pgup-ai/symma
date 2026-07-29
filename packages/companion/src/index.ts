@@ -65,10 +65,63 @@ const STREAM_IDLE_MS =
     ? Number(process.env.SYMMA_COMPANION_IDLE_MS)
     : 70_000;
 
-const gatewayUrl = (process.env.SYMMA_COMPANION_GATEWAY ?? '').trim().replace(/\/+$/, '');
-const token = (process.env.SYMMA_COMPANION_TOKEN ?? '').trim();
-const endpointId = (process.env.SYMMA_COMPANION_ENDPOINT ?? '').trim();
-const device = (process.env.SYMMA_COMPANION_DEVICE ?? '').trim() || hostname();
+const log = (msg: string): void => {
+  console.log(`[symma-companion] ${msg}`);
+};
+
+/** What this machine keeps between runs — the signing key, and since §2 the
+ * identity the gateway assigned. Created 0700 alongside the key. */
+const stateDir = join(homedir(), '.local', 'share', 'symma-companion');
+
+interface Pairing {
+  gateway: string;
+  endpoint: string;
+  token: string;
+  /** The label given while pairing. Here because `hello` carries it: left out,
+   * the gateway stores that name and the listing shows a hostname instead. */
+  device: string;
+}
+
+/** What `symma pair` left behind. Missing is the ordinary unpaired case;
+ * a file that yields nothing is said out loud, or a member reads "not paired"
+ * with the file sitting right there. */
+function readPairing(): Pairing {
+  const path = join(stateDir, 'pairing.json');
+  const none: Pairing = { gateway: '', endpoint: '', token: '', device: '' };
+  if (!existsSync(path)) return none;
+  let saved: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null) saved = parsed as Record<string, unknown>;
+  } catch (error) {
+    log(`ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    return none;
+  }
+  const str = (key: keyof Pairing): string =>
+    typeof saved[key] === 'string' ? saved[key].trim() : '';
+  const pairing: Pairing = {
+    gateway: str('gateway'),
+    endpoint: str('endpoint'),
+    token: str('token'),
+    device: str('device'),
+  };
+  // Valid JSON can still be useless — a typo'd key contributes nothing. Only
+  // when it contributes *nothing* though: one that supplies some fields and
+  // leaves the rest to the environment is in use, not ignored.
+  if (!pairing.gateway && !pairing.endpoint && !pairing.token)
+    log(`ignoring ${path}: no gateway, endpoint or token in it`);
+  return pairing;
+}
+
+// Env over file, per field: the file is what pairing wrote, a variable is what
+// someone typed on purpose. Trimmed before it decides, or a stray space in a
+// variable both wins and comes to nothing, and a real pairing reads as absent.
+const paired = readPairing();
+const pick = (name: string, saved: string): string => (process.env[name] ?? '').trim() || saved;
+const gatewayUrl = pick('SYMMA_COMPANION_GATEWAY', paired.gateway).replace(/\/+$/, '');
+const token = pick('SYMMA_COMPANION_TOKEN', paired.token);
+const endpointId = pick('SYMMA_COMPANION_ENDPOINT', paired.endpoint);
+const device = pick('SYMMA_COMPANION_DEVICE', paired.device) || hostname();
 const agentNames = (process.env.SYMMA_COMPANION_AGENTS ?? 'kilo')
   .split(',')
   .map((entry) => entry.trim())
@@ -84,13 +137,12 @@ const maxSessions =
  * tamper-evident against the relay rather than merely by it.
  */
 function loadSigningKeys(): { privateKey: string; publicKey: string } {
-  const dir = join(homedir(), '.local', 'share', 'symma-companion');
-  const path = join(dir, 'signing-key.pem');
+  const path = join(stateDir, 'signing-key.pem');
   // The public half sits beside it as a file the operator can copy off this
   // machine: a journal audit that distrusts the gateway needs a key that never
   // came from the gateway, and this is that channel.
   const publish = (publicKey: string): void =>
-    writeFileSync(join(dir, 'signing-key.pub.pem'), publicKey, { mode: 0o644 });
+    writeFileSync(join(stateDir, 'signing-key.pub.pem'), publicKey, { mode: 0o644 });
   if (existsSync(path)) {
     const privateKey = readFileSync(path, 'utf8');
     const publicKey = publicKeyFrom(privateKey);
@@ -98,7 +150,7 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
     return { privateKey, publicKey };
   }
   const keys = generateSigningKeys();
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   // Written elsewhere then linked into place: `wx` alone would expose the path
   // before the PEM is complete, and a racing start could read half a key. The
   // link fails if another start won, and that winner's key is the one used.
@@ -121,13 +173,10 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
   }
 }
 
-const log = (msg: string): void => {
-  console.log(`[symma-companion] ${msg}`);
-};
-
 if (!gatewayUrl || !token || !endpointId) {
   console.error(
-    'Set SYMMA_COMPANION_GATEWAY, SYMMA_COMPANION_TOKEN, and SYMMA_COMPANION_ENDPOINT.',
+    'Not paired. Run `symma pair <CODE>`, or set SYMMA_COMPANION_GATEWAY, ' +
+      'SYMMA_COMPANION_TOKEN and SYMMA_COMPANION_ENDPOINT.',
   );
   process.exit(1);
 }
