@@ -76,6 +76,7 @@ before(
           // tries makes the throttle reachable without a race: the old setup
           // needed eleven round-trips inside a 300ms window, and a slow one
           // reset the window instead of tripping it.
+          SYMMA_GATEWAY_BOT_TOKEN: 'bot-secret',
           SYMMA_GATEWAY_TRUSTED_PROXY: '127.0.0.1',
           SYMMA_GATEWAY_PAIR_TRIES: '3',
           // Production gives a pair body 5s; the stalled-body test cannot wait.
@@ -1023,6 +1024,71 @@ describe('tenancy', () => {
       detach?.();
       await pool.end();
       await store.close();
+    }
+  });
+
+  it('mints for a slack identity, and lets only the bot ask', async () => {
+    const url = pg.getConnectionUri();
+    const pool = new Pool({ connectionString: url });
+    const mint = (body: unknown, token?: string): Promise<Response> =>
+      fetch(`${base}/api/slack/pair`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+    try {
+      // The secret is the whole gate. Without it this route mints a working
+      // pairing code for any member anyone cares to name.
+      const asked = { team: 'slackpair', user: 'wes' };
+      assert.equal((await mint(asked)).status, 401, 'no token');
+      assert.equal((await mint(asked, 'not-the-bot')).status, 401, 'wrong token');
+      assert.equal((await mint({ team: 'slackpair' }, 'bot-secret')).status, 400, 'no user');
+
+      // Nobody provisioned Wes: `/connect` is the first thing that ever sees a
+      // member, so it is what creates them.
+      const res = await mint(asked, 'bot-secret');
+      assert.equal(res.status, 200);
+      const { code, expiresInMinutes } = (await res.json()) as {
+        code: string;
+        expiresInMinutes: number;
+      };
+      // Served rather than spelled twice — the bot tells the member how long
+      // they have, and only the store knows.
+      assert.equal(expiresInMinutes, 10);
+
+      // The code works, and what it pairs is Wes's. This is the whole point of
+      // the route: a Slack identity reaches exactly one owner's endpoint.
+      const paired = await pair({ code, device: "Wes's laptop", agents: ['kilo'] }, 'wes');
+      assert.equal(paired.status, 200);
+      const claimed = (await paired.json()) as { endpoint: string };
+      const owner = await pool.query(
+        `SELECT u.slack_user_id FROM endpoints e JOIN users u ON u.id = e.user_id WHERE e.id = $1`,
+        [claimed.endpoint],
+      );
+      assert.equal(owner.rows[0].slack_user_id, 'wes');
+
+      // Asking twice is the ordinary case — a member who lost the first code.
+      // It must keep working rather than pile up members.
+      assert.equal((await mint(asked, 'bot-secret')).status, 200);
+      const members = await pool.query(
+        `SELECT count(*)::int AS n FROM users u JOIN workspaces w ON w.id = u.workspace_id
+          WHERE w.slack_team_id = 'slackpair' AND u.slack_user_id = 'wes'`,
+      );
+      assert.equal(members.rows[0].n, 1, 'one member, however often they ask');
+
+      // Deactivation is a soft delete, so `/connect` would otherwise re-create
+      // a removed member on their next command. Re-admitting is an
+      // administrative act, not something their own slash command can do.
+      await pool.query(
+        `UPDATE users SET deactivated_at = now() WHERE slack_user_id = 'wes'
+           AND workspace_id = (SELECT id FROM workspaces WHERE slack_team_id = 'slackpair')`,
+      );
+      assert.equal((await mint(asked, 'bot-secret')).status, 403);
+    } finally {
+      await pool.end();
     }
   });
 

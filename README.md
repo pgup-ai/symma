@@ -28,7 +28,7 @@ bot and the tenancy model that M3 needs are not.
 | `@symma/client`   | drive a prompt against a local agent, or a remote one through a gateway                        | [on npm](https://www.npmjs.com/package/@symma/client)   |
 | `@symma/gateway`  | relay, journal store, viewer, tenancy                                                          | private — ships as an image                             |
 | `symma`           | the companion CLI: attach loop, agent detection, pairing, local spawn/lifecycle                | [on npm](https://www.npmjs.com/package/symma)           |
-| `@symma/slack`    | the Slack bot                                                                                  | planned                                                 |
+| `@symma/slack`    | the Slack bot: Socket Mode, `/connect` to pair a machine                                       | private — runs beside the gateway                       |
 
 ```bash
 npm i -g symma && symma pair BPB1-9W92-HTZJ-RA19

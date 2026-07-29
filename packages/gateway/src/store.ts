@@ -24,6 +24,15 @@ export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unkn
 
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
+  /** The owner behind a Slack identity, created on first sight. `/connect` is
+   * the only caller: it holds an authenticated `team_id`/`user_id` from Slack,
+   * which §6's pilot treats as membership — one privately administered
+   * workspace, one custom app, known internal members.
+   *
+   * Undefined for a member who was deactivated. Their row survives the soft
+   * delete, so re-creating them here is what re-admitting a removed member
+   * would look like; refusing leaves that as an administrative act. */
+  ensureMember(slackTeamId: string, slackUserId: string): Promise<Owner | undefined>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
    * supersedes this owner's outstanding code. Throws if they are not a member
    * here any more, rather than handing back a code that can only fail later. */
@@ -88,7 +97,9 @@ const hashToken = (token: string): string => createHash('sha256').update(token).
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 /** 16 × 5 bits = 80, past §2's ≥64-bit floor. */
 const CODE_LENGTH = 16;
-const PAIRING_TTL_MINUTES = 10;
+/** Exported so `/connect` can tell the member how long their code lasts without
+ * a second copy of the number drifting from this one. */
+export const PAIRING_TTL_MINUTES = 10;
 
 function newPairingCode(): string {
   const pick = (b: number): string => CODE_ALPHABET[b % CODE_ALPHABET.length];
@@ -123,6 +134,31 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [hashToken(token)],
       );
       return row?.subject_id;
+    },
+    async ensureMember(slackTeamId, slackUserId) {
+      // Returns the existing id on conflict rather than assuming one: a
+      // workspace row created by another path would otherwise fail the users
+      // insert below on a foreign key that names a row we never looked up.
+      const workspace = await one<{ id: string }>(
+        `INSERT INTO workspaces (id, slack_team_id) VALUES ($1, $2)
+         ON CONFLICT (slack_team_id) DO UPDATE SET slack_team_id = EXCLUDED.slack_team_id
+         RETURNING id`,
+        [`ws-${slackTeamId}`, slackTeamId],
+      );
+      // Assigned, never derived from the two caller values — the defect
+      // `provision` documents, where a hyphen the caller controls let
+      // ("a", "b-c") and ("a-b", "c") spell one owner.
+      const member = await one<{ id: string; deactivated_at: string | null }>(
+        `INSERT INTO users (id, workspace_id, slack_user_id) VALUES ($1, $2, $3)
+         ON CONFLICT (workspace_id, slack_user_id)
+           DO UPDATE SET slack_user_id = EXCLUDED.slack_user_id
+         RETURNING id, deactivated_at`,
+        [randomUUID(), workspace!.id, slackUserId],
+      );
+      // Deliberately not clearing `deactivated_at`: re-admitting a removed
+      // member is an administrative act, not something their own `/connect`
+      // can do.
+      return member!.deactivated_at ? undefined : member!.id;
     },
     async mintPairingCode(owner) {
       const code = newPairingCode();
@@ -566,6 +602,7 @@ export function localStore(
     deactivateUser: needsDatabase,
     claimEndpoint: needsDatabase,
     // One member, holding a token they configured: nobody to introduce.
+    ensureMember: needsDatabase,
     mintPairingCode: needsDatabase,
     redeemPairingCode: needsDatabase,
     close: () => Promise.resolve(),
