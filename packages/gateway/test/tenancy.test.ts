@@ -1331,9 +1331,11 @@ describe('tenancy', () => {
       // thread is the identity, so the second insert has nowhere to land.
       await assert.rejects(open('conv-tia-again', tia.owner, 'tia-mac', 'D-tia'), /duplicate key/);
 
-      // But two members tagging one channel thread each get their own. The DM
-      // channel differs per member, and `user_id` is in the key either way.
-      await open('conv-uzo', uzo.owner, 'uzo-mac', 'D-uzo');
+      // Two members on one DM channel id is contrived — Slack gives each their
+      // own — and that is the point: it leaves `user_id` as the only thing
+      // separating them, so §4's rule that each gets a private conversation
+      // from a shared thread is a constraint here rather than a claim.
+      await open('conv-uzo', uzo.owner, 'uzo-mac', 'D-tia');
 
       // Unpairing takes the machine, not the record of what was asked of it.
       await pool.query(`DELETE FROM endpoints WHERE id = 'tia-mac'`);

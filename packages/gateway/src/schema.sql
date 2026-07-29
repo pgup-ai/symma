@@ -71,13 +71,12 @@ CREATE TABLE IF NOT EXISTS pairings (
   consumed_at timestamptz
 );
 
--- §4. One DM thread is one conversation, and the thread is its identity — never
--- the ACP session underneath, which is replaced on every resume while a member
--- typing in an old thread still has to reach the same conversation.
+-- §4. One DM thread is one conversation, identified by the thread and never by
+-- the ACP session underneath, which every resume replaces.
 --
 -- `user_id` is part of that identity rather than merely its owner: several
 -- members can each tag one channel thread, and each must get a private
--- conversation of their own instead of joining one.
+-- conversation instead of joining one.
 CREATE TABLE IF NOT EXISTS conversations (
   id                text PRIMARY KEY,
   user_id           text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -96,10 +95,9 @@ CREATE TABLE IF NOT EXISTS conversations (
   UNIQUE (user_id, dm_channel_id, root_thread_ts)
 );
 
--- §5. Delivery is a state machine, not a boolean. `slack_event_id` is unique
--- across the table rather than per conversation because the id is Slack's and
--- the Events API retries: a redelivery has to find the turn it already made,
--- wherever that turn was.
+-- §5. `slack_event_id` is unique across the table rather than per conversation
+-- because the id is Slack's and the Events API retries: a redelivery has to
+-- collide with the turn it already made, wherever that turn was.
 CREATE TABLE IF NOT EXISTS turns (
   id                text PRIMARY KEY,
   conversation_id   text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -112,21 +110,18 @@ CREATE TABLE IF NOT EXISTS turns (
   published_channel text,
   published_ts      text,
   created_at        timestamptz NOT NULL DEFAULT now(),
-  -- Publishing and having published are one fact. A `posted` turn always says
-  -- where it landed, and a destination cannot be recorded against a turn that
-  -- never published — so "posted once" is answerable from the row alone.
+  -- Publishing and having published are one fact, so "posted once" is
+  -- answerable from the row rather than from whatever the bot remembers.
   CONSTRAINT turns_posted_has_destination CHECK (
     (delivery_mode = 'posted') = (published_channel IS NOT NULL AND published_ts IS NOT NULL))
 );
 
--- §4 resuming. `resume_kind` is why this is a table rather than a column on
--- `conversations`: a conversation outlives its sessions, and whether a resume
--- was exact or recovered is a fact to store, not one for a UI to infer.
+-- §4 resuming. A conversation outlives its sessions, and `resume_kind` makes
+-- "recovered, not a true resume" a stored fact rather than a UI guess.
 CREATE TABLE IF NOT EXISTS conversation_sessions (
   conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  -- Cascaded, so retention deleting a session takes the link and leaves the
-  -- conversation and its turns standing. Unique, because a session belongs to
-  -- the one conversation that started it.
+  -- Cascaded, so retention deleting a session leaves the conversation and its
+  -- turns standing. Unique: a session belongs to the conversation that started it.
   session_id      text UNIQUE NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   ordinal         int NOT NULL,
   resume_kind     text NOT NULL CHECK (resume_kind IN ('new', 'exact', 'recovered')),
