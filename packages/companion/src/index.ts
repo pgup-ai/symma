@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -173,7 +174,22 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
   }
 }
 
-if (!gatewayUrl || !token || !endpointId) {
+// `symma pair <CODE>` trades a code for this machine's identity and exits. With
+// no command the companion attaches using whatever it already has.
+const [command, ...rest] = process.argv.slice(2);
+if (command !== undefined && command !== 'pair') {
+  console.error(`Unknown command: ${command}. Usage: symma [pair <CODE>]`);
+  process.exit(1);
+}
+const pairing = command === 'pair';
+// Trimmed: a code arrives pasted, and the gateway sees only what is sent.
+const pairCode = (rest[0] ?? '').trim();
+if (pairing && !pairCode) {
+  console.error('Usage: symma pair <CODE>');
+  process.exit(1);
+}
+
+if (!pairing && (!gatewayUrl || !token || !endpointId)) {
   console.error(
     'Not paired. Run `symma pair <CODE>`, or set SYMMA_COMPANION_GATEWAY, ' +
       'SYMMA_COMPANION_TOKEN and SYMMA_COMPANION_ENDPOINT.',
@@ -263,10 +279,13 @@ function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | str
 }
 
 const agents = new Map<string, AcpAgentSpec>();
+// Kept rather than logged in place: §2 shows these to the member while pairing,
+// where they are the onboarding copy and not a diagnostic.
+const skipped: string[] = [];
 for (const entry of agentNames) {
   const resolved = resolveAgent(entry);
   if (typeof resolved === 'string') {
-    log(`skipping agent — ${resolved}`);
+    skipped.push(resolved);
     continue;
   }
   // Credentials were checked above; the binary was not. Detecting on auth alone
@@ -274,15 +293,23 @@ for (const entry of agentNames) {
   // shape available — it passes onboarding and breaks on first use.
   const bin = resolveBin(resolved.spec.bin);
   if (!bin) {
-    log(`skipping agent — ${resolved.name}: ${resolved.spec.bin} not found on PATH`);
+    skipped.push(`${resolved.name}: ${resolved.spec.bin} not found on PATH`);
     continue;
   }
   agents.set(resolved.name, { ...resolved.spec, bin });
 }
 if (agents.size === 0) {
-  console.error('No usable agents; check SYMMA_COMPANION_AGENTS and local auth.');
+  console.error(
+    pairing
+      ? 'Nothing to connect: no agent on this machine is logged in.'
+      : 'No usable agents; check SYMMA_COMPANION_AGENTS and local auth.',
+  );
+  for (const why of skipped) console.error(`  ${why}`);
   process.exit(1);
 }
+// Only once the start is going ahead — the refusal above already said them, and
+// `pair` prints them as copy rather than as a log line.
+if (!pairing) for (const why of skipped) log(`skipping agent — ${why}`);
 
 interface LiveSession {
   child: ChildProcess;
@@ -730,6 +757,72 @@ function shutdown(): void {
   setTimeout(() => process.exit(0), 200);
 }
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, shutdown);
+/** Replaces, where the signing key must never be replaced — so rename rather
+ * than link, still through a staged file so a reader never sees half of one. */
+function savePairing(saved: Pairing): string {
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const path = join(stateDir, 'pairing.json');
+  const staged = `${path}.${process.pid}`;
+  writeFileSync(staged, `${JSON.stringify(saved, null, 2)}\n`, { mode: 0o600 });
+  renameSync(staged, path);
+  return path;
+}
 
-await main();
+/** §2's exchange: what this machine can run, traded for the identity it will
+ * present. The endpoint id comes back from the gateway rather than going up —
+ * an unauthenticated caller naming an identity is one code away from someone
+ * else's endpoint. */
+async function runPair(code: string): Promise<never> {
+  // A default is the point: without one the §2 one-liner needs a second field,
+  // which is the flow it exists to remove.
+  const pairTarget = gatewayUrl || 'https://symma.dev';
+  const refused = (why: string): never => {
+    console.error(why);
+    process.exit(1);
+  };
+  let res: Response;
+  try {
+    res = await fetch(`${pairTarget}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, device, agents: [...agents.keys()] }),
+    });
+  } catch (error) {
+    return refused(
+      `Could not reach ${pairTarget}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const body = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    endpoint?: string;
+    token?: string;
+  };
+  if (res.status === 401) return refused('That code has expired or been used — ask for a new one.');
+  if (res.status === 429) return refused('Too many attempts just now. Wait a minute and retry.');
+  if (!res.ok || !body.endpoint || !body.token)
+    return refused(
+      `Pairing failed (${res.status}${body.error ? `: ${body.error}` : ''}) at ${pairTarget}.`,
+    );
+
+  const path = savePairing({
+    gateway: pairTarget,
+    endpoint: body.endpoint,
+    token: body.token,
+    device,
+  });
+  // Detection output is the onboarding copy (§2) — what ran, and what would
+  // have if it were logged in.
+  console.log(`✅ Connected — ${device} · ${[...agents.keys()].join(', ')}`);
+  for (const why of skipped) console.log(`⚪ ${why}`);
+  console.log(`Saved to ${path}. Run \`symma\` to stay connected.`);
+  // Explicit: fetch leaves a keep-alive socket that would hold a finished
+  // command open for seconds.
+  process.exit(0);
+}
+
+if (pairing) {
+  await runPair(pairCode);
+} else {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, shutdown);
+  await main();
+}

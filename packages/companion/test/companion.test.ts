@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateSigningKeys, verifyEnvelope, type ObserverEnvelope } from '@symma/protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
@@ -258,6 +258,39 @@ describe('relay e2e', () => {
       gateway?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(companionHome, { recursive: true, force: true });
+    }
+  });
+
+  it('will not pair a machine with nothing to run', async () => {
+    // §2: never attach an endpoint with zero agents. Refused here, before a
+    // code is spent, and the reasons are the copy that tells them what to do.
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    try {
+      const pair = spawn(
+        process.execPath,
+        [
+          '--conditions=symma-source',
+          '--import',
+          'tsx',
+          'packages/companion/src/index.ts',
+          'pair',
+          'BPB1-9W92-HTZJ-RA19',
+        ],
+        // No gateway either: it must refuse without reaching for one.
+        { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let said = '';
+      pair.stdout?.on('data', (c) => (said += String(c)));
+      pair.stderr?.on('data', (c) => (said += String(c)));
+      assert.equal(await new Promise((resolve) => pair.on('exit', resolve)), 1);
+      assert.match(said, /Nothing to connect/);
+      assert.match(said, /kilo: no auth/);
+      assert.equal(
+        existsSync(join(home, '.local', 'share', 'symma-companion', 'pairing.json')),
+        false,
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

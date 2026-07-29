@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -877,6 +877,80 @@ describe('tenancy', () => {
         owner: second.owner,
       });
     } finally {
+      await store.close();
+    }
+  });
+
+  const COMPANION = 'packages/companion/src/index.ts';
+
+  it('pairs a fresh machine from one command, and it stays paired', async () => {
+    // M3b's bar. Nothing is configured on this machine but a code.
+    const url = pg.getConnectionUri();
+    const wen = await provision(url, { team: 'paire2e', slackUser: 'wen', endpoint: 'wen-old' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const home = mkdtempSync(join(tmpdir(), 'symma-pair-home-'));
+    let companion: ChildProcess | undefined;
+    try {
+      const code = await store.mintPairingCode(wen.owner);
+      const env = {
+        ...process.env,
+        HOME: home,
+        SYMMA_COMPANION_GATEWAY: base,
+        SYMMA_COMPANION_DEVICE: "Wen's laptop",
+        SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+      };
+      const companionArgs = ['--conditions=symma-source', '--import', 'tsx', COMPANION];
+      const pair = spawn(process.execPath, [...companionArgs, 'pair', code], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let said = '';
+      pair.stdout?.on('data', (c: Buffer) => (said += String(c)));
+      pair.stderr?.on('data', (c: Buffer) => (said += String(c)));
+      assert.equal(await new Promise((r) => pair.on('exit', r)), 0, said);
+      assert.match(said, /✅ Connected — Wen's laptop · probe/);
+
+      // The identity came back from the gateway; the request never named one.
+      const saved = JSON.parse(
+        readFileSync(join(home, '.local', 'share', 'symma-companion', 'pairing.json'), 'utf8'),
+      ) as { gateway: string; endpoint: string; token: string; device: string };
+      assert.match(saved.endpoint, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+      assert.equal(saved.gateway, base);
+      assert.equal(saved.device, "Wen's laptop");
+
+      // And a plain start now attaches on it, with nothing else configured.
+      companion = spawn(process.execPath, companionArgs, {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      await waitFor(async () => {
+        const listed = (await (await as(wen.clientToken, '/api/endpoints')).json()) as {
+          endpoint: string;
+        }[];
+        return listed.find((e) => e.endpoint === saved.endpoint);
+      }, `the paired endpoint attaches (${said})`);
+
+      // Single-use reaches this far too: the same code cannot pair twice.
+      const again = spawn(process.execPath, [...companionArgs, 'pair', code], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let complaint = '';
+      again.stderr?.on('data', (c: Buffer) => (complaint += String(c)));
+      assert.equal(await new Promise((r) => again.on('exit', r)), 1);
+      assert.match(complaint, /expired or been used/);
+      // And left the working pairing alone. Re-running pair with a stale code
+      // is the likeliest way to reach this, and losing a good file for it would
+      // unpair a machine that was fine.
+      assert.deepEqual(
+        JSON.parse(
+          readFileSync(join(home, '.local', 'share', 'symma-companion', 'pairing.json'), 'utf8'),
+        ),
+        saved,
+      );
+    } finally {
+      companion?.kill('SIGKILL');
+      rmSync(home, { recursive: true, force: true });
       await store.close();
     }
   });
