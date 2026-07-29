@@ -991,10 +991,24 @@ Why each number matters:
 
 ## 7. Protocol changes
 
-1. **`version` on `hello`**, negotiated by the gateway, which serves N and N−1.
-   Mandatory before external companions exist: atomic upgrades end the moment a
-   companion runs on someone else's laptop. M2d is the cautionary example —
-   signing needed both sides, and we simply deployed both.
+1. **`version` on `hello`**, negotiated by the gateway, which serves N and N−1 —
+   **shipped 2026-07-29 (#24)**. Mandatory before external companions exist:
+   atomic upgrades end the moment a companion runs on someone else's laptop. M2d
+   is the cautionary example — signing needed both sides, and we simply deployed
+   both. It shipped a day late by that rule: `symma` reached npm in #22.
+
+   Absent means generation 0, so the companions published without the field are
+   a generation the rule already covers rather than a case to special-case, and
+   nothing is refused until the first bump. That is the point of shipping it
+   before it bites — the companion is the half we cannot retrofit, so it has to
+   learn the negotiation while every gateway still accepts it.
+
+   A gateway that will not serve a generation answers the attach `426` and stops
+   reading. The companion says which upgrade fixes it and then reconnects at the
+   _slowest_ rate rather than the fastest, inverting its usual backoff: no retry
+   schedule repairs a build, and a refusal retried every second is a laptop kept
+   busy learning nothing.
+
 2. **Owner binding** established during pairing and stored server-side.
 3. **A goodbye control** the companion sends as it exits, so the relay can tell
    "quit" from "asleep" (§3, "Staying attached") — **shipped 2026-07-29 (#21)**.

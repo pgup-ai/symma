@@ -2,6 +2,17 @@ import { isSafeId } from './ids.js';
 
 export type SendLine = (line: string) => void;
 
+/** Wire generation, bumped when a companion speaking the previous one can no
+ * longer be served correctly. */
+export const PROTOCOL_VERSION = 1;
+
+/** Whether a gateway still serves a companion of this generation: the current
+ * one and the one below (§7.1), so an upgrade never has to land atomically
+ * across laptops we don't control. Absent is generation 0 — every companion
+ * published before `version` existed is exactly that — so nothing is refused
+ * until the first bump, which is the point of shipping the field early. */
+export const servesProtocol = (version = 0): boolean => version >= PROTOCOL_VERSION - 1;
+
 export interface EndpointAgent {
   agent: string;
 }
@@ -32,6 +43,9 @@ export interface HelloControl {
   device: string;
   agents: EndpointAgent[];
   maxSessions: number;
+  /** Wire generation this companion speaks. Absent from every companion
+   * published before the field existed, which is precisely generation 0. */
+  version?: number;
   /** Sessions the companion still has live, so a reattach resumes those and
    * fails the rest (a restarted companion sends none). */
   sessions?: string[];
@@ -117,12 +131,17 @@ export function parseRelayControl(line: string): RelayControl | undefined {
           return undefined;
         sessions = raw.sessions as string[];
       }
+      // A version we can't read drops to generation 0 rather than failing the
+      // hello — the same direction an unknown refusal code drops, and the safe
+      // one, since 0 is the generation refused first.
+      const version = Number(raw.version);
       return {
         kind: 'hello',
         endpoint: raw.endpoint,
         device: raw.device,
         agents,
         maxSessions: max,
+        ...(Number.isInteger(version) && version > 0 ? { version } : {}),
         ...(sessions ? { sessions } : {}),
         ...(str(raw.publicKey) ? { publicKey: raw.publicKey } : {}),
       };

@@ -8,6 +8,7 @@ import {
   isSafeId,
   parseEnvelope,
   parseRelayControl,
+  servesProtocol,
   type AckControl,
   type RefusalCode,
   readNdjsonBody,
@@ -235,10 +236,23 @@ async function handleEndpointIngest(
   // The attachment this leg created, if any. A goodbye speaks only for its own:
   // this request can still be draining after the companion restarted.
   let attached: number | undefined;
+  // Answered while the body is still open, because a companion streams for the
+  // life of its attachment: waiting for the request to end would mean never
+  // answering. The remaining lines are then read and dropped rather than the
+  // socket torn down, so what the companion sees is the status, not a reset.
+  let outdated = false;
   const { overflow } = await readNdjsonBody(req, (line) => {
+    if (outdated) return;
     const control = parseRelayControl(line);
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
+        if (!servesProtocol(control.version)) {
+          outdated = true;
+          log(`endpoint ${id} speaks protocol ${control.version ?? 0}; refused`);
+          res.writeHead(426, { 'content-type': 'text/plain' });
+          res.end('companion too old for this gateway');
+          return;
+        }
         attached = relay.attachEndpoint(control, sendToEndpoint(id), owner);
         storeWrite(`markSeen ${id}`, store.markSeen(id));
       } else if (control.kind === 'goodbye' && attached !== undefined) {
@@ -271,7 +285,7 @@ async function handleEndpointIngest(
     const envelope = parseEnvelope(line);
     if (envelope) relay.endpointLine(id, envelope.sessionId, line);
   });
-  overflowOr(res, req, overflow);
+  if (!outdated) overflowOr(res, req, overflow);
 }
 
 // Client upstream: open pairs, frames relay, close tears down. The path sid

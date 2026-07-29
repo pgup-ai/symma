@@ -41,6 +41,7 @@ import {
   opencodeAcpSpec,
   opencodeAuthPath,
   parseRelayControl,
+  PROTOCOL_VERSION,
   publicKeyFrom,
   respondToPermissionRequest,
   signEnvelope,
@@ -405,6 +406,10 @@ let shuttingDown = false;
  * quiet leaves through the error path, and compounding its delay would make
  * every laptop that sleeps twice slower to come back the third time. */
 let attached = false;
+/** The gateway refused this build's protocol generation. Nothing this process
+ * does will fix that, so it is the one failure that reconnects at the slowest
+ * rate rather than the fastest. */
+let outdated = false;
 /** Drops the current connection epoch; set while connected. */
 let abortEpoch: (() => void) | undefined;
 
@@ -466,6 +471,7 @@ function hello(): HelloControl {
     device,
     agents: [...agents.keys()].map((agent) => ({ agent })),
     maxSessions,
+    version: PROTOCOL_VERSION,
     // Live agents this process still holds — a fresh start sends none, so the
     // relay fails any stale sessions instead of leaving them as zombies. Opens
     // still cloning count: they have no agent yet, but the relay holds them and
@@ -723,6 +729,10 @@ async function connectOnce(): Promise<void> {
     signal: epoch.signal,
   } as RequestInit)
     .then((res) => {
+      if (res.status === 426) {
+        outdated = true;
+        log('gateway no longer serves this protocol version; upgrade: npm i -g symma');
+      }
       // A non-2xx (413 overflow, 401, 5xx) means the gateway stopped reading;
       // don't keep streaming into it.
       if (!res.ok) failUp();
@@ -784,13 +794,15 @@ async function main(): Promise<void> {
   let backoff = BACKOFF_MIN_MS;
   for (;;) {
     attached = false;
+    outdated = false;
     try {
       await connectOnce();
       log('gateway stream ended; reconnecting');
     } catch (error) {
       log(`connect failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    if (attached) backoff = BACKOFF_MIN_MS;
+    if (outdated) backoff = BACKOFF_MAX_MS;
+    else if (attached) backoff = BACKOFF_MIN_MS;
     await new Promise((resolve) => setTimeout(resolve, backoff));
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
   }

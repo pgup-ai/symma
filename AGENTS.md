@@ -114,6 +114,10 @@ extraction fixes, prevented from recurring.
   canonical package, bin and launch flags — `npx` runs deprecated packages
   without a word, and the registry is what caught claude-code-acp's rename —
   then a live probe of the real CLI before the spec is written (§3's bar).
+- `PROTOCOL_VERSION` is the wire generation; a gateway serves it and the one
+  below (§7.1), and `hello` without one is generation 0. A bump refuses every
+  companion two back — laptops we do not control — so teach both sides to
+  tolerate a change before the release that requires it, never in the same one.
 - Tests: node:test + `node:assert/strict`; pin invariants, not incidental prose.
 - Prettier owns formatting. Never hand-format, and never reformat a file you did
   not otherwise change — copied files must stay byte-identical to their origin
