@@ -33,6 +33,10 @@ export interface MentionDeps {
   log: (message: string) => void;
 }
 
+/** What happened, for the log — closed, so a mistyped outcome is a type error. */
+export type MentionOutcome =
+  'opened' | 'continued' | 'adopted' | 'already handled' | 'unreadable channel';
+
 export interface Mention {
   user: string;
   channel: string;
@@ -41,7 +45,8 @@ export interface Mention {
   eventId: string;
 }
 
-/** Slack's own name for a member, so the DM reads as addressed to them. */
+/** The DM the member reads first. It states the privacy default up front, since
+ * that is the promise §5 makes and the one they have to trust. */
 const opening = (snapshot: string, omitted: number): string =>
   [
     'Picked this up from the thread. Working privately — nothing goes back to the channel unless you say so.',
@@ -51,14 +56,13 @@ const opening = (snapshot: string, omitted: number): string =>
   ].join('\n');
 
 /**
- * Returns what happened, for the log. The order is load-bearing: for a
- * conversation that already exists the turn is recorded *before* anything is
- * posted, so a redelivery is answered by silence instead of a second message.
- * A first mention has to post first — the DM root is what identifies the
- * conversation — and a redelivery of that one finds the conversation on the next
- * pass and takes the quiet path.
+ * The order is load-bearing. For a conversation that already exists the turn is
+ * recorded *before* anything is posted, so a redelivery answers with silence
+ * rather than a second message. A first mention has to post first — the DM root
+ * is what identifies the conversation — and its redelivery finds the conversation
+ * on the next pass and takes the quiet path.
  */
-export async function handleMention(mention: Mention, deps: MentionDeps): Promise<string> {
+export async function handleMention(mention: Mention, deps: MentionDeps): Promise<MentionOutcome> {
   const existing = await deps.find(mention.channel, mention.threadTs);
 
   const replies = await deps.threadReplies(mention.channel, mention.threadTs);

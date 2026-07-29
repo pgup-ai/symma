@@ -5,6 +5,17 @@
  */
 import type { ThreadMessage } from './snapshot.js';
 
+/** Carries Slack's own error code, so a caller can decide on it rather than
+ * reparse a message we formatted. */
+class SlackError extends Error {
+  constructor(
+    readonly code: string,
+    method: string,
+  ) {
+    super(`${method}: ${code}`);
+  }
+}
+
 /** Slack answers 200 with `ok: false`, so a status is never the whole answer. */
 async function call<T>(token: string, method: string, body: unknown): Promise<T> {
   const res = await fetch(`https://slack.com/api/${method}`, {
@@ -13,9 +24,9 @@ async function call<T>(token: string, method: string, body: unknown): Promise<T>
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(10_000),
   });
-  if (!res.ok) throw new Error(`${method}: http ${res.status}`);
+  if (!res.ok) throw new SlackError(`http ${res.status}`, method);
   const answer = (await res.json()) as { ok?: boolean; error?: string };
-  if (!answer.ok) throw new Error(`${method}: ${answer.error ?? 'not ok'}`);
+  if (!answer.ok) throw new SlackError(answer.error ?? 'not ok', method);
   return answer as T;
 }
 
@@ -39,9 +50,8 @@ export interface SlackApi {
   ) => Promise<{ channel: string; ts: string }>;
 }
 
-/** Errors that mean "not visible to this bot" rather than "broken": the bot is
- * not in the channel, or was never granted the scope. Anything else throws,
- * because guessing which is which is how a partial snapshot gets answered. */
+/** Slack codes that mean "not visible to this bot" rather than "broken". Anything
+ * else throws: guessing which is which is how a partial snapshot gets answered. */
 const UNREADABLE = new Set(['not_in_channel', 'channel_not_found', 'missing_scope']);
 
 export function slackApi(token: string): SlackApi {
@@ -69,7 +79,7 @@ export function slackApi(token: string): SlackApi {
               : {}),
           }));
       } catch (error) {
-        if (UNREADABLE.has(String(error).replace(/^.*: /, ''))) return undefined;
+        if (error instanceof SlackError && UNREADABLE.has(error.code)) return undefined;
         throw error;
       }
     },

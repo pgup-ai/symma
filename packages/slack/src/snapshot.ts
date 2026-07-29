@@ -1,8 +1,7 @@
 /**
- * The context a mention carries into its conversation (§4).
- *
- * Pure, because the budget arithmetic and the omission accounting are the parts
- * worth testing, and neither needs Slack.
+ * The context a mention carries into its conversation (§4). Pure: the budget
+ * arithmetic and the omission accounting are what is worth testing, and neither
+ * needs Slack.
  */
 
 export interface ThreadMessage {
