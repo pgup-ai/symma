@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -86,7 +86,13 @@ describe('login service', () => {
 
     // A file it cannot write loses the member a supervisor, not the pairing
     // that just succeeded — so this reports and returns.
-    const blocked = installLoginService('darwin', '/proc/nope', COMMAND);
+    //
+    // Blocked with a file where the directory has to go, which is ENOTDIR
+    // everywhere. Naming an unwritable system path instead is EPERM on macOS
+    // and, under /proc on Linux, a recursive mkdir that never returns at all.
+    const blocker = join(mkdtempSync(join(tmpdir(), 'symma-service-')), 'not-a-directory');
+    writeFileSync(blocker, '');
+    const blocked = installLoginService('darwin', blocker, COMMAND);
     assert.equal(blocked.length, 1);
     assert.match(blocked[0]!, /Could not write/);
   });
