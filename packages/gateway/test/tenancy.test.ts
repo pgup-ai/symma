@@ -57,6 +57,11 @@ before(
           SYMMA_GATEWAY_DATABASE_URL: url,
           // Production waits 30s to drop a revoked leg; a test cannot.
           SYMMA_GATEWAY_REVOCATION_MS: '150',
+          // Short enough that the throttle test's burst does not then refuse
+          // every later pair in this file — they all arrive from one address.
+          SYMMA_GATEWAY_PAIR_WINDOW_MS: '300',
+          // Production gives a pair body 5s; the stalled-body test cannot wait.
+          SYMMA_GATEWAY_PAIR_BODY_MS: '300',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
       },
@@ -131,6 +136,13 @@ const onceOnStream = async (
  * pairing row means naming its hash, and the scheme changing under a stored one
  * is a breaking change these tests should fail on. */
 const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
+
+const pair = (body: unknown): Promise<Response> =>
+  fetch(`${base}/api/pair`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 
 const as = (token: string, path: string, init?: RequestInit): Promise<Response> =>
   fetch(`${base}${path}`, {
@@ -869,6 +881,108 @@ describe('tenancy', () => {
     }
   });
 
+  it('pairs a code into an endpoint only its own member can see', async () => {
+    const url = pg.getConnectionUri();
+    const tam = await provision(url, { team: 'pairhttp', slackUser: 'tam', endpoint: 'tam-old' });
+    const uma = await provision(url, { team: 'pairhttp', slackUser: 'uma', endpoint: 'uma-old' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    let detach: (() => void) | undefined;
+    try {
+      const res = await pair({
+        code: await store.mintPairingCode(tam.owner),
+        device: "Tam's laptop",
+        agents: ['kilo'],
+      });
+      assert.equal(res.status, 200);
+      const paired = (await res.json()) as { endpoint: string; token: string };
+      // Assigned, not asked for: the request named no id, so there was none to
+      // point at somebody else's endpoint.
+      assert.match(paired.endpoint, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+
+      const named = await pool.query(`SELECT device_name FROM endpoints WHERE id = $1`, [
+        paired.endpoint,
+      ]);
+      assert.equal(named.rows[0].device_name, "Tam's laptop");
+
+      // The token is the proof the pairing worked — it has to attach.
+      detach = await attach(paired.token, paired.endpoint);
+      await waitFor(async () => {
+        const listed = (await (await as(tam.clientToken, '/api/endpoints')).json()) as {
+          endpoint: string;
+        }[];
+        return listed.find((e) => e.endpoint === paired.endpoint);
+      }, 'tam sees the endpoint she paired');
+      // And it is hers, not the workspace's.
+      assert.deepEqual(await (await as(uma.clientToken, '/api/endpoints')).json(), []);
+    } finally {
+      detach?.();
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('refuses a spent code, and a companion with nothing to run', async () => {
+    const url = pg.getConnectionUri();
+    const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const code = await store.mintPairingCode(vic.owner);
+      // §2 refuses this before spending anything, so the member can log an
+      // agent in and use the same code rather than asking for another.
+      const empty = await pair({ code, agents: [] });
+      assert.equal(empty.status, 400);
+      assert.deepEqual(await empty.json(), { error: 'agents' });
+
+      assert.equal((await pair({ code, agents: ['kilo'] })).status, 200);
+      const again = await pair({ code, agents: ['kilo'] });
+      assert.equal(again.status, 401);
+      assert.deepEqual(await again.json(), { error: 'code' });
+      // The refused reuse left no second endpoint behind.
+      const owned = await pool.query(`SELECT 1 FROM endpoints WHERE user_id = $1`, [vic.owner]);
+      assert.equal(owned.rowCount, 2, 'the provisioned one, plus exactly one paired');
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('ends a pair body that never arrives', async () => {
+    // The only unauthenticated body on a server that runs with requestTimeout
+    // off, so nothing but this deadline would ever close it — and a byte cap
+    // alone is no help to a client sending under it, slowly, forever.
+    const stalled = fetch(`${base}/api/pair`, {
+      method: 'POST',
+      body: new ReadableStream({
+        start: (c: ReadableStreamDefaultController<Uint8Array>) =>
+          c.enqueue(new TextEncoder().encode('{"code":')),
+      }),
+      duplex: 'half',
+    } as RequestInit).then(
+      () => 'answered',
+      () => 'closed',
+    );
+    const ended = await Promise.race([
+      stalled,
+      new Promise((resolve) => setTimeout(() => resolve('still open'), 3000)),
+    ]);
+    assert.equal(ended, 'closed');
+  });
+
+  it('throttles pairing by where it came from', async () => {
+    // No token to scope it by, so the limit is on the caller's address.
+    for (let i = 0; i < 20; i++) {
+      const res = await pair({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ', agents: ['kilo'] });
+      if (res.status === 429) {
+        assert.deepEqual(await res.json(), { error: 'throttled' });
+        return;
+      }
+      assert.equal(res.status, 401, 'an unknown code before the limit');
+    }
+    assert.fail('never throttled');
+  });
+
   it('spends a pairing code once, and takes the retyping a member will do', async () => {
     const url = pg.getConnectionUri();
     const nel = await provision(url, { team: 'pair', slackUser: 'nel', endpoint: 'nel-box' });
@@ -957,6 +1071,19 @@ describe('tenancy', () => {
       // off a stale list: minting takes the member row lock that deactivation
       // takes, so it cannot land a code behind a cleanup that already ran.
       await assert.rejects(store.mintPairingCode(sev.owner), /no active member/);
+      // Nor an endpoint. Deactivation deletes them, and claiming takes the same
+      // member lock, so a pair in flight cannot leave one behind it.
+      assert.equal(await store.claimEndpoint(sev.owner, 'late laptop'), undefined);
+
+      // And an endpoint token stops authenticating the moment its member is
+      // deactivated, whether or not the row was cleaned up. Planted, because
+      // with the lock in place a claim cannot outrun the cleanup that would.
+      await pool.query(`UPDATE users SET deactivated_at = NULL WHERE id = $1`, [sev.owner]);
+      const late = await store.claimEndpoint(sev.owner, 'late laptop');
+      assert.ok(late);
+      assert.equal((await store.endpointForToken(late.token))?.endpoint, late.endpoint);
+      await pool.query(`UPDATE users SET deactivated_at = now() WHERE id = $1`, [sev.owner]);
+      assert.equal(await store.endpointForToken(late.token), undefined);
       const left = await pool.query(`SELECT 1 FROM pairings WHERE user_id = $1`, [sev.owner]);
       assert.equal(left.rowCount, 0, 'a refused mint left a row behind');
 

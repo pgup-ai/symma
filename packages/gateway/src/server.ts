@@ -564,6 +564,82 @@ function ownsSession(owner: Owner, runId: string, sessionId: string): Promise<bo
   return store.sessionBelongsTo(owner, runId, sessionId);
 }
 
+/**
+ * Only a configured proxy may name the caller, and only by the last hop it
+ * appended: anything earlier in X-Forwarded-For is the caller's to forge, so
+ * honouring it from any peer would look like a limit while a fresh value per
+ * request walked around it. Matched verbatim, so mind that an IPv4 peer on a
+ * dual-stack socket is `::ffff:127.0.0.1` — a value that never matches costs
+ * reach, not safety.
+ */
+const trustedProxy = process.env.SYMMA_GATEWAY_TRUSTED_PROXY?.trim() || '';
+function callerIp(req: IncomingMessage): string {
+  const peer = req.socket.remoteAddress ?? '';
+  if (!trustedProxy || peer !== trustedProxy) return peer;
+  const forwarded = req.headers['x-forwarded-for'];
+  const hops = (Array.isArray(forwarded) ? forwarded.join(',') : (forwarded ?? '')).split(',');
+  return hops[hops.length - 1]?.trim() || peer;
+}
+
+// Abuse control, not the guarantee: guessing a code is answered by its 80 bits
+// (§2), and this bounds the database work one caller can ask for.
+const PAIR_WINDOW_MS = Number(process.env.SYMMA_GATEWAY_PAIR_WINDOW_MS) || 60_000;
+const PAIR_TRIES = 10;
+const pairTries = new Map<string, { count: number; resetAt: number }>();
+
+function pairThrottled(ip: string): boolean {
+  const now = Date.now();
+  const seen = pairTries.get(ip);
+  if (!seen || seen.resetAt <= now) {
+    pairTries.set(ip, { count: 1, resetAt: now + PAIR_WINDOW_MS });
+    return false;
+  }
+  seen.count += 1;
+  return seen.count > PAIR_TRIES;
+}
+// Or the map grows with every address that ever asked.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, seen] of pairTries) if (seen.resetAt <= now) pairTries.delete(ip);
+}, PAIR_WINDOW_MS).unref();
+
+/** Whole-body JSON, for the one route that takes an object and not a stream.
+ * Undefined for oversized, unparseable and too slow alike; one answer covers
+ * them all.
+ *
+ * The deadline is not optional here. `requestTimeout` is 0 for the ingest
+ * streams that run a whole review, so this is the only unauthenticated body on
+ * the server and nothing else would ever end it — a byte cap alone lets a
+ * client hold a connection by sending under it, slowly, forever. */
+const MAX_PAIR_BYTES = 4096;
+const PAIR_BODY_MS = Number(process.env.SYMMA_GATEWAY_PAIR_BODY_MS) || 5_000;
+async function readPairBody(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
+  // The response, not the request: destroying it takes the socket with it and
+  // marks `res.destroyed` in the same tick, which is what sendJson reads.
+  // `req.destroyed` cannot say this — a request that arrived whole and was read
+  // to the end is destroyed too, by autoDestroy.
+  const deadline = setTimeout(() => res.destroy(), PAIR_BODY_MS);
+  try {
+    let body = '';
+    req.setEncoding('utf8');
+    for await (const chunk of req as AsyncIterable<string>) {
+      body += chunk;
+      if (Buffer.byteLength(body) > MAX_PAIR_BYTES) return undefined;
+    }
+    return JSON.parse(body);
+  } catch {
+    return undefined; // destroyed by the deadline, or not JSON
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
+function sendJson(res: ServerResponse, status: number, value: unknown): void {
+  if (res.destroyed) return; // the pair deadline took the socket
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(value));
+}
+
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method === 'GET' && url.pathname === '/healthz') {
@@ -598,6 +674,46 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
     return;
+  }
+  // Unauthenticated by design: the code is the credential, and the member has
+  // no token until this call gives them one.
+  if (req.method === 'POST' && url.pathname === '/api/pair') {
+    // Nobody to pair without a store: M2's single-tenant gateway has one member
+    // and they configured its token themselves. JSON like the rest of this
+    // route, since what reads it is a program.
+    if (!databaseUrl) return sendJson(res, 404, { error: 'unsupported' });
+    if (pairThrottled(callerIp(req))) return sendJson(res, 429, { error: 'throttled' });
+    const body = await readPairBody(req, res);
+    if (typeof body !== 'object' || body === null) return sendJson(res, 400, { error: 'request' });
+    const { code, device, agents } = body as {
+      code?: unknown;
+      device?: unknown;
+      agents?: unknown;
+    };
+    if (typeof code !== 'string') return sendJson(res, 400, { error: 'request' });
+    // §2: never attach an endpoint with no agents. `length` first — every() on
+    // an empty array is true, which is the whole case the rule exists for.
+    if (!Array.isArray(agents) || agents.length === 0)
+      return sendJson(res, 400, { error: 'agents' });
+    if (!agents.every((a) => typeof a === 'string' && a))
+      return sendJson(res, 400, { error: 'request' });
+    const spent = await store.redeemPairingCode(code);
+    if (!spent.ok) {
+      log(`pair refused: ${spent.why}`);
+      return sendJson(res, 401, { error: 'code' });
+    }
+    // Redeemed first on purpose. The other order leaves an endpoint and a live
+    // token belonging to nobody when the code turns out to be spent.
+    const claimed = await store.claimEndpoint(
+      spent.owner,
+      typeof device === 'string' ? device : '',
+    );
+    // Deactivated between the redeem and here. Their code is spent and their
+    // membership is gone, so this is the same answer a code that never worked
+    // gets — not a 500, which would say retry.
+    if (!claimed) return sendJson(res, 401, { error: 'code' });
+    log(`paired endpoint ${claimed.endpoint}`);
+    return sendJson(res, 200, claimed);
   }
   const token = clientToken(req, url);
   const owner = await store.ownerForClientToken(token);

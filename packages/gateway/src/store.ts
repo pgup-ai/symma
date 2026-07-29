@@ -30,6 +30,19 @@ export interface Store {
   mintPairingCode(owner: Owner): Promise<string>;
   /** Spends a code. Two redeems of one code cannot both come back `ok`. */
   redeemPairingCode(code: string): Promise<PairingResult>;
+  /** The other half of pairing: an endpoint for this member and the token it
+   * presents, both returned once. The id is assigned, not taken from an
+   * unauthenticated request body, where it would be a valid code away from
+   * someone else's endpoint (§2).
+   *
+   * Undefined if the member is gone by the time this runs. Unlike
+   * `mintPairingCode`, whose caller names a member it should know, this one
+   * just watched a redeem find them alive — so their absence is a race to
+   * answer, not a caller's mistake to throw at. A store failure still throws. */
+  claimEndpoint(
+    owner: Owner,
+    device: string,
+  ): Promise<{ endpoint: string; token: string } | undefined>;
   /** The endpoint a companion token speaks for, and who owns it. */
   endpointForToken(token: string): Promise<{ endpoint: string; owner: Owner } | undefined>;
   /** The authorization question itself, not the owner to compare outside: with
@@ -161,11 +174,36 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       ]);
       return { ok: false, why: seen ? 'spent' : 'unknown' };
     },
+    async claimEndpoint(owner, device) {
+      const endpoint = randomUUID();
+      const token = randomUUID();
+      // Same member lock as mintPairingCode, for the same reason: deactivation
+      // deletes endpoints, and unlocked this could land one behind that.
+      const { rowCount } = await pool.query(
+        `WITH member AS (
+           SELECT id FROM users WHERE id = $2 AND deactivated_at IS NULL FOR UPDATE
+         ), claimed AS (
+           INSERT INTO endpoints (id, user_id, device_name)
+           SELECT $1, id, $3 FROM member
+           RETURNING id
+         )
+         INSERT INTO tokens (id, subject_kind, subject_id, hash)
+         SELECT $4, 'endpoint', id, $5 FROM claimed`,
+        [endpoint, owner, device, randomUUID(), hashToken(token)],
+      );
+      return rowCount ? { endpoint, token } : undefined;
+    },
     async endpointForToken(token) {
       const row = await one<{ subject_id: string; user_id: string }>(
+        // Joined through to the member, so deactivation means no endpoint auth
+        // by construction rather than by every path that sets deactivated_at
+        // remembering to delete the endpoint too. Same shape as the revoked_at
+        // check beside it.
         `SELECT t.subject_id, e.user_id FROM tokens t
            JOIN endpoints e ON e.id = t.subject_id
+           JOIN users u ON u.id = e.user_id
           WHERE t.hash = $1 AND t.subject_kind = 'endpoint' AND t.revoked_at IS NULL
+            AND u.deactivated_at IS NULL
             AND (t.expires_at IS NULL OR t.expires_at > now())`,
         [hashToken(token)],
       );
@@ -319,7 +357,21 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        // Same lock, same reason as deleteWorkspace.
+        // The member first, and in a statement of its own. It is the row
+        // claimEndpoint and mintPairingCode lock, so taking it here is what
+        // orders them against this — and taking it *separately* is what makes
+        // the statements below re-read: each gets its own snapshot at read
+        // committed, so a claim that committed while this waited is visible to
+        // them. Locked inside the cleanup instead, that claim would commit
+        // behind its snapshot and keep an endpoint and a live token.
+        await client.query(
+          `SELECT u.id FROM users u JOIN workspaces w ON w.id = u.workspace_id
+            WHERE w.slack_team_id = $1 AND u.slack_user_id = $2
+            FOR UPDATE`,
+          [slackTeamId, slackUserId],
+        );
+        // Then the endpoints, same reason as deleteWorkspace: an insert into
+        // sessions takes a key-share lock on its endpoint.
         await client.query(
           `SELECT e.id FROM endpoints e
              JOIN users u ON u.id = e.user_id
@@ -512,6 +564,7 @@ export function localStore(
       ),
     deleteWorkspace: needsDatabase,
     deactivateUser: needsDatabase,
+    claimEndpoint: needsDatabase,
     // One member, holding a token they configured: nobody to introduce.
     mintPairingCode: needsDatabase,
     redeemPairingCode: needsDatabase,
