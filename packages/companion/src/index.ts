@@ -320,7 +320,7 @@ function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | str
       // logged in has still probably never installed it, so the generic
       // not-on-PATH line would name a binary they never chose.
       if (!resolveBin(spec.bin))
-        return `claude: adapter missing (npm i -g @zed-industries/claude-code-acp)`;
+        return 'claude: adapter missing (npm i -g @zed-industries/claude-code-acp)';
       return { name: entry, spec };
     }
     case 'gemini': {

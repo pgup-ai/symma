@@ -665,9 +665,13 @@ describe('acp', () => {
     assert.equal(gemini.requirePlanMode, undefined, 'gemini has no agent-side layer (DM tier)');
     const savedGemini = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = 'ambient';
+    const geminiLeakPrefix = 'symma-gemini-acp-';
     const geminiEnv = gemini.env('gemini/default');
     try {
       const home = geminiEnv.env.HOME as string;
+      // Anchors the leak check below — against a stale prefix both its
+      // snapshots are empty and it passes without observing anything.
+      assert.ok(home.includes(geminiLeakPrefix));
       assert.notEqual(home, process.env.HOME);
       assert.equal(readFileSync(geminiOauthPath(home), 'utf8'), '{"access_token":"t"}');
       assert.ok(existsSync(join(home, '.gemini', 'google_accounts.json')));
@@ -684,7 +688,6 @@ describe('acp', () => {
     rmSync(geminiHome, { recursive: true, force: true });
     // A machine with no OAuth material cannot spawn, and the refusal reclaims
     // its temp dir rather than leaking one per attempt.
-    const geminiLeakPrefix = 'symma-gemini-acp-';
     const before = readdirSync(tmpdir()).filter((entry) => entry.startsWith(geminiLeakPrefix));
     const bareHome = mkdtempSync(join(tmpdir(), 'symma-test-gemini-bare-'));
     try {

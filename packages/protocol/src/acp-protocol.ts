@@ -442,7 +442,7 @@ export async function driveAcpSession(
   if (options.configOptionModelIds?.length) {
     await selectModelConfigOption(conn, sessionId, session, options);
   } else if (options.model) {
-    await selectSessionModel(conn, sessionId, session, options);
+    await selectSessionModel(conn, sessionId, session, options, options.model);
   }
   const modes = session.modes as
     { currentModeId?: string; availableModes?: { id?: string }[] } | undefined;
@@ -617,8 +617,9 @@ async function selectSessionModel(
   sessionId: string,
   session: Record<string, unknown>,
   options: AcpSessionOptions,
+  model: string,
 ): Promise<void> {
-  const { modelID } = parseModelName(options.model ?? '');
+  const { modelID } = parseModelName(model);
   if (modelID === 'default') return;
   const models = session.models as
     { availableModels?: { modelId?: string; name?: string }[] } | undefined;
@@ -765,11 +766,9 @@ export function claudeAcpSpec(): AcpAgentSpec {
     bin: CLAUDE_ACP_BIN,
     args: () => [],
     // Ambient identity on purpose: the OAuth lives in the macOS Keychain, so
-    // there is no credential file to copy into a temp HOME — the adapter runs
-    // as this machine's logged-in account, and ANTHROPIC_API_KEY stays because
-    // it is a legitimate way to be that account. Model rides session/set_model
-    // (the adapter advertises `models`; ANTHROPIC_MODEL demonstrably does not
-    // reach the session's readout).
+    // there is no credential file to copy into a temp HOME, and
+    // ANTHROPIC_API_KEY stays — it is a way to be the account, not a shadow.
+    // Model rides session/set_model; env cannot carry it (live-checked).
     env: () => {
       const env: NodeJS.ProcessEnv = { ...process.env };
       // The CLI refuses to nest while CLAUDECODE is set (live-hit: a companion
@@ -802,7 +801,7 @@ export function geminiAcpSpec(geminiHome = process.env.HOME || homedir()): AcpAg
       try {
         const dest = join(dir, '.gemini');
         mkdirSync(dest, { recursive: true, mode: 0o700 });
-        copyFileSync(geminiOauthPath(geminiHome), join(dest, 'oauth_creds.json'));
+        copyFileSync(geminiOauthPath(geminiHome), geminiOauthPath(dir));
         for (const extra of ['google_accounts.json', 'installation_id', 'google_account_id']) {
           const src = join(geminiHome, '.gemini', extra);
           if (existsSync(src)) copyFileSync(src, join(dest, extra));
