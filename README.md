@@ -27,20 +27,35 @@ bot and the tenancy model that M3 needs are not.
 | `@symma/protocol`  | ACP framing, JSON-RPC peer, session driver, agent specs, envelope signing, relay control types | [on npm](https://www.npmjs.com/package/@symma/protocol) |
 | `@symma/client`    | drive a prompt against a local agent, or a remote one through a gateway                        | [on npm](https://www.npmjs.com/package/@symma/client)   |
 | `@symma/gateway`   | relay, journal store, viewer, tenancy                                                          | private — ships as an image                             |
-| `@symma/companion` | attach loop, agent detection, local spawn/lifecycle, self-update                               | private — installs as `symma`                           |
+| `@symma/companion` | attach loop, agent detection, pairing, local spawn/lifecycle, self-update                      | private — installs as `symma`                           |
 | `@symma/slack`     | the Slack bot                                                                                  | planned                                                 |
 
 `symma` (unscoped) is the companion's install path.
 
 ## Supported agents
 
-The companion detects every built-in at start — logged in on the machine it
-attaches, and pairing names what it skipped and why:
+The companion detects every built-in at start: whichever are logged in on the
+machine attach, and pairing names what it skipped and why.
 
-`kilo` · `codex` · `devin` · `cursor` · `claude` (via the ACP registry's
-`claude-agent-acp`) · `gemini` · `opencode`
+| agent      | launched as                                | read-only layers              |
+| ---------- | ------------------------------------------ | ----------------------------- |
+| `claude`   | `claude-agent-acp` (the CLI speaks no ACP) | permission floor + plan mode  |
+| `codex`    | `codex-acp`                                | permission floor + OS sandbox |
+| `cursor`   | `cursor-agent acp`                         | permission floor + plan mode  |
+| `devin`    | `devin acp`                                | permission floor + plan mode  |
+| `gemini`   | `gemini --acp`                             | permission floor only         |
+| `kilo`     | `kilo acp`                                 | permission floor + plan mode  |
+| `opencode` | `opencode acp`                             | permission floor + plan mode  |
 
-Any other ACP binary runs untiered via `SYMMA_COMPANION_AGENTS=name=cmd args`.
+Anything else that speaks ACP runs today via
+`SYMMA_COMPANION_AGENTS=name=cmd args`, with the permission floor as its only
+read-only layer. That is also what the gemini row means: it offers no read-only
+agent of its own, so it is fine where the caller is the machine's owner and not
+for a review path that depends on the floor being backed
+([design §3](docs/design/m3-slack-companion.md)).
+
+Launch shapes track the
+[ACP registry](https://github.com/agentclientprotocol/registry).
 
 ## Design
 
