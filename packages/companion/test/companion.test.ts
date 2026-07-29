@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateSigningKeys, verifyEnvelope, type ObserverEnvelope } from '@symma/protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
@@ -51,6 +51,20 @@ const writePairing = (home: string, contents: string): void => {
   const dir = join(home, '.local', 'share', 'symma-companion');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'pairing.json'), contents);
+};
+
+/** `settled`'s value, or 'timeout'. The timer is cleared either way, so a race
+ * the fast path wins does not then hold the loop open until it fires. */
+const within = async <T>(ms: number, settled: Promise<T>): Promise<T | 'timeout'> => {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    return await Promise.race([settled, late]);
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Promise<T> {
@@ -261,6 +275,138 @@ describe('relay e2e', () => {
     }
   });
 
+  it('gives up on a gateway that accepts and then says nothing', async () => {
+    // Without a deadline this is a command that never returns and never fails.
+    const stub = createServer(() => {
+      /* accepted, and deliberately never answered */
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    let pair: ChildProcess | undefined;
+    try {
+      const child = (pair = spawn(
+        process.execPath,
+        [
+          '--conditions=symma-source',
+          '--import',
+          'tsx',
+          'packages/companion/src/index.ts',
+          'pair',
+          'BPB1-9W92-HTZJ-RA19',
+        ],
+        {
+          env: {
+            ...process.env,
+            HOME: home,
+            SYMMA_COMPANION_GATEWAY: `http://127.0.0.1:${port}`,
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+            SYMMA_COMPANION_PAIR_TIMEOUT_MS: '300',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      ));
+      let said = '';
+      child.stderr?.on('data', (c) => (said += String(c)));
+      // Raced, because "it fails eventually" is not the property: undici's own
+      // header timeout ends this after five minutes with no deadline at all,
+      // which is the hang the deadline exists to prevent.
+      const ended = await within(5_000, new Promise((resolve) => child.on('close', resolve)));
+      assert.equal(ended, 1, `expected a prompt refusal, got ${String(ended)} — ${said}`);
+      assert.match(said, /Could not reach/);
+    } finally {
+      pair?.kill('SIGKILL');
+      stub.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('says the code is spent when it cannot save what it got', async () => {
+    // A directory where the file goes: rename fails, deterministically, after
+    // the gateway has already consumed the code.
+    const stub = createServer((req, res) => {
+      req.resume();
+      req.on('end', () =>
+        res
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ endpoint: 'e1', token: 't1' })),
+      );
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    const dir = join(home, '.local', 'share', 'symma-companion');
+    mkdirSync(join(dir, 'pairing.json'), { recursive: true });
+    try {
+      const pair = spawn(
+        process.execPath,
+        [
+          '--conditions=symma-source',
+          '--import',
+          'tsx',
+          'packages/companion/src/index.ts',
+          'pair',
+          'BPB1-9W92-HTZJ-RA19',
+        ],
+        {
+          env: {
+            ...process.env,
+            HOME: home,
+            SYMMA_COMPANION_GATEWAY: `http://127.0.0.1:${port}`,
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let said = '';
+      pair.stderr?.on('data', (c) => (said += String(c)));
+      assert.equal(await new Promise((resolve) => pair.on('close', resolve)), 1, said);
+      assert.match(said, /could not save it/);
+      assert.match(said, /code is spent/);
+      // And took the staged file with it, rather than leaving a token under a
+      // name nothing will ever read.
+      assert.deepEqual(
+        readdirSync(dir).filter((entry) => entry.startsWith('pairing.json.')),
+        [],
+      );
+    } finally {
+      stub.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('will not pair a machine with nothing to run', async () => {
+    // §2: never attach an endpoint with zero agents. Refused here, before a
+    // code is spent, and the reasons are the copy that tells them what to do.
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    try {
+      const pair = spawn(
+        process.execPath,
+        [
+          '--conditions=symma-source',
+          '--import',
+          'tsx',
+          'packages/companion/src/index.ts',
+          'pair',
+          'BPB1-9W92-HTZJ-RA19',
+        ],
+        // No gateway either: it must refuse without reaching for one.
+        { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let said = '';
+      pair.stdout?.on('data', (c) => (said += String(c)));
+      pair.stderr?.on('data', (c) => (said += String(c)));
+      assert.equal(await new Promise((resolve) => pair.on('close', resolve)), 1);
+      assert.match(said, /Nothing to connect/);
+      assert.match(said, /kilo: no auth/);
+      // Nothing persisted at all — not the pairing, and not the signing key,
+      // which a refused pair has no use for.
+      assert.equal(existsSync(join(home, '.local', 'share', 'symma-companion')), false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('takes each field from the file or a variable, and says when it took none', async () => {
     const attaches: { url: string; auth: string }[] = [];
     let ingested = '';
@@ -374,7 +520,7 @@ describe('relay e2e', () => {
         let out = '';
         companion.stdout?.on('data', (c) => (out += String(c)));
         companion.stderr?.on('data', (c) => (out += String(c)));
-        const code = await new Promise((resolve) => companion.on('exit', resolve));
+        const code = await new Promise((resolve) => companion.on('close', resolve));
         assert.equal(code, 1);
         assert.match(out, /Not paired\. Run `symma pair <CODE>`/);
         // And says why, so nobody re-pairs against a file that is sitting there.

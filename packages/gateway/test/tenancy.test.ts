@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -21,6 +21,20 @@ let base: string;
 let dataDir: string;
 let alice: Awaited<ReturnType<typeof provision>>;
 let bob: Awaited<ReturnType<typeof provision>>;
+
+/** `settled`'s value, or 'timeout'. The timer is cleared either way, so a race
+ * the fast path wins does not then hold the loop open until it fires. */
+const within = async <T>(ms: number, settled: Promise<T>): Promise<T | 'timeout'> => {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  try {
+    return await Promise.race([settled, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
 
 const waitFor = async <T>(probe: () => Promise<T | undefined>, what: string): Promise<T> => {
   for (let i = 0; i < 100; i++) {
@@ -796,14 +810,14 @@ describe('tenancy', () => {
 
     const legs = new AbortController();
     /** True if the leg closed within `ms`, false if it is still serving. */
-    const closes = (leg: Promise<unknown>, ms: number): Promise<boolean> =>
-      Promise.race([
+    const closes = async (leg: Promise<unknown>, ms: number): Promise<boolean> =>
+      (await within(
+        ms,
         leg.then(
           () => true,
           () => true,
         ),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
-      ]);
+      )) === true;
     const drain = (res: Response): Promise<unknown> => res.body!.pipeTo(new WritableStream());
     try {
       // A `hello` and then a body that never ends: the already-authenticated
@@ -877,6 +891,78 @@ describe('tenancy', () => {
         owner: second.owner,
       });
     } finally {
+      await store.close();
+    }
+  });
+
+  it('pairs a fresh machine from one command, and it stays paired', async () => {
+    // M3b's bar. Nothing is configured on this machine but a code.
+    const url = pg.getConnectionUri();
+    const wen = await provision(url, { team: 'paire2e', slackUser: 'wen', endpoint: 'wen-old' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const home = mkdtempSync(join(tmpdir(), 'symma-pair-home-'));
+    let companion: ChildProcess | undefined;
+    try {
+      const code = await store.mintPairingCode(wen.owner);
+      const env = {
+        ...process.env,
+        HOME: home,
+        SYMMA_COMPANION_GATEWAY: base,
+        SYMMA_COMPANION_DEVICE: "Wen's laptop",
+        SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+      };
+      const runCompanion = (...args: string[]): ChildProcess =>
+        spawn(
+          process.execPath,
+          [
+            '--conditions=symma-source',
+            '--import',
+            'tsx',
+            'packages/companion/src/index.ts',
+            ...args,
+          ],
+          { env, stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+      const savedAt = join(home, '.local', 'share', 'symma-companion', 'pairing.json');
+      const pair = runCompanion('pair', code);
+      let said = '';
+      pair.stdout?.on('data', (c: Buffer) => (said += String(c)));
+      pair.stderr?.on('data', (c: Buffer) => (said += String(c)));
+      assert.equal(await new Promise((r) => pair.on('close', r)), 0, said);
+      assert.match(said, /✅ Connected — Wen's laptop · probe/);
+
+      // The identity came back from the gateway; the request never named one.
+      const saved = JSON.parse(readFileSync(savedAt, 'utf8')) as {
+        gateway: string;
+        endpoint: string;
+        token: string;
+        device: string;
+      };
+      assert.match(saved.endpoint, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+      assert.equal(saved.gateway, base);
+      assert.equal(saved.device, "Wen's laptop");
+
+      // And a plain start now attaches on it, with nothing else configured.
+      companion = runCompanion();
+      await waitFor(async () => {
+        const listed = (await (await as(wen.clientToken, '/api/endpoints')).json()) as {
+          endpoint: string;
+        }[];
+        return listed.find((e) => e.endpoint === saved.endpoint);
+      }, `the paired endpoint attaches (${said})`);
+
+      // Single-use reaches this far too: the same code cannot pair twice.
+      const again = runCompanion('pair', code);
+      let complaint = '';
+      again.stderr?.on('data', (c: Buffer) => (complaint += String(c)));
+      assert.equal(await new Promise((r) => again.on('close', r)), 1);
+      assert.match(complaint, /expired or been used/);
+      // And left the working pairing alone: a stale code is the likeliest way
+      // here, and losing the file for it would unpair a machine that was fine.
+      assert.deepEqual(JSON.parse(readFileSync(savedAt, 'utf8')), saved);
+    } finally {
+      companion?.kill('SIGKILL');
+      rmSync(home, { recursive: true, force: true });
       await store.close();
     }
   });
@@ -963,11 +1049,7 @@ describe('tenancy', () => {
       () => 'answered',
       () => 'closed',
     );
-    const ended = await Promise.race([
-      stalled,
-      new Promise((resolve) => setTimeout(() => resolve('still open'), 3000)),
-    ]);
-    assert.equal(ended, 'closed');
+    assert.equal(await within(3000, stalled), 'closed');
   });
 
   it('throttles pairing by where it came from', async () => {
