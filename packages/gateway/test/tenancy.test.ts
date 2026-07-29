@@ -103,6 +103,13 @@ after(async () => {
   await pg?.stop();
 });
 
+/** The invariant a write broke, by name — the message beside it is Postgres
+ * prose a version can reword, and `duplicate key` would match any of them. */
+const broke = (constraint: string) => (error: unknown) => {
+  assert.equal((error as { constraint?: string }).constraint, constraint);
+  return true;
+};
+
 /** Backdates a session so retention has something old to find. */
 const ageSession = async (url: string, sessionId: string, days: number): Promise<void> => {
   const pool = new Pool({ connectionString: url });
@@ -1307,6 +1314,142 @@ describe('tenancy', () => {
         [{ ok: true, owner: rai.owner }],
       );
     } finally {
+      await store.close();
+    }
+  });
+
+  it('keys a conversation to its member and thread, not to a session', async () => {
+    const url = pg.getConnectionUri();
+    const tia = await provision(url, { team: 'conv', slackUser: 'tia', endpoint: 'tia-mac' });
+    const uzo = await provision(url, { team: 'conv', slackUser: 'uzo', endpoint: 'uzo-mac' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    const open = (id: string, owner: string, endpoint: string, dm: string): Promise<unknown> =>
+      pool.query(
+        `INSERT INTO conversations (id, user_id, dm_channel_id, root_thread_ts,
+                                   source_channel_id, source_thread_ts, endpoint_id, agent)
+         VALUES ($1, $2, $3, '111.0', 'C-incidents', '999.0', $4, 'kilo')`,
+        [id, owner, dm, endpoint],
+      );
+    try {
+      await open('conv-tia', tia.owner, 'tia-mac', 'D-tia');
+
+      // A redelivered mention must find the conversation it already made. The
+      // thread is the identity, so the second insert has nowhere to land.
+      await assert.rejects(
+        open('conv-tia-again', tia.owner, 'tia-mac', 'D-tia'),
+        broke('conversations_identity'),
+      );
+
+      // Two members on one DM channel id is contrived — Slack gives each their
+      // own — and that is the point: it leaves `user_id` as the only thing
+      // separating them, so §4's rule that each gets a private conversation
+      // from a shared thread is a constraint here rather than a claim.
+      await open('conv-uzo', uzo.owner, 'uzo-mac', 'D-tia');
+
+      // Existence is not ownership: the endpoint has to be this member's, or a
+      // conversation could drive a machine belonging to someone else.
+      await assert.rejects(
+        open('conv-theft', tia.owner, 'uzo-mac', 'D-theft'),
+        broke('conversations_endpoint_is_owned'),
+      );
+
+      // Unpairing takes the machine, not the record of what was asked of it.
+      await pool.query(`DELETE FROM endpoints WHERE id = 'tia-mac'`);
+      const orphan = await pool.query(
+        `SELECT endpoint_id FROM conversations WHERE id = 'conv-tia'`,
+      );
+      assert.equal(orphan.rows[0].endpoint_id, null);
+
+      // Removing the member takes theirs, and only theirs.
+      await pool.query(`DELETE FROM users WHERE id = $1`, [tia.owner]);
+      const left = await pool.query(`SELECT id FROM conversations ORDER BY id`);
+      assert.deepEqual(
+        left.rows.map((r: { id: string }) => r.id),
+        ['conv-uzo'],
+      );
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('refuses a second turn for one slack event, and a publication with no destination', async () => {
+    const url = pg.getConnectionUri();
+    const vin = await provision(url, { team: 'turn', slackUser: 'vin', endpoint: 'vin-mac' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    const turn = (id: string, conversation: string, event: string): Promise<unknown> =>
+      pool.query(`INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)`, [
+        id,
+        conversation,
+        event,
+      ]);
+    try {
+      for (const [id, dm] of [
+        ['conv-a', 'D-a'],
+        ['conv-b', 'D-b'],
+      ]) {
+        await pool.query(
+          `INSERT INTO conversations (id, user_id, dm_channel_id, root_thread_ts, endpoint_id)
+           VALUES ($1, $2, $3, '111.0', 'vin-mac')`,
+          [id, vin.owner, dm],
+        );
+      }
+      await turn('turn-1', 'conv-a', 'Ev-1');
+
+      // Table-wide, not per conversation: the id is Slack's, so a redelivery
+      // routed anywhere must still collide with the turn it already made.
+      await assert.rejects(turn('turn-2', 'conv-a', 'Ev-1'), broke('turns_one_per_slack_event'));
+      await assert.rejects(turn('turn-3', 'conv-b', 'Ev-1'), broke('turns_one_per_slack_event'));
+
+      // Posted and having a destination are one fact, so neither half can be
+      // recorded alone — which is what makes "posted once" answerable from the
+      // row rather than from whatever the bot remembers.
+      await assert.rejects(
+        pool.query(`UPDATE turns SET delivery_mode = 'posted' WHERE id = 'turn-1'`),
+        /turns_posted_has_destination/,
+      );
+      await assert.rejects(
+        pool.query(`UPDATE turns SET published_channel = 'C-incidents', published_ts = '999.1'
+                     WHERE id = 'turn-1'`),
+        /turns_posted_has_destination/,
+      );
+      for (const half of ["published_channel = 'C-incidents'", "published_ts = '999.1'"]) {
+        await assert.rejects(
+          pool.query(`UPDATE turns SET delivery_mode = 'posted', ${half} WHERE id = 'turn-1'`),
+          broke('turns_posted_has_destination'),
+          half,
+        );
+      }
+      await pool.query(
+        `UPDATE turns SET delivery_mode = 'posted', published_channel = 'C-incidents',
+                          published_ts = '999.1' WHERE id = 'turn-1'`,
+      );
+
+      // A session belongs to the one conversation that started it, so a second
+      // conversation cannot claim it and split the history in two.
+      await pool.query(
+        `INSERT INTO sessions (id, run_id, endpoint_id) VALUES ('sess-1', 'run-1', 'vin-mac')`,
+      );
+      const link = (conversation: string, ordinal: number): Promise<unknown> =>
+        pool.query(
+          `INSERT INTO conversation_sessions (conversation_id, session_id, ordinal, resume_kind)
+           VALUES ($1, 'sess-1', $2, 'new')`,
+          [conversation, ordinal],
+        );
+      await link('conv-a', 1);
+      await assert.rejects(link('conv-b', 1), broke('conversation_sessions_one_conversation'));
+
+      // Retention deletes sessions; the conversation and its turns stay.
+      await pool.query(`DELETE FROM sessions WHERE id = 'sess-1'`);
+      const after = await pool.query(
+        `SELECT (SELECT count(*) FROM conversation_sessions)::int AS links,
+                (SELECT count(*) FROM turns)::int AS turns`,
+      );
+      assert.deepEqual(after.rows[0], { links: 0, turns: 1 });
+    } finally {
+      await pool.end();
       await store.close();
     }
   });
