@@ -23,7 +23,7 @@ export interface SocketLike {
   ): void;
 }
 
-export interface SocketModeOptions {
+interface SocketModeOptions {
   appToken: string;
   onEnvelope: (envelope: SocketEnvelope) => Promise<void> | void;
   log: (message: string) => void;

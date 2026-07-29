@@ -12,7 +12,7 @@
 export type MintResult =
   { ok: true; code: string; expiresInMinutes: number } | { ok: false; why: 'not-a-member' };
 
-export type ConnectOutcome = MintResult | { ok: false; why: 'foreign-workspace' | 'unavailable' };
+type ConnectOutcome = MintResult | { ok: false; why: 'foreign-workspace' | 'unavailable' };
 
 interface SlashCommand {
   team_id?: unknown;
