@@ -1,0 +1,14 @@
+{
+  "name": "@symma/slack",
+  "version": "0.1.0",
+  "description": "Slack bot: routes each member to their own companion over Socket Mode",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

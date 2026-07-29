@@ -44,16 +44,16 @@ is here, and no rule below depends on reading it.
 
 ## Packages
 
-§8 "Package graph". `@symma/protocol`, `@symma/gateway`, `symma` (the
-companion) and `@symma/client` exist today; `slack` arrives with M3.
+§8 "Package graph". All five exist; `@symma/slack` arrived with M3d and answers
+one command so far.
 
-| package                    | what it is                                                                                                                                                                         | depends on       |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| `@symma/protocol`          | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                |
-| `@symma/gateway`           | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol         |
-| `symma`                    | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, pairing, login service                                                                | protocol         |
-| `@symma/client`            | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol         |
-| `@symma/slack` _(planned)_ | the bot — dials the gateway like any other client                                                                                                                                  | client, protocol |
+| package           | what it is                                                                                                                                                                         | depends on |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `@symma/protocol` | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —          |
+| `@symma/gateway`  | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol   |
+| `symma`           | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, pairing, login service                                                                | protocol   |
+| `@symma/client`   | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol   |
+| `@symma/slack`    | the bot — Socket Mode, `/connect`; no agent credentials, spawns nothing                                                                                                            | —          |
 
 `@symma/client` is what jbot-review consumes at runtime. It exists so the
 reviewer never imports gateway internals to dial a gateway — the inversion this

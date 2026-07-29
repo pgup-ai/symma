@@ -24,10 +24,20 @@ export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unkn
 
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
+  /** The owner behind a Slack identity, created on first sight — `/connect`
+   * holds an authenticated `team_id`/`user_id`, which §6's pilot treats as
+   * membership: one privately administered workspace, known internal members.
+   *
+   * Undefined for a deactivated member. Their row survives the soft delete, so
+   * re-creating them here would be re-admitting someone who was removed, which
+   * stays an administrative act rather than something their own command does. */
+  ensureMember(slackTeamId: string, slackUserId: string): Promise<Owner | undefined>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
-   * supersedes this owner's outstanding code. Throws if they are not a member
-   * here any more, rather than handing back a code that can only fail later. */
-  mintPairingCode(owner: Owner): Promise<string>;
+   * supersedes this owner's outstanding code. Undefined if they are no longer an
+   * active member, which the caller must answer rather than hand back a code
+   * that can only fail later; the type is what makes that unmissable. A store
+   * failure still throws. */
+  mintPairingCode(owner: Owner): Promise<string | undefined>;
   /** Spends a code. Two redeems of one code cannot both come back `ok`. */
   redeemPairingCode(code: string): Promise<PairingResult>;
   /** The other half of pairing: an endpoint for this member and the token it
@@ -35,10 +45,9 @@ export interface Store {
    * unauthenticated request body, where it would be a valid code away from
    * someone else's endpoint (§2).
    *
-   * Undefined if the member is gone by the time this runs. Unlike
-   * `mintPairingCode`, whose caller names a member it should know, this one
-   * just watched a redeem find them alive — so their absence is a race to
-   * answer, not a caller's mistake to throw at. A store failure still throws. */
+   * Undefined if the member is gone by the time this runs — a race to answer,
+   * not a caller's mistake to throw at, which is `mintPairingCode` above too.
+   * A store failure still throws. */
   claimEndpoint(
     owner: Owner,
     device: string,
@@ -82,13 +91,25 @@ export interface Store {
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 
+/** Constant-time secret comparison, for the secrets that have no row to be
+ * looked up as a hash. Digested first so both sides are 32 bytes, which is what
+ * `timingSafeEqual` requires and what keeps the comparison from leaking the
+ * length as well. */
+export const sameSecret = (offered: string, expected: string): boolean =>
+  timingSafeEqual(
+    createHash('sha256').update(offered).digest(),
+    createHash('sha256').update(expected).digest(),
+  );
+
 // Crockford base32: no I, L, O or U, so nothing retyped off a screen reads as
 // another character. 256 is a whole multiple of its 32 symbols, so a random
 // byte taken modulo the alphabet is unbiased.
 const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 /** 16 × 5 bits = 80, past §2's ≥64-bit floor. */
 const CODE_LENGTH = 16;
-const PAIRING_TTL_MINUTES = 10;
+/** Exported so `/connect` can tell the member how long their code lasts without
+ * a second copy of the number drifting from this one. */
+export const PAIRING_TTL_MINUTES = 10;
 
 function newPairingCode(): string {
   const pick = (b: number): string => CODE_ALPHABET[b % CODE_ALPHABET.length];
@@ -124,6 +145,45 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return row?.subject_id;
     },
+    async ensureMember(slackTeamId, slackUserId) {
+      // One transaction, for the reason deleteWorkspace gives for its own: the
+      // workspace and the member arrive together or not at all. Apart, an
+      // uninstall committing between them takes the workspace out from under
+      // the second insert and it fails on a foreign key. The upsert holds a row
+      // lock on the workspace for the transaction, so the uninstall waits.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        // Returns the existing id on conflict rather than assuming one: a
+        // workspace row created by another path would otherwise fail the users
+        // insert below on a foreign key naming a row we never looked up.
+        const workspace = await client.query<{ id: string }>(
+          `INSERT INTO workspaces (id, slack_team_id) VALUES ($1, $2)
+           ON CONFLICT (slack_team_id) DO UPDATE SET slack_team_id = EXCLUDED.slack_team_id
+           RETURNING id`,
+          [`ws-${slackTeamId}`, slackTeamId],
+        );
+        // Assigned, never derived from the two caller values — the defect
+        // `provision` documents, where a hyphen the caller controls let
+        // ("a", "b-c") and ("a-b", "c") spell one owner.
+        const member = await client.query<{ id: string; deactivated_at: string | null }>(
+          `INSERT INTO users (id, workspace_id, slack_user_id) VALUES ($1, $2, $3)
+           ON CONFLICT (workspace_id, slack_user_id)
+             DO UPDATE SET slack_user_id = EXCLUDED.slack_user_id
+           RETURNING id, deactivated_at`,
+          [randomUUID(), workspace.rows[0]!.id, slackUserId],
+        );
+        await client.query('COMMIT');
+        // Read, never cleared — see the contract above.
+        const row = member.rows[0]!;
+        return row.deactivated_at ? undefined : row.id;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
     async mintPairingCode(owner) {
       const code = newPairingCode();
       // Supersede rather than queue: several live codes for one member is
@@ -146,10 +206,9 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
                 consumed_at = NULL`,
         [hashToken(normalizeCode(code)), owner, PAIRING_TTL_MINUTES],
       );
-      // Loud rather than a code that can only fail later: the caller asked to
-      // pair someone who is not a member here.
-      if (!rowCount) throw new Error(`no active member ${owner} to pair`);
-      return code;
+      // No row means they are not an active member — deactivated, or gone with
+      // their workspace between the caller's lookup and this lock.
+      return rowCount ? code : undefined;
     },
     async redeemPairingCode(code) {
       const hash = hashToken(normalizeCode(code));
@@ -506,21 +565,16 @@ export function localStore(
   runsOnDisk: () => string[],
 ): Store {
   const LOCAL = 'local';
-  const matches = (presented: string, expected: string): boolean => {
-    const a = Buffer.from(presented);
-    const b = Buffer.from(expected);
-    return a.length === b.length && timingSafeEqual(a, b);
-  };
   const needsDatabase = (): never => {
     throw new Error('this gateway is single-tenant; pairing and workspaces need a database');
   };
   return {
     ownerForClientToken: (token) =>
       // No configured token is M2's local mode: loopback only, no auth.
-      Promise.resolve(!clientToken || matches(token, clientToken) ? LOCAL : undefined),
+      Promise.resolve(!clientToken || sameSecret(token, clientToken) ? LOCAL : undefined),
     endpointForToken: (token) => {
       for (const [endpoint, expected] of endpointTokens) {
-        if (matches(token, expected)) return Promise.resolve({ endpoint, owner: LOCAL });
+        if (sameSecret(token, expected)) return Promise.resolve({ endpoint, owner: LOCAL });
       }
       return Promise.resolve(undefined);
     },
@@ -566,6 +620,7 @@ export function localStore(
     deactivateUser: needsDatabase,
     claimEndpoint: needsDatabase,
     // One member, holding a token they configured: nobody to introduce.
+    ensureMember: needsDatabase,
     mintPairingCode: needsDatabase,
     redeemPairingCode: needsDatabase,
     close: () => Promise.resolve(),

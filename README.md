@@ -17,8 +17,10 @@ subscription, their keys. The hosted service never holds a provider credential.
 Being extracted from
 [pgup-ai/jbot-review](https://github.com/pgup-ai/jbot-review), where the relay,
 companion, signed envelopes and viewer have been running and dogfooded since
-2026-07. The protocol, gateway, companion and client packages are in; the Slack
-bot and the tenancy model that M3 needs are not.
+2026-07. All five packages are in: owner-scoped tenancy and pairing ship, the
+companion detects its agents and survives a reboot, and the Slack bot pairs a
+machine with `/connect`. Asking your agent something from Slack is next — that
+flow is not built yet.
 
 ## Packages
 
@@ -28,7 +30,7 @@ bot and the tenancy model that M3 needs are not.
 | `@symma/client`   | drive a prompt against a local agent, or a remote one through a gateway                        | [on npm](https://www.npmjs.com/package/@symma/client)   |
 | `@symma/gateway`  | relay, journal store, viewer, tenancy                                                          | private — ships as an image                             |
 | `symma`           | the companion CLI: attach loop, agent detection, pairing, local spawn/lifecycle                | [on npm](https://www.npmjs.com/package/symma)           |
-| `@symma/slack`    | the Slack bot                                                                                  | planned                                                 |
+| `@symma/slack`    | the Slack bot: Socket Mode, `/connect` to pair a machine                                       | private — runs beside the gateway                       |
 
 ```bash
 npm i -g symma && symma pair BPB1-9W92-HTZJ-RA19

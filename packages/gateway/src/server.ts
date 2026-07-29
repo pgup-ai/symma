@@ -28,7 +28,15 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
-import { localStore, openStore, type Owner, type SessionRef, type Store } from './store.js';
+import {
+  localStore,
+  openStore,
+  PAIRING_TTL_MINUTES,
+  sameSecret,
+  type Owner,
+  type SessionRef,
+  type Store,
+} from './store.js';
 import { VIEWER_HTML } from './viewer.js';
 
 // SSE comment ping; keeps idle viewer connections alive through proxies.
@@ -43,6 +51,11 @@ const token = process.env.SYMMA_GATEWAY_TOKEN?.trim() || '';
 // local TLS proxy (deploy/observer), SYMMA_GATEWAY_HOST=127.0.0.1 keeps token
 // auth while making the proxy the only public door, firewall or not.
 const databaseUrl = process.env.SYMMA_GATEWAY_DATABASE_URL?.trim() || '';
+// The Slack bot mints codes for whichever member ran `/connect`, so it is not a
+// tenant and has no owner to be a token row for. It is one trusted component
+// beside the gateway (§6, one box), and its secret is deployment config like
+// the database URL. Unset leaves `/api/slack/pair` off entirely.
+const botToken = process.env.SYMMA_GATEWAY_BOT_TOKEN?.trim() || '';
 // A database is authentication too, so it unlocks the configured bind exactly
 // as the shared token does — otherwise a multi-tenant deployment has to invent
 // a dummy token it never uses to become reachable.
@@ -746,6 +759,28 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!claimed) return sendJson(res, 401, { error: 'code' });
     log(`paired endpoint ${claimed.endpoint}`);
     return sendJson(res, 200, claimed);
+  }
+  // Before the client gate, because the bot holds no client token — see
+  // `botToken`. Everything below this line speaks for exactly one owner.
+  if (req.method === 'POST' && url.pathname === '/api/slack/pair') {
+    if (!databaseUrl || !botToken) return sendJson(res, 404, { error: 'unsupported' });
+    if (!sameSecret(bearerToken(req) ?? '', botToken))
+      return sendJson(res, 401, { error: 'unauthorized' });
+    const body = await readPairBody(req, res);
+    if (typeof body !== 'object' || body === null) return sendJson(res, 400, { error: 'request' });
+    const { team, user } = body as { team?: unknown; user?: unknown };
+    if (!team || typeof team !== 'string' || !user || typeof user !== 'string')
+      return sendJson(res, 400, { error: 'request' });
+    const member = await store.ensureMember(team, user);
+    // Deactivated, not absent — `ensureMember` creates whoever it has not seen.
+    if (!member) return sendJson(res, 403, { error: 'deactivated' });
+    // Undefined covers the member deactivated — or gone with their workspace —
+    // between the lookup above and the mint's own locked re-check.
+    const code = await store.mintPairingCode(member);
+    if (!code) return sendJson(res, 403, { error: 'deactivated' });
+    // The member, never the code, which is the credential itself.
+    log(`minted a pairing code for ${member}`);
+    return sendJson(res, 200, { code, expiresInMinutes: PAIRING_TTL_MINUTES });
   }
   const token = clientToken(req, url);
   const owner = await store.ownerForClientToken(token);
