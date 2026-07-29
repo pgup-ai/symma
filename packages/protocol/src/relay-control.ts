@@ -16,6 +16,12 @@ export interface EndpointPresence {
   maxSessions: number;
   activeSessions: number;
   online: boolean;
+  /** Epoch ms it was last attached; absent until it first attaches. A crash and
+   * a closed lid are not told apart — both are "try later" (§3). */
+  lastSeenAt?: number;
+  /** The last detach was a goodbye rather than a drop — "quit on your Mac"
+   * versus "asleep". Absent while online, and absent after a drop. */
+  quit?: boolean;
   /** Verify this endpoint's envelopes against it; absent means it signs none. */
   publicKey?: string;
 }
@@ -71,7 +77,17 @@ export interface CloseControl {
   reason?: string;
 }
 
-export type RelayControl = HelloControl | OpenControl | AckControl | CloseControl;
+/** Sent by a companion on its way out, so the relay can tell a quit from a
+ * laptop that stopped answering (§3). Sleep suspends the process rather than
+ * notifying it, so only the deliberate exit can say which happened — and the
+ * relay never *expects* one, since a companion too old to send it looks exactly
+ * like one that was killed. Absence is the timestamp fallback §7 asks for. */
+export interface GoodbyeControl {
+  kind: 'goodbye';
+  reason?: string;
+}
+
+export type RelayControl = HelloControl | OpenControl | AckControl | CloseControl | GoodbyeControl;
 
 const str = (v: unknown): v is string => typeof v === 'string';
 
@@ -127,6 +143,8 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         ...(str(raw.base) ? { base: raw.base } : {}),
       };
     }
+    case 'goodbye':
+      return { kind: 'goodbye', ...(str(raw.reason) ? { reason: raw.reason } : {}) };
     case 'opened':
     case 'refused':
     case 'close': {

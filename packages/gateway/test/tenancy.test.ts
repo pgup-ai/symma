@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -71,9 +71,13 @@ before(
           SYMMA_GATEWAY_DATABASE_URL: url,
           // Production waits 30s to drop a revoked leg; a test cannot.
           SYMMA_GATEWAY_REVOCATION_MS: '150',
-          // Short enough that the throttle test's burst does not then refuse
-          // every later pair in this file — they all arrive from one address.
-          SYMMA_GATEWAY_PAIR_WINDOW_MS: '300',
+          // Every pair test names its own caller through the proxy header, so
+          // each gets its own bucket and none inherits another's burst. Three
+          // tries makes the throttle reachable without a race: the old setup
+          // needed eleven round-trips inside a 300ms window, and a slow one
+          // reset the window instead of tripping it.
+          SYMMA_GATEWAY_TRUSTED_PROXY: '127.0.0.1',
+          SYMMA_GATEWAY_PAIR_TRIES: '3',
           // Production gives a pair body 5s; the stalled-body test cannot wait.
           SYMMA_GATEWAY_PAIR_BODY_MS: '300',
         },
@@ -151,10 +155,12 @@ const onceOnStream = async (
  * is a breaking change these tests should fail on. */
 const tokenHash = (token: string): string => createHash('sha256').update(token).digest('hex');
 
-const pair = (body: unknown): Promise<Response> =>
+/** `caller` is the address the gateway throttles on — the harness trusts this
+ * loopback as a proxy, so a test that names one gets a bucket of its own. */
+const pair = (body: unknown, caller = 'default'): Promise<Response> =>
   fetch(`${base}/api/pair`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': caller },
     body: JSON.stringify(body),
   });
 
@@ -941,6 +947,15 @@ describe('tenancy', () => {
       assert.match(saved.endpoint, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
       assert.equal(saved.gateway, base);
       assert.equal(saved.device, "Wen's laptop");
+      // §2 step 4: pairing leaves a login service behind, so the machine comes
+      // back after a reboot without the member being told to keep a terminal
+      // open. Written under this HOME, and darwin is what this suite runs on.
+      if (process.platform === 'darwin') {
+        const plist = join(home, 'Library', 'LaunchAgents', 'dev.symma.companion.plist');
+        assert.ok(existsSync(plist), said);
+        assert.match(readFileSync(plist, 'utf8'), /<key>RunAtLoad<\/key><true\/>/);
+        assert.match(said, /Starts at login from/);
+      }
 
       // And a plain start now attaches on it, with nothing else configured.
       companion = runCompanion();
@@ -975,11 +990,14 @@ describe('tenancy', () => {
     const pool = new Pool({ connectionString: url });
     let detach: (() => void) | undefined;
     try {
-      const res = await pair({
-        code: await store.mintPairingCode(tam.owner),
-        device: "Tam's laptop",
-        agents: ['kilo'],
-      });
+      const res = await pair(
+        {
+          code: await store.mintPairingCode(tam.owner),
+          device: "Tam's laptop",
+          agents: ['kilo'],
+        },
+        'tam',
+      );
       assert.equal(res.status, 200);
       const paired = (await res.json()) as { endpoint: string; token: string };
       // Assigned, not asked for: the request named no id, so there was none to
@@ -1017,12 +1035,12 @@ describe('tenancy', () => {
       const code = await store.mintPairingCode(vic.owner);
       // §2 refuses this before spending anything, so the member can log an
       // agent in and use the same code rather than asking for another.
-      const empty = await pair({ code, agents: [] });
+      const empty = await pair({ code, agents: [] }, 'vic');
       assert.equal(empty.status, 400);
       assert.deepEqual(await empty.json(), { error: 'agents' });
 
-      assert.equal((await pair({ code, agents: ['kilo'] })).status, 200);
-      const again = await pair({ code, agents: ['kilo'] });
+      assert.equal((await pair({ code, agents: ['kilo'] }, 'vic')).status, 200);
+      const again = await pair({ code, agents: ['kilo'] }, 'vic');
       assert.equal(again.status, 401);
       assert.deepEqual(await again.json(), { error: 'code' });
       // The refused reuse left no second endpoint behind.
@@ -1053,16 +1071,19 @@ describe('tenancy', () => {
   });
 
   it('throttles pairing by where it came from', async () => {
-    // No token to scope it by, so the limit is on the caller's address.
-    for (let i = 0; i < 20; i++) {
-      const res = await pair({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ', agents: ['kilo'] });
-      if (res.status === 429) {
-        assert.deepEqual(await res.json(), { error: 'throttled' });
-        return;
-      }
-      assert.equal(res.status, 401, 'an unknown code before the limit');
+    // No token to scope it by, so the limit is on the caller's address — and
+    // the header only names it because the harness trusts this peer as a proxy.
+    const seen: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      seen.push((await pair({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ', agents: ['kilo'] }, '10.0.0.1')).status);
     }
-    assert.fail('never throttled');
+    assert.deepEqual(seen, [401, 401, 401, 429, 429, 429]);
+    // And it is that caller who is throttled, not the route: another address
+    // is still answered.
+    assert.equal(
+      (await pair({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ', agents: ['kilo'] }, '10.0.0.2')).status,
+      401,
+    );
   });
 
   it('spends a pairing code once, and takes the retyping a member will do', async () => {

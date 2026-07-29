@@ -232,12 +232,21 @@ async function handleEndpointIngest(
   id: string,
   owner: Owner,
 ): Promise<void> {
+  // The attachment this leg created, if any. A goodbye speaks only for its own:
+  // this request can still be draining after the companion restarted.
+  let attached: number | undefined;
   const { overflow } = await readNdjsonBody(req, (line) => {
     const control = parseRelayControl(line);
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
-        relay.attachEndpoint(control, sendToEndpoint(id), owner);
+        attached = relay.attachEndpoint(control, sendToEndpoint(id), owner);
         storeWrite(`markSeen ${id}`, store.markSeen(id));
+      } else if (control.kind === 'goodbye' && attached !== undefined) {
+        // Recorded, not acted on: the leg closing is what detaches, and a
+        // companion that is killed or sleeps never gets here — which is the
+        // whole point of hearing it from the ones that do.
+        relay.sayGoodbye(id, attached);
+        log(`endpoint ${id} said goodbye${control.reason ? `: ${control.reason}` : ''}`);
       } else if (control.kind === 'opened' || control.kind === 'refused') {
         // Only on an ack the relay actually applied: a companion naming
         // another endpoint's session is ignored there, and deleting its row
@@ -584,7 +593,10 @@ function callerIp(req: IncomingMessage): string {
 // Abuse control, not the guarantee: guessing a code is answered by its 80 bits
 // (§2), and this bounds the database work one caller can ask for.
 const PAIR_WINDOW_MS = Number(process.env.SYMMA_GATEWAY_PAIR_WINDOW_MS) || 60_000;
-const PAIR_TRIES = 10;
+const PAIR_TRIES =
+  Number(process.env.SYMMA_GATEWAY_PAIR_TRIES) > 0
+    ? Number(process.env.SYMMA_GATEWAY_PAIR_TRIES)
+    : 10;
 const pairTries = new Map<string, { count: number; resetAt: number }>();
 
 function pairThrottled(ip: string): boolean {
