@@ -455,10 +455,10 @@ reconnect — it never runs the request on someone else's machine.
 
 ## 3. Companion
 
-- **Auto-detect all supported agents.** Change the default agent list from
-  `kilo` to every built-in; the resolve loop already skips agents whose
-  credential is missing or whose binary is not on PATH, with a reason for each.
-  Roughly a one-line change.
+- **Auto-detect all supported agents** — **shipped 2026-07-29** (#19). The
+  default agent list is every built-in; the resolve loop skips agents whose
+  credential is missing or whose binary is not on PATH, with a reason for each,
+  and §2 shows those reasons as the pairing output.
 - **Two distribution paths, both supported.** `curl | sh` is primary because 3
   of 4 agent CLIs already install that way (devin via Homebrew, cursor-agent and
   codex via their own installers); those users may have no Node at all. `npx

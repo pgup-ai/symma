@@ -390,15 +390,25 @@ describe('relay e2e', () => {
           'pair',
           'BPB1-9W92-HTZJ-RA19',
         ],
-        // No gateway either: it must refuse without reaching for one.
-        { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
+        // No gateway either: it must refuse without reaching for one. Cursor's
+        // key is blanked because it is ambient — the other three read the fake
+        // HOME, but a real CURSOR_API_KEY here would make this machine pairable.
+        {
+          env: { ...process.env, HOME: home, CURSOR_API_KEY: '' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
       );
       let said = '';
       pair.stdout?.on('data', (c) => (said += String(c)));
       pair.stderr?.on('data', (c) => (said += String(c)));
       assert.equal(await new Promise((resolve) => pair.on('close', resolve)), 1);
       assert.match(said, /Nothing to connect/);
+      // All four built-ins, each with its reason: the default list is every
+      // agent we know how to run, not the one M2 started with.
       assert.match(said, /kilo: no auth/);
+      assert.match(said, /codex: no auth/);
+      assert.match(said, /devin: no credentials/);
+      assert.match(said, /cursor: CURSOR_API_KEY not set/);
       // Nothing persisted at all — not the pairing, and not the signing key,
       // which a refused pair has no use for.
       assert.equal(existsSync(join(home, '.local', 'share', 'symma-companion')), false);
