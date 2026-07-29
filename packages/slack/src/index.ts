@@ -77,8 +77,11 @@ const connection = socketMode({
     // channel inferred from the payload, and not a DM we would have to guess at.
     if (typeof command.response_url !== 'string') return;
     const outcome = await runConnect(envelope.payload, team, mint);
-    log(`/connect: ${outcome.ok ? 'minted' : outcome.why}`);
     await reply(command.response_url, connectMessage(outcome));
+    // After the reply, so the line means the member was told rather than that
+    // the gateway answered. A failed delivery throws instead, which the
+    // socket's handler catch reports.
+    log(`/connect: ${outcome.ok ? 'minted' : outcome.why}`);
   },
 });
 
