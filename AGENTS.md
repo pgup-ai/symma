@@ -18,9 +18,10 @@ Section references below (§N) are to that document.
   (the condition is what resolves `@symma/*` to source)
 - `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`
   — tsc, oxlint (deny-warnings), prettier (owns formatting)
-- `npm run build` — `tsc` emits JS + `.d.ts` into `dist/` for the two packages
-  that publish, `@symma/protocol` and `@symma/client`. `gateway` and `companion`
-  are private applications: they run from source under tsx and build nothing.
+- `npm run build` — `tsc` emits into `dist/` for the three packages that
+  publish: `@symma/protocol` and `@symma/client` (JS + `.d.ts`, they are
+  libraries) and `symma` (JS only, it is a CLI with a `bin` and no exports).
+  `gateway` stays private: it runs from source under tsx and builds nothing.
 - `npm run verify:pack` — packs both packages and loads them as a consumer
   would: resolution, the tarball's contents and the types, none of which
   anything else covers. It does not check the barrel is complete — it imports a
@@ -39,14 +40,14 @@ Section references below (§N) are to that document.
 
 ## Packages
 
-§8 "Package graph". `@symma/protocol`, `@symma/gateway`, `@symma/companion` and
-`@symma/client` exist today; `slack` arrives with M3.
+§8 "Package graph". `@symma/protocol`, `@symma/gateway`, `symma` (the
+companion) and `@symma/client` exist today; `slack` arrives with M3.
 
 | package                    | what it is                                                                                                                                                                         | depends on       |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | `@symma/protocol`          | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                |
 | `@symma/gateway`           | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol         |
-| `@symma/companion`         | attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update, pairing                                                                                      | protocol         |
+| `symma`                    | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update, pairing                                                                  | protocol         |
 | `@symma/client`            | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol         |
 | `@symma/slack` _(planned)_ | the bot — dials the gateway like any other client                                                                                                                                  | client, protocol |
 
@@ -94,11 +95,13 @@ extraction fixes, prevented from recurring.
    release _and_ a pin bump there — the pins are exact, and publishing alone
    moves nothing. Patching its copy re-forks the code that was just unforked.
 
-   **`gateway` and `companion` are outside this.** They publish nothing, so
-   jbot-review still runs its own, and the two have already drifted: symma's
-   `server.ts` has a cross-run guard, a fail-open journal write and a
-   `q=0`-aware `acceptsGzip` that jbot-review's does not. Whoever ships those
-   packages reconciles the drift and extends this entry to cover them.
+   **`gateway` is outside this.** It publishes nothing, so jbot-review still
+   runs its own and the two have already drifted: symma's `server.ts` has a
+   cross-run guard, a fail-open journal write and a `q=0`-aware `acceptsGzip`
+   that jbot-review's does not. Whoever ships it reconciles the drift and
+   extends this entry to cover it. The companion left this exemption when it
+   became `symma` on npm, so a fix to it now travels as a release like the
+   libraries do.
 
 ## Conventions
 
