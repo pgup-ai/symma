@@ -29,21 +29,24 @@ for pkg in protocol client companion; do
   # rather than symma-companion-<ver>.tgz.
   stem="${name#@}"
   tgz="${stem/\//-}-$ver.tgz"
-  files=$(tar tzf "$work/$tgz" | wc -l | tr -d ' ')
-  # npm ships LICENSE, README and package.json whatever `files` says, so a
-  # dist-less pack still produces a plausible-looking tarball. The entry point
-  # is the only thing worth asserting.
+  # npm takes LICENSE and README from the package directory and never reaches
+  # up to the repo root, and `files` says nothing about either — so a tarball
+  # missing both still looks entirely plausible.
+  #
   # Read the listing once and match it as a string. `tar … | grep -q` looks
   # equivalent but is not: grep exits at the first match, the producer takes
   # SIGPIPE, and `pipefail` turns that into a failed pipeline — so the guard
   # fires precisely when the file it wants IS present. It survived locally and
   # failed every CI run, which is the timing difference that decides it.
   listing=$(tar tzf "$work/$tgz")
-  if ! grep -qx "package/dist/index.js" <<<"$listing"; then
-    echo "FAIL: $tgz has no dist/index.js"
-    printf '%s\n' "$listing" | sed 's/^/    /'
-    exit 1
-  fi
+  files=$(wc -l <<<"$listing" | tr -d ' ')
+  for required in dist/index.js LICENSE README.md; do
+    if ! grep -qx "package/$required" <<<"$listing"; then
+      echo "FAIL: $tgz has no $required"
+      printf '%s\n' "$listing" | sed 's/^/    /'
+      exit 1
+    fi
+  done
   tarballs+=("./$tgz")
   echo "    $name@$ver: $files files"
 done
