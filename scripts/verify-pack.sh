@@ -29,12 +29,9 @@ for pkg in protocol client companion; do
   # rather than symma-companion-<ver>.tgz.
   stem="${name#@}"
   tgz="${stem/\//-}-$ver.tgz"
-  files=$(tar tzf "$work/$tgz" | wc -l | tr -d ' ')
-  # npm ships LICENSE, README and package.json only when the package directory
-  # has them — it does not reach up to the repo root — so all three shipped for
-  # a while declaring MIT with no text behind it, and the CLI with no
-  # documentation at all. `files` says nothing about any of them, which is why
-  # they are asserted rather than assumed.
+  # npm takes LICENSE and README from the package directory and never reaches
+  # up to the repo root, and `files` says nothing about either — so a tarball
+  # missing both still looks entirely plausible.
   #
   # Read the listing once and match it as a string. `tar … | grep -q` looks
   # equivalent but is not: grep exits at the first match, the producer takes
@@ -42,6 +39,7 @@ for pkg in protocol client companion; do
   # fires precisely when the file it wants IS present. It survived locally and
   # failed every CI run, which is the timing difference that decides it.
   listing=$(tar tzf "$work/$tgz")
+  files=$(wc -l <<<"$listing" | tr -d ' ')
   for required in dist/index.js LICENSE README.md; do
     if ! grep -qx "package/$required" <<<"$listing"; then
       echo "FAIL: $tgz has no $required"
