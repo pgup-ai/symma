@@ -103,6 +103,13 @@ after(async () => {
   await pg?.stop();
 });
 
+/** The invariant a write broke, by name — the message beside it is Postgres
+ * prose a version can reword, and `duplicate key` would match any of them. */
+const broke = (constraint: string) => (error: unknown) => {
+  assert.equal((error as { constraint?: string }).constraint, constraint);
+  return true;
+};
+
 /** Backdates a session so retention has something old to find. */
 const ageSession = async (url: string, sessionId: string, days: number): Promise<void> => {
   const pool = new Pool({ connectionString: url });
@@ -1329,13 +1336,23 @@ describe('tenancy', () => {
 
       // A redelivered mention must find the conversation it already made. The
       // thread is the identity, so the second insert has nowhere to land.
-      await assert.rejects(open('conv-tia-again', tia.owner, 'tia-mac', 'D-tia'), /duplicate key/);
+      await assert.rejects(
+        open('conv-tia-again', tia.owner, 'tia-mac', 'D-tia'),
+        broke('conversations_identity'),
+      );
 
       // Two members on one DM channel id is contrived — Slack gives each their
       // own — and that is the point: it leaves `user_id` as the only thing
       // separating them, so §4's rule that each gets a private conversation
       // from a shared thread is a constraint here rather than a claim.
       await open('conv-uzo', uzo.owner, 'uzo-mac', 'D-tia');
+
+      // Existence is not ownership: the endpoint has to be this member's, or a
+      // conversation could drive a machine belonging to someone else.
+      await assert.rejects(
+        open('conv-theft', tia.owner, 'uzo-mac', 'D-theft'),
+        broke('conversations_endpoint_is_owned'),
+      );
 
       // Unpairing takes the machine, not the record of what was asked of it.
       await pool.query(`DELETE FROM endpoints WHERE id = 'tia-mac'`);
@@ -1383,8 +1400,8 @@ describe('tenancy', () => {
 
       // Table-wide, not per conversation: the id is Slack's, so a redelivery
       // routed anywhere must still collide with the turn it already made.
-      await assert.rejects(turn('turn-2', 'conv-a', 'Ev-1'), /duplicate key/);
-      await assert.rejects(turn('turn-3', 'conv-b', 'Ev-1'), /duplicate key/);
+      await assert.rejects(turn('turn-2', 'conv-a', 'Ev-1'), broke('turns_one_per_slack_event'));
+      await assert.rejects(turn('turn-3', 'conv-b', 'Ev-1'), broke('turns_one_per_slack_event'));
 
       // Posted and having a destination are one fact, so neither half can be
       // recorded alone — which is what makes "posted once" answerable from the
@@ -1398,6 +1415,13 @@ describe('tenancy', () => {
                      WHERE id = 'turn-1'`),
         /turns_posted_has_destination/,
       );
+      for (const half of ["published_channel = 'C-incidents'", "published_ts = '999.1'"]) {
+        await assert.rejects(
+          pool.query(`UPDATE turns SET delivery_mode = 'posted', ${half} WHERE id = 'turn-1'`),
+          broke('turns_posted_has_destination'),
+          half,
+        );
+      }
       await pool.query(
         `UPDATE turns SET delivery_mode = 'posted', published_channel = 'C-incidents',
                           published_ts = '999.1' WHERE id = 'turn-1'`,
@@ -1415,7 +1439,7 @@ describe('tenancy', () => {
           [conversation, ordinal],
         );
       await link('conv-a', 1);
-      await assert.rejects(link('conv-b', 1), /duplicate key/);
+      await assert.rejects(link('conv-b', 1), broke('conversation_sessions_one_conversation'));
 
       // Retention deletes sessions; the conversation and its turns stay.
       await pool.query(`DELETE FROM sessions WHERE id = 'sess-1'`);

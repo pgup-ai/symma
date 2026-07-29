@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS endpoints (
   last_seen_at timestamptz
 );
 
+-- The target of conversations_endpoint_is_owned. An index rather than a table
+-- constraint because ALTER TABLE ADD CONSTRAINT has no IF NOT EXISTS, and this
+-- file has to stay re-appliable.
+CREATE UNIQUE INDEX IF NOT EXISTS endpoints_owner_key ON endpoints (user_id, id);
+
 -- subject_kind tells you which of the two a token speaks for; a client token
 -- carries an owner, an endpoint token carries the endpoint whose owner it is.
 CREATE TABLE IF NOT EXISTS tokens (
@@ -86,13 +91,17 @@ CREATE TABLE IF NOT EXISTS conversations (
   -- be redirected. Null when the conversation began in the DM, with no source.
   source_channel_id text,
   source_thread_ts  text,
-  -- Nulled rather than cascaded: deactivation drops endpoints, and the record of
-  -- what was asked should outlive the machine it was asked of.
-  endpoint_id       text REFERENCES endpoints(id) ON DELETE SET NULL,
+  endpoint_id       text,
   agent             text NOT NULL DEFAULT '',
   model             text,
   created_at        timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (user_id, dm_channel_id, root_thread_ts)
+  CONSTRAINT conversations_identity UNIQUE (user_id, dm_channel_id, root_thread_ts),
+  -- Paired with `user_id` so the reference proves ownership and not merely that
+  -- the row exists: a conversation cannot point at another member's machine.
+  -- Nulled rather than cascaded — deactivation drops endpoints, and the record
+  -- of what was asked outlives the machine it was asked of.
+  CONSTRAINT conversations_endpoint_is_owned FOREIGN KEY (user_id, endpoint_id)
+    REFERENCES endpoints (user_id, id) ON DELETE SET NULL (endpoint_id)
 );
 
 -- §5. `slack_event_id` is unique across the table rather than per conversation
@@ -101,7 +110,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE TABLE IF NOT EXISTS turns (
   id                text PRIMARY KEY,
   conversation_id   text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  slack_event_id    text UNIQUE NOT NULL,
+  slack_event_id    text NOT NULL CONSTRAINT turns_one_per_slack_event UNIQUE,
   delivery_mode     text NOT NULL DEFAULT 'private' CHECK (
                       delivery_mode IN ('private', 'post_when_ready', 'posted', 'cancelled')),
   status            text NOT NULL DEFAULT 'running' CHECK (
@@ -113,7 +122,8 @@ CREATE TABLE IF NOT EXISTS turns (
   -- Publishing and having published are one fact, so "posted once" is
   -- answerable from the row rather than from whatever the bot remembers.
   CONSTRAINT turns_posted_has_destination CHECK (
-    (delivery_mode = 'posted') = (published_channel IS NOT NULL AND published_ts IS NOT NULL))
+    (delivery_mode = 'posted' AND published_channel IS NOT NULL AND published_ts IS NOT NULL)
+    OR (delivery_mode <> 'posted' AND published_channel IS NULL AND published_ts IS NULL))
 );
 
 -- §4 resuming. A conversation outlives its sessions, and `resume_kind` makes
@@ -122,7 +132,8 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   -- Cascaded, so retention deleting a session leaves the conversation and its
   -- turns standing. Unique: a session belongs to the conversation that started it.
-  session_id      text UNIQUE NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  session_id      text NOT NULL REFERENCES sessions(id) ON DELETE CASCADE
+                    CONSTRAINT conversation_sessions_one_conversation UNIQUE,
   ordinal         int NOT NULL,
   resume_kind     text NOT NULL CHECK (resume_kind IN ('new', 'exact', 'recovered')),
   PRIMARY KEY (conversation_id, ordinal)
