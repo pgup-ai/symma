@@ -38,6 +38,11 @@ interface Attachment {
   send: SendLine;
   sessions: Set<string>;
   online: boolean;
+  /** Epoch ms this attachment last went offline; carried across a reattach so
+   * a member always sees when it was last there. */
+  lastSeenAt?: number;
+  /** It said goodbye on the way out, rather than simply stopping. */
+  quit?: boolean;
 }
 
 type ResumeLeg = 'endpointResume' | 'clientResume';
@@ -111,7 +116,16 @@ export function createRelay(options: RelayOptions = {}) {
         const session = sessions.get(sessionId);
         if (session) disarm(session, 'endpointResume');
       }
-      endpoints.set(hello.endpoint, { hello, send, owner, sessions: carried, online: true });
+      // `quit` is not carried across: it describes how the last attachment
+      // ended, and this one has not.
+      endpoints.set(hello.endpoint, {
+        hello,
+        send,
+        owner,
+        sessions: carried,
+        online: true,
+        lastSeenAt: existing?.lastSeenAt,
+      });
       // A companion may still be running agents for sessions the relay already
       // failed (resume window elapsed while it was gone) — tell it to close them.
       for (const sessionId of hello.sessions ?? []) {
@@ -121,10 +135,18 @@ export function createRelay(options: RelayOptions = {}) {
       }
     },
 
+    /** A companion said it is leaving. Recorded rather than acted on: the leg
+     * closing is what detaches it, and this only marks which of the two ways
+     * that happened. */
+    sayGoodbye(endpoint: string): void {
+      const attachment = endpoints.get(endpoint);
+      if (attachment) attachment.quit = true;
+    },
     detachEndpoint(endpoint: string): void {
       const attachment = endpoints.get(endpoint);
       if (!attachment) return;
       attachment.online = false;
+      attachment.lastSeenAt = Date.now();
       for (const sessionId of attachment.sessions) {
         arm(sessionId, 'endpointResume', 'endpoint gone past resume window');
       }
@@ -167,13 +189,15 @@ export function createRelay(options: RelayOptions = {}) {
     listEndpoints(owner: string): EndpointPresence[] {
       return [...endpoints.values()]
         .filter((a) => a.owner === owner)
-        .map(({ hello, sessions: active, online }) => ({
+        .map(({ hello, sessions: active, online, lastSeenAt, quit }) => ({
           endpoint: hello.endpoint,
           device: hello.device,
           agents: hello.agents,
           maxSessions: hello.maxSessions,
           activeSessions: active.size,
           online,
+          ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
+          ...(!online && quit ? { quit: true } : {}),
           ...(hello.publicKey ? { publicKey: hello.publicKey } : {}),
         }));
     },

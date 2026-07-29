@@ -652,8 +652,10 @@ word for situations a member experiences as completely different things.
 | silent drop, past it, last seen 4m ago | "asleep — send it again when it's back"  |
 | never paired, or revoked               | the pairing copy from §2                 |
 
-Two of those rows do not exist yet — the goodbye and the last-seen — and the gap
-is smaller than it looks.
+Both of those rows exist now — **shipped 2026-07-29 (#21)**: a `goodbye`
+control the companion sends as it exits, and a `lastSeenAt` the relay stamps on
+every detach. `/api/endpoints` carries both, so the copy above is a lookup
+rather than a guess. The gap was smaller than it looked.
 `shutdown()` sends a `close` per live session, so a SIGTERM mid-review is
 visible — but that is the narrowest case in the set. An _idle_ SIGTERM, which is
 the common quit, sends nothing; SIGKILL and a crash never reach the handler at
@@ -982,12 +984,18 @@ Why each number matters:
    signing needed both sides, and we simply deployed both.
 2. **Owner binding** established during pairing and stored server-side.
 3. **A goodbye control** the companion sends as it exits, so the relay can tell
-   "quit" from "asleep" (§3, "Staying attached"). Sleep is unsignalable by
-   construction — the process is suspended, not notified — so the only way to
-   separate the two is for the deliberate exit to say so. Small, but it has to
-   ride the same `hello.version` negotiation as everything else here: a relay
-   that expects a goodbye from a companion too old to send one is back to
-   guessing, and must degrade to the timestamp rather than mislabel.
+   "quit" from "asleep" (§3, "Staying attached") — **shipped 2026-07-29 (#21)**.
+   Sleep is unsignalable by construction — the process is suspended, not
+   notified — so the only way to separate the two is for the deliberate exit to
+   say so.
+
+   It needed no version negotiation after all, because the relay never
+   _expects_ one: it records a goodbye that arrives and reports `lastSeenAt`
+   otherwise. A companion too old to send one is indistinguishable from one
+   that was killed, and both are already the "try later" row — so the
+   degradation item 1 asks for is what the absence of the frame means, rather
+   than something the relay has to be told.
+
 4. **Relay control types move** into the shared protocol package — **done**,
    `@symma/protocol` `relay-control.ts`. Today `src/companion/` and
    `src/shared/acp-remote.ts` both import from `src/gateway/` — the wire

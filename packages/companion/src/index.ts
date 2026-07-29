@@ -815,8 +815,12 @@ function shutdown(): void {
     discard(slot.workspace);
     sendControl({ kind: 'close', sessionId, reason: 'companion shutdown' });
   }
-  // Brief grace for the close frames to reach the gateway; its resume window
-  // is the backstop if they don't.
+  // Last, after the closes: this is what lets a member be told "quit on your
+  // Mac" instead of "asleep". A kill or a lid never reaches here, and that
+  // asymmetry is the signal — the relay falls back to the last-seen timestamp.
+  sendControl({ kind: 'goodbye' });
+  // Brief grace for those frames to reach the gateway; its resume window is the
+  // backstop if they don't.
   setTimeout(() => process.exit(0), 200);
 }
 

@@ -209,6 +209,49 @@ describe('relay', () => {
     assert.deepEqual(JSON.parse(toClient.at(-1)!), ack);
   });
 
+  it('tells a quit apart from a drop, and dates both', () => {
+    // §3: `online: false` is one word for situations a member experiences as
+    // completely different things. A quit is "reopen it on your Mac"; a drop is
+    // "asleep — send it again when it's back".
+    const relay = createRelay();
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    const attached = relay.listEndpoints(OWNER)[0]!;
+    assert.equal(attached.online, true);
+    assert.equal(attached.quit, undefined, 'nothing to report while it is here');
+    assert.equal(attached.lastSeenAt, undefined, 'it has not been gone yet');
+
+    // Dropped: no goodbye reached the relay, which is what a kill, a crash and
+    // a closed lid all look like — and the relay does not try to separate them.
+    const before = Date.now();
+    relay.detachEndpoint('laptop');
+    const dropped = relay.listEndpoints(OWNER)[0]!;
+    assert.equal(dropped.online, false);
+    assert.equal(dropped.quit, undefined);
+    assert.ok((dropped.lastSeenAt ?? 0) >= before, 'dated, so "asleep" can say when');
+
+    // Quit: the companion said so on its way out, before its leg closed.
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    relay.sayGoodbye('laptop');
+    assert.equal(relay.listEndpoints(OWNER)[0]!.quit, undefined, 'still here, still ready');
+    relay.detachEndpoint('laptop');
+    assert.equal(relay.listEndpoints(OWNER)[0]!.quit, true);
+
+    // And a reattach clears it. Asserting that on the live listing would prove
+    // nothing — it hides `quit` while online either way — so the check is the
+    // failure it actually prevents: this companion is killed rather than quit,
+    // and must not inherit the previous exit's word for it.
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    const back = relay.listEndpoints(OWNER)[0]!;
+    assert.equal(back.online, true);
+    assert.ok(back.lastSeenAt !== undefined, 'when it was last away survives the reattach');
+    relay.detachEndpoint('laptop');
+    assert.equal(
+      relay.listEndpoints(OWNER)[0]!.quit,
+      undefined,
+      'a crash after a quit still reads as a crash',
+    );
+  });
+
   it("hides and refuses another owner's endpoint", () => {
     // Every other case here is one tenant, so the ownership branches in
     // openSession and listEndpoints are only exercised by the tenancy suite —

@@ -401,6 +401,59 @@ describe('relay e2e', () => {
     }
   });
 
+  it('says goodbye on its way out, so a quit is not read as a sleeping laptop', async () => {
+    // The distinction only exists because the deliberate exit says so: a kill
+    // or a closed lid reaches no handler, which is exactly why hearing it from
+    // the ones that can is worth a frame (§3).
+    let ingested = '';
+    const stub = createServer((req, res) => {
+      if (req.url?.endsWith('/stream')) {
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(': open\n\n');
+        return;
+      }
+      req.setEncoding('utf8');
+      req.on('data', (chunk: string) => (ingested += chunk));
+      req.on('end', () => res.writeHead(200).end('{}'));
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    let companion: ChildProcess | undefined;
+    try {
+      companion = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        {
+          env: {
+            ...bare(home),
+            SYMMA_COMPANION_GATEWAY: `http://127.0.0.1:${port}`,
+            SYMMA_COMPANION_TOKEN: 'tok',
+            SYMMA_COMPANION_ENDPOINT: 'quitter',
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      await waitFor(
+        async () => (ingested.includes('"kind":"hello"') ? true : undefined),
+        'the companion attaches',
+      );
+
+      // SIGTERM with nothing running — the common quit, and the case that sent
+      // nothing at all before this.
+      companion.kill('SIGTERM');
+      await waitFor(
+        async () => (ingested.includes('"kind":"goodbye"') ? true : undefined),
+        `a goodbye follows the hello (saw ${ingested})`,
+      );
+    } finally {
+      companion?.kill('SIGKILL');
+      stub.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('will not pair a machine with nothing to run', async () => {
     // §2: never attach an endpoint with zero agents. Refused here, before a
     // code is spent, and the reasons are the copy that tells them what to do.

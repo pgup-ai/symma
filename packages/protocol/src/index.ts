@@ -89,6 +89,7 @@ export {
   parseRelayControl,
   type AckControl,
   type CloseControl,
+  type GoodbyeControl,
   type EndpointAgent,
   type EndpointPresence,
   type HelloControl,

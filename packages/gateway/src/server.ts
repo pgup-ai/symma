@@ -238,6 +238,12 @@ async function handleEndpointIngest(
       if (control.kind === 'hello' && control.endpoint === id) {
         relay.attachEndpoint(control, sendToEndpoint(id), owner);
         storeWrite(`markSeen ${id}`, store.markSeen(id));
+      } else if (control.kind === 'goodbye') {
+        // Recorded, not acted on: the leg closing is what detaches, and a
+        // companion that is killed or sleeps never gets here — which is the
+        // whole point of hearing it from the ones that do.
+        relay.sayGoodbye(id);
+        log(`endpoint ${id} said goodbye${control.reason ? `: ${control.reason}` : ''}`);
       } else if (control.kind === 'opened' || control.kind === 'refused') {
         // Only on an ack the relay actually applied: a companion naming
         // another endpoint's session is ignored there, and deleting its row
