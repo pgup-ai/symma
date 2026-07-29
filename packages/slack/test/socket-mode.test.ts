@@ -17,10 +17,16 @@ class FakeSocket implements SocketLike {
     this.closed = true;
     this.emit('close', {});
   }
-  addEventListener(type: 'message' | 'close', listener: (event: { data?: unknown }) => void): void {
+  addEventListener(
+    type: 'open' | 'message' | 'close',
+    listener: (event: { data?: unknown }) => void,
+  ): void {
     const list = this.listeners.get(type) ?? [];
     list.push(listener);
     this.listeners.set(type, list);
+  }
+  open(): void {
+    this.emit('open', {});
   }
   deliver(frame: unknown): void {
     this.deliverRaw(JSON.stringify(frame));
@@ -46,6 +52,7 @@ const envelope = (id: string): unknown => ({
 /** Starts the loop over a queue of sockets and waits for the first dial. */
 async function start(sockets: FakeSocket[], onEnvelope: (e: SocketEnvelope) => Promise<void>) {
   const dialled: FakeSocket[] = [];
+  const waits: number[] = [];
   const connection = socketMode({
     appToken: 'xapp-test',
     log: () => {},
@@ -56,10 +63,13 @@ async function start(sockets: FakeSocket[], onEnvelope: (e: SocketEnvelope) => P
       dialled.push(next);
       return Promise.resolve(next);
     },
-    wait: () => Promise.resolve(),
+    wait: (ms) => {
+      waits.push(ms);
+      return Promise.resolve();
+    },
   });
   await tick();
-  return { connection, dialled };
+  return { connection, dialled, waits };
 }
 
 describe('socket mode', () => {
@@ -111,6 +121,32 @@ describe('socket mode', () => {
     // The queue holds no third socket, so a reconnect here would throw inside
     // the loop rather than fail quietly.
     assert.equal(dialled.length, 2, 'stop() ends the loop rather than reconnecting');
+  });
+
+  it('backs off a handshake that never opens', async () => {
+    // `new WebSocket` returns while the handshake is still in flight, so
+    // resetting the delay on the dial alone would retry a failing handshake
+    // every second — against the very endpoint that hands out the URLs.
+    const dead = [new FakeSocket(), new FakeSocket(), new FakeSocket()];
+    // One spare: every close dials again, and the last dial is what the loop
+    // parks on while this asserts.
+    const failing = await start([...dead, new FakeSocket()], async () => {});
+    for (const socket of dead) {
+      socket.close();
+      await tick();
+    }
+    failing.connection.stop();
+    assert.deepEqual(failing.waits, [1_000, 2_000, 4_000], 'the delay grows');
+
+    // And one that does open starts again from the floor, so an ordinary
+    // reconnect is not punished for an earlier bad patch.
+    const good = new FakeSocket();
+    const opening = await start([good, new FakeSocket()], async () => {});
+    good.open();
+    good.close();
+    await tick();
+    opening.connection.stop();
+    assert.deepEqual(opening.waits, [1_000]);
   });
 
   it('closes a socket that arrives after stop()', async () => {

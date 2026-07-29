@@ -17,7 +17,10 @@ export interface SocketEnvelope {
 export interface SocketLike {
   send(data: string): void;
   close(): void;
-  addEventListener(type: 'message' | 'close', listener: (event: { data?: unknown }) => void): void;
+  addEventListener(
+    type: 'open' | 'message' | 'close',
+    listener: (event: { data?: unknown }) => void,
+  ): void;
 }
 
 export interface SocketModeOptions {
@@ -129,13 +132,23 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
           next.close();
           return;
         }
-        backoff = BACKOFF_MIN_MS;
-        log('connected to slack');
         await new Promise<void>((resolve) => {
+          let opened = false;
+          // Reset on `open`, never on the dial: `new WebSocket` returns while
+          // the handshake is still in flight, so a handshake that then fails
+          // would retry at the minimum forever, against the very endpoint that
+          // hands out the URLs.
+          next.addEventListener('open', () => {
+            opened = true;
+            backoff = BACKOFF_MIN_MS;
+            log('connected to slack');
+          });
           next.addEventListener('message', (event) => receive(String(event.data), next));
-          next.addEventListener('close', () => resolve());
+          next.addEventListener('close', () => {
+            log(opened ? 'slack connection closed' : 'slack connection never opened');
+            resolve();
+          });
         });
-        log('slack connection closed');
       } catch (error) {
         log(`slack connection failed: ${error instanceof Error ? error.message : String(error)}`);
       }
