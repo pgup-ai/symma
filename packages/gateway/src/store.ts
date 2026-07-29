@@ -22,6 +22,15 @@ export interface LiveSession extends SessionRef {
  * `unknown` is the mistyped code, which a log is worth telling apart. */
 export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unknown' | 'spent' };
 
+export interface Conversation {
+  id: string;
+  dmChannel: string;
+  rootThread: string;
+  /** How far up the source thread the agent has been shown; absent until a
+   * snapshot has been taken for it. */
+  seenThroughTs?: string;
+}
+
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
   /** The owner behind a Slack identity, created on first sight — `/connect`
@@ -32,6 +41,39 @@ export interface Store {
    * re-creating them here would be re-admitting someone who was removed, which
    * stays an administrative act rather than something their own command does. */
   ensureMember(slackTeamId: string, slackUserId: string): Promise<Owner | undefined>;
+  /** The conversation a source thread already has (§4). A repeat mention
+   * continues it rather than opening a second one. */
+  conversationForSource(
+    owner: Owner,
+    sourceChannel: string,
+    sourceThread: string,
+  ): Promise<Conversation | undefined>;
+  /** Opens one. Undefined when a concurrent mention opened it first, which the
+   * caller answers by adopting that one — the DM root it already posted is the
+   * only cost, and it is a message in the member's own DM. */
+  openConversation(
+    owner: Owner,
+    spec: {
+      dmChannel: string;
+      rootThread: string;
+      sourceChannel?: string;
+      sourceThread?: string;
+      endpoint?: string;
+      agent?: string;
+    },
+  ): Promise<Conversation | undefined>;
+  /** Records one invocation, and the cursor it read the thread up to, as one
+   * fact. Undefined when this Slack event already made a turn — which is how a
+   * redelivery finds its own work rather than repeating it. */
+  recordTurn(
+    conversation: string,
+    slackEventId: string,
+    seenThroughTs?: string,
+  ): Promise<string | undefined>;
+  /** §1 retention, by last use rather than by age: a thread a member is still
+   * replying in is not stale. Turns and session links cascade; frames belong to
+   * sessions, which `expireSessions` already answers for. */
+  expireConversations(olderThanDays: number): Promise<number>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
    * supersedes this owner's outstanding code. Undefined if they are no longer an
    * active member, which the caller must answer rather than hand back a code
@@ -87,6 +129,10 @@ export interface Store {
   deactivateUser(slackTeamId: string, slackUserId: string): Promise<SessionRef[]>;
   close(): Promise<void>;
 }
+
+/** Spread, so an absent cursor is a missing key rather than an explicit
+ * undefined — the shape the rest of this file uses for optional columns. */
+const seen = (ts: string | null): { seenThroughTs?: string } => (ts ? { seenThroughTs: ts } : {});
 
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
@@ -183,6 +229,76 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       } finally {
         client.release();
       }
+    },
+    async conversationForSource(owner, sourceChannel, sourceThread) {
+      const row = await one<{ id: string; dm: string; root: string; seen: string | null }>(
+        `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen
+           FROM conversations
+          WHERE user_id = $1 AND source_channel_id = $2 AND source_thread_ts = $3`,
+        [owner, sourceChannel, sourceThread],
+      );
+      return row && { id: row.id, dmChannel: row.dm, rootThread: row.root, ...seen(row.seen) };
+    },
+    async openConversation(owner, spec) {
+      const id = randomUUID();
+      // DO NOTHING rather than an upsert: the loser of a race must not overwrite
+      // the winner's DM root with its own, which would strand the thread the
+      // member is already looking at.
+      const landed = await one<{ id: string }>(
+        `INSERT INTO conversations (id, user_id, dm_channel_id, root_thread_ts,
+                                    source_channel_id, source_thread_ts, endpoint_id, agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, coalesce($8, ''))
+         ON CONFLICT (user_id, source_channel_id, source_thread_ts)
+           WHERE source_channel_id IS NOT NULL DO NOTHING
+         RETURNING id`,
+        [
+          id,
+          owner,
+          spec.dmChannel,
+          spec.rootThread,
+          spec.sourceChannel ?? null,
+          spec.sourceThread ?? null,
+          spec.endpoint ?? null,
+          spec.agent ?? null,
+        ],
+      );
+      return landed && { id, dmChannel: spec.dmChannel, rootThread: spec.rootThread };
+    },
+    async recordTurn(conversation, slackEventId, seenThroughTs) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const turn = await client.query<{ id: string }>(
+          `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
+           ON CONFLICT (slack_event_id) DO NOTHING RETURNING id`,
+          [randomUUID(), conversation, slackEventId],
+        );
+        // Only on a turn this call created: a redelivery must not move the
+        // cursor forward a second time, or the delta it reads would skip work.
+        if (turn.rowCount) {
+          await client.query(
+            `UPDATE conversations
+                SET last_activity_at = now(),
+                    seen_through_ts = coalesce($2, seen_through_ts)
+              WHERE id = $1`,
+            [conversation, seenThroughTs ?? null],
+          );
+        }
+        await client.query('COMMIT');
+        return turn.rows[0]?.id;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+    async expireConversations(olderThanDays) {
+      const { rowCount } = await pool.query(
+        `DELETE FROM conversations WHERE last_activity_at < now() - make_interval(days => $1)`,
+        [olderThanDays],
+      );
+      return rowCount ?? 0;
     },
     async mintPairingCode(owner) {
       const code = newPairingCode();
@@ -621,6 +737,10 @@ export function localStore(
     claimEndpoint: needsDatabase,
     // One member, holding a token they configured: nobody to introduce.
     ensureMember: needsDatabase,
+    conversationForSource: needsDatabase,
+    openConversation: needsDatabase,
+    recordTurn: needsDatabase,
+    expireConversations: needsDatabase,
     mintPairingCode: needsDatabase,
     redeemPairingCode: needsDatabase,
     close: () => Promise.resolve(),
