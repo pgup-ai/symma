@@ -1,12 +1,11 @@
 /**
  * The login service that brings the companion back after a reboot or a crash.
  *
- * A *user* service on both platforms, and that is load-bearing (§3): the agents
- * run on this machine's ambient auth — kilo's `auth.json`, `~/.codex`, the login
- * keychain — and a root daemon starting before login can see none of it. A
- * design that reaches for one has quietly decided to put the credentials
- * somewhere else. The consequence is worth stating rather than engineering
- * around: the companion runs while its owner is logged in.
+ * A *user* service on both platforms, which is load-bearing rather than a
+ * packaging detail (§3): the agents run on this machine's ambient auth — kilo's
+ * `auth.json`, `~/.codex`, the login keychain — and a root daemon starting
+ * before login can read none of it. So the companion runs while its owner is
+ * logged in, and stops when they log out.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -14,10 +13,9 @@ import { dirname, join } from 'node:path';
 export interface LoginService {
   path: string;
   contents: string;
-  /** What starts it now. Writing the unit is the mechanism and enabling it is
-   * the member's decision — the same split §3 makes for `loginctl
-   * enable-linger`, which is a deliberate opt-in rather than something pairing
-   * does to a machine on its own. */
+  /** What starts it now. Writing the unit is the mechanism, enabling it the
+   * member's decision — the split §3 already makes for `loginctl
+   * enable-linger`. */
   enable: string;
 }
 
@@ -27,7 +25,7 @@ const xml = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /** Undefined where there is no user service to write — Windows today, which
- * still runs the companion, just not across a reboot on its own. */
+ * runs the companion but not across a reboot. */
 export function loginService(
   platform: NodeJS.Platform,
   home: string,
@@ -37,9 +35,8 @@ export function loginService(
     const path = join(home, 'Library', 'LaunchAgents', `${LABEL}.plist`);
     return {
       path,
-      // LaunchAgents, never LaunchDaemons — that directory is the difference
-      // between a service that can read the login keychain and one that cannot.
-      // RunAtLoad covers the reboot, KeepAlive the crash.
+      // RunAtLoad covers the reboot, KeepAlive the crash. The lid is neither
+      // (§3) — a closed laptop is not running anything to supervise.
       contents: `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -60,9 +57,8 @@ ${command.map((argument) => `      <string>${xml(argument)}</string>`).join('\n'
   if (platform === 'linux') {
     return {
       path: join(home, '.config', 'systemd', 'user', 'symma-companion.service'),
-      // A user unit, so `--user` throughout. Staying up while logged out needs
-      // `loginctl enable-linger`, which §3 keeps as the member's opt-in rather
-      // than a default that outlives their session.
+      // Staying up past logout needs `loginctl enable-linger`, which §3 keeps
+      // as the member's opt-in rather than a default outliving their session.
       contents: `[Unit]
 Description=symma companion
 

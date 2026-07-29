@@ -10,7 +10,7 @@ const COMMAND = ['/usr/bin/node', '--conditions=symma-source', '/opt/sym ma/inde
 
 describe('login service', () => {
   it('installs as a user service on macOS, never a daemon', () => {
-    const service = loginService('darwin', '/Users/nel', COMMAND)!;
+    const service = loginService('darwin', '/Users/nel', COMMAND);
     assert.ok(service);
     // The directory is the whole security story: a LaunchDaemon starts before
     // login and cannot read the keychain the agents authenticate from.
@@ -28,7 +28,7 @@ describe('login service', () => {
   });
 
   it('installs as a systemd user unit on Linux, never a system one', () => {
-    const service = loginService('linux', '/home/nel', COMMAND)!;
+    const service = loginService('linux', '/home/nel', COMMAND);
     assert.ok(service);
     assert.equal(service.path, '/home/nel/.config/systemd/user/symma-companion.service');
     assert.doesNotMatch(service.path, /\/etc\/systemd/);
@@ -45,7 +45,8 @@ describe('login service', () => {
   });
 
   it('escapes a command that would otherwise break the plist', () => {
-    const service = loginService('darwin', '/Users/nel', ['/bin/x', '--flag=a&b<c>d'])!;
+    const service = loginService('darwin', '/Users/nel', ['/bin/x', '--flag=a&b<c>d']);
+    assert.ok(service);
     assert.ok(service.contents.includes('<string>--flag=a&amp;b&lt;c&gt;d</string>'));
     assert.doesNotMatch(service.contents, /a&b<c>d/);
   });
