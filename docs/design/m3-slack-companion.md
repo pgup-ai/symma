@@ -1003,11 +1003,19 @@ Why each number matters:
    before it bites — the companion is the half we cannot retrofit, so it has to
    learn the negotiation while every gateway still accepts it.
 
+   A newer generation is refused too, not just an older one. Lines a gateway
+   cannot read are dropped rather than rejected, so a control from a generation
+   it never learned would vanish silently and hang the session instead of
+   failing it. Gateways learn a generation before any companion claims it, so
+   this only fires on a bad deploy order — which is when it should be loud.
+
    A gateway that will not serve a generation answers the attach `426` and stops
-   reading. The companion says which upgrade fixes it and then reconnects at the
-   _slowest_ rate rather than the fastest, inverting its usual backoff: no retry
-   schedule repairs a build, and a refusal retried every second is a laptop kept
-   busy learning nothing.
+   acting on the rest of the body, draining it rather than tearing the socket
+   down, so what the companion reads is a status and not a reset. The companion
+   says which upgrade fixes it and then reconnects at the _slowest_ rate rather
+   than the fastest, inverting its usual backoff: no retry schedule repairs a
+   build, and a refusal retried every second is a laptop kept busy learning
+   nothing.
 
 2. **Owner binding** established during pairing and stored server-side.
 3. **A goodbye control** the companion sends as it exits, so the relay can tell

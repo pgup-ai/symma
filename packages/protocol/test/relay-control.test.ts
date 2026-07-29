@@ -61,16 +61,15 @@ describe('relay control parsing', () => {
       (parseRelayControl(JSON.stringify(hello({ version: raw as number }))) as HelloControl)
         .version;
     assert.equal(version(2), 2);
-    // Coerced like `maxSessions` beside it; a stricter rule for one numeric
-    // field would only make the parser inconsistent, and '3' means generation 3.
-    assert.equal(version('3'), 3);
     // Absent is generation 0: every companion published before the field
     // existed sends none, and those are exactly what N−1 has to keep serving.
     assert.equal((parseRelayControl(JSON.stringify(hello())) as HelloControl).version, undefined);
-    // Unreadable drops to absent rather than failing the hello — the same
-    // direction an unknown refusal code drops, and the safe one, since the
-    // oldest generation is the first to be refused.
-    for (const bad of [1.5, -1, 0, null, {}, 'soon']) {
+    // A JSON number or nothing. `true` is why this does not go through
+    // `Number()` the way `maxSessions` does — it coerces to 1 and would pass a
+    // gate on compatibility with a value that means nothing. Everything else
+    // drops to generation 0 rather than failing the hello, the direction an
+    // unknown refusal code drops and the safe one, since 0 is refused first.
+    for (const bad of [true, false, '3', 1.5, -1, 0, null, {}, 'soon']) {
       assert.equal(version(bad), undefined, JSON.stringify(bad));
     }
   });
@@ -79,6 +78,10 @@ describe('relay control parsing', () => {
     assert.ok(servesProtocol(PROTOCOL_VERSION));
     assert.ok(servesProtocol(PROTOCOL_VERSION - 1));
     assert.ok(!servesProtocol(PROTOCOL_VERSION - 2));
+    // A newer one is refused too: unreadable lines drop rather than fail, so a
+    // control from a generation this gateway never learned would vanish
+    // silently and hang the session instead of failing it.
+    assert.ok(!servesProtocol(PROTOCOL_VERSION + 1));
     // Absent is generation 0, so the companions already published — none of
     // which state a version — are served for one more bump rather than cut off
     // at the first, which is the whole reason the field ships before it bites.

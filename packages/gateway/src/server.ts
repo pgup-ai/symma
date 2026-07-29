@@ -250,7 +250,9 @@ async function handleEndpointIngest(
           outdated = true;
           log(`endpoint ${id} speaks protocol ${control.version ?? 0}; refused`);
           res.writeHead(426, { 'content-type': 'text/plain' });
-          res.end('companion too old for this gateway');
+          // Neutral about direction: a generation too new is refused too, and
+          // the log above is where an operator reads which way it went.
+          res.end('unsupported protocol generation');
           return;
         }
         attached = relay.attachEndpoint(control, sendToEndpoint(id), owner);
@@ -285,7 +287,11 @@ async function handleEndpointIngest(
     const envelope = parseEnvelope(line);
     if (envelope) relay.endpointLine(id, envelope.sessionId, line);
   });
-  if (!outdated) overflowOr(res, req, overflow);
+  if (outdated) {
+    // The 426 flushed long before a body could reach the overflow cap, so this
+    // only takes the socket back from a peer that ignored it and kept streaming.
+    if (overflow) req.destroy();
+  } else overflowOr(res, req, overflow);
 }
 
 // Client upstream: open pairs, frames relay, close tears down. The path sid
