@@ -33,9 +33,11 @@ export interface Store {
    * stays an administrative act rather than something their own command does. */
   ensureMember(slackTeamId: string, slackUserId: string): Promise<Owner | undefined>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
-   * supersedes this owner's outstanding code. Throws if they are not a member
-   * here any more, rather than handing back a code that can only fail later. */
-  mintPairingCode(owner: Owner): Promise<string>;
+   * supersedes this owner's outstanding code. Undefined if they are no longer an
+   * active member, which the caller must answer rather than hand back a code
+   * that can only fail later; the type is what makes that unmissable. A store
+   * failure still throws. */
+  mintPairingCode(owner: Owner): Promise<string | undefined>;
   /** Spends a code. Two redeems of one code cannot both come back `ok`. */
   redeemPairingCode(code: string): Promise<PairingResult>;
   /** The other half of pairing: an endpoint for this member and the token it
@@ -43,10 +45,9 @@ export interface Store {
    * unauthenticated request body, where it would be a valid code away from
    * someone else's endpoint (§2).
    *
-   * Undefined if the member is gone by the time this runs. Unlike
-   * `mintPairingCode`, whose caller names a member it should know, this one
-   * just watched a redeem find them alive — so their absence is a race to
-   * answer, not a caller's mistake to throw at. A store failure still throws. */
+   * Undefined if the member is gone by the time this runs — a race to answer,
+   * not a caller's mistake to throw at, which is `mintPairingCode` above too.
+   * A store failure still throws. */
   claimEndpoint(
     owner: Owner,
     device: string,
@@ -145,27 +146,43 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       return row?.subject_id;
     },
     async ensureMember(slackTeamId, slackUserId) {
-      // Returns the existing id on conflict rather than assuming one: a
-      // workspace row created by another path would otherwise fail the users
-      // insert below on a foreign key that names a row we never looked up.
-      const workspace = await one<{ id: string }>(
-        `INSERT INTO workspaces (id, slack_team_id) VALUES ($1, $2)
-         ON CONFLICT (slack_team_id) DO UPDATE SET slack_team_id = EXCLUDED.slack_team_id
-         RETURNING id`,
-        [`ws-${slackTeamId}`, slackTeamId],
-      );
-      // Assigned, never derived from the two caller values — the defect
-      // `provision` documents, where a hyphen the caller controls let
-      // ("a", "b-c") and ("a-b", "c") spell one owner.
-      const member = await one<{ id: string; deactivated_at: string | null }>(
-        `INSERT INTO users (id, workspace_id, slack_user_id) VALUES ($1, $2, $3)
-         ON CONFLICT (workspace_id, slack_user_id)
-           DO UPDATE SET slack_user_id = EXCLUDED.slack_user_id
-         RETURNING id, deactivated_at`,
-        [randomUUID(), workspace!.id, slackUserId],
-      );
-      // Read, never cleared — see the contract above.
-      return member!.deactivated_at ? undefined : member!.id;
+      // One transaction, for the reason deleteWorkspace gives for its own: the
+      // workspace and the member arrive together or not at all. Apart, an
+      // uninstall committing between them takes the workspace out from under
+      // the second insert and it fails on a foreign key. The upsert holds a row
+      // lock on the workspace for the transaction, so the uninstall waits.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        // Returns the existing id on conflict rather than assuming one: a
+        // workspace row created by another path would otherwise fail the users
+        // insert below on a foreign key naming a row we never looked up.
+        const workspace = await client.query<{ id: string }>(
+          `INSERT INTO workspaces (id, slack_team_id) VALUES ($1, $2)
+           ON CONFLICT (slack_team_id) DO UPDATE SET slack_team_id = EXCLUDED.slack_team_id
+           RETURNING id`,
+          [`ws-${slackTeamId}`, slackTeamId],
+        );
+        // Assigned, never derived from the two caller values — the defect
+        // `provision` documents, where a hyphen the caller controls let
+        // ("a", "b-c") and ("a-b", "c") spell one owner.
+        const member = await client.query<{ id: string; deactivated_at: string | null }>(
+          `INSERT INTO users (id, workspace_id, slack_user_id) VALUES ($1, $2, $3)
+           ON CONFLICT (workspace_id, slack_user_id)
+             DO UPDATE SET slack_user_id = EXCLUDED.slack_user_id
+           RETURNING id, deactivated_at`,
+          [randomUUID(), workspace.rows[0]!.id, slackUserId],
+        );
+        await client.query('COMMIT');
+        // Read, never cleared — see the contract above.
+        const row = member.rows[0]!;
+        return row.deactivated_at ? undefined : row.id;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
     },
     async mintPairingCode(owner) {
       const code = newPairingCode();
@@ -189,10 +206,9 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
                 consumed_at = NULL`,
         [hashToken(normalizeCode(code)), owner, PAIRING_TTL_MINUTES],
       );
-      // Loud rather than a code that can only fail later: the caller asked to
-      // pair someone who is not a member here.
-      if (!rowCount) throw new Error(`no active member ${owner} to pair`);
-      return code;
+      // No row means they are not an active member — deactivated, or gone with
+      // their workspace between the caller's lookup and this lock.
+      return rowCount ? code : undefined;
     },
     async redeemPairingCode(code) {
       const hash = hashToken(normalizeCode(code));

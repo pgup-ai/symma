@@ -911,6 +911,7 @@ describe('tenancy', () => {
     let companion: ChildProcess | undefined;
     try {
       const code = await store.mintPairingCode(wen.owner);
+      assert.ok(code);
       const env = {
         ...process.env,
         HOME: home,
@@ -1159,6 +1160,7 @@ describe('tenancy', () => {
     const pool = new Pool({ connectionString: url });
     try {
       const code = await store.mintPairingCode(nel.owner);
+      assert.ok(code);
       // Four groups of four, from an alphabet with no I, L, O or U — 80 bits.
       assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){3}$/);
       // Returned once and stored only as a hash, like a token.
@@ -1190,6 +1192,7 @@ describe('tenancy', () => {
     const pool = new Pool({ connectionString: url });
     try {
       const stale = await store.mintPairingCode(ora.owner);
+      assert.ok(stale);
       await pool.query(
         `UPDATE pairings SET expires_at = now() - interval '1 second' WHERE user_id = $1`,
         [ora.owner],
@@ -1200,6 +1203,8 @@ describe('tenancy', () => {
       // two, so there is only ever one thing to guess at.
       const first = await store.mintPairingCode(ora.owner);
       const second = await store.mintPairingCode(ora.owner);
+      assert.ok(first);
+      assert.ok(second);
       assert.deepEqual(await store.redeemPairingCode(first), { ok: false, why: 'unknown' });
       assert.deepEqual(await store.redeemPairingCode(second), { ok: true, owner: ora.owner });
 
@@ -1212,6 +1217,8 @@ describe('tenancy', () => {
         store.mintPairingCode(ora.owner),
         store.mintPairingCode(ora.owner),
       ]);
+      assert.ok(a);
+      assert.ok(b);
       const live = [await store.redeemPairingCode(a), await store.redeemPairingCode(b)];
       assert.deepEqual(
         live.filter((r) => r.ok),
@@ -1233,6 +1240,7 @@ describe('tenancy', () => {
     const pool = new Pool({ connectionString: url });
     try {
       const code = await store.mintPairingCode(sev.owner);
+      assert.ok(code);
       await store.deactivateUser('pair', 'sev');
       // Gone with the tokens, not merely ignored — deactivation removes the
       // credential the way it revokes the others.
@@ -1241,7 +1249,7 @@ describe('tenancy', () => {
       // Nor is a new one issued to a queued Slack event or an operator working
       // off a stale list: minting takes the member row lock that deactivation
       // takes, so it cannot land a code behind a cleanup that already ran.
-      await assert.rejects(store.mintPairingCode(sev.owner), /no active member/);
+      assert.equal(await store.mintPairingCode(sev.owner), undefined);
       // Nor an endpoint. Deactivation deletes them, and claiming takes the same
       // member lock, so a pair in flight cannot leave one behind it.
       assert.equal(await store.claimEndpoint(sev.owner, 'late laptop'), undefined);
@@ -1287,6 +1295,7 @@ describe('tenancy', () => {
       // pinned on whichever test ran last (live-hit, ~1 in 5 runs).
       await Promise.all([store.runsFor(rai.owner), store.runsFor(rai.owner)]);
       const code = await store.mintPairingCode(rai.owner);
+      assert.ok(code);
       // Two, in one tick on separate pooled connections. More prove nothing
       // further and widen the pool past what close() tears down in time.
       const racers = await Promise.all([

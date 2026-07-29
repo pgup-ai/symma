@@ -774,17 +774,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const member = await store.ensureMember(team, user);
     // Deactivated, not absent — `ensureMember` creates whoever it has not seen.
     if (!member) return sendJson(res, 403, { error: 'deactivated' });
-    let code: string;
-    try {
-      code = await store.mintPairingCode(member);
-    } catch (error) {
-      // Deactivated between the lookup and the mint, which re-checks under lock
-      // and throws. Asked again rather than matched on a message — and rethrown
-      // while they are still active, since a store failure is not a decision
-      // about this member.
-      if (await store.ensureMember(team, user)) throw error;
-      return sendJson(res, 403, { error: 'deactivated' });
-    }
+    // Undefined covers the member deactivated — or gone with their workspace —
+    // between the lookup above and the mint's own locked re-check.
+    const code = await store.mintPairingCode(member);
+    if (!code) return sendJson(res, 403, { error: 'deactivated' });
     // The member, never the code, which is the credential itself.
     log(`minted a pairing code for ${member}`);
     return sendJson(res, 200, { code, expiresInMinutes: PAIRING_TTL_MINUTES });
