@@ -14,7 +14,7 @@ export type MintResult =
 
 export type ConnectOutcome = MintResult | { ok: false; why: 'foreign-workspace' | 'unavailable' };
 
-export interface SlashCommand {
+interface SlashCommand {
   team_id?: unknown;
   user_id?: unknown;
   response_url?: unknown;

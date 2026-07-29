@@ -75,6 +75,13 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
   const seen = new Set<string>();
   let stopped = false;
   let socket: SocketLike | undefined;
+  // Raced against the reconnect wait below: without it the flag is next read
+  // only once the timer fires, so stopping between connections would sit out
+  // the rest of the backoff — up to 30s of it.
+  let wake = (): void => {};
+  const stopping = new Promise<void>((resolve) => {
+    wake = resolve;
+  });
 
   // Takes the socket the frame arrived on rather than reading the current one:
   // a late frame from a connection we already replaced would otherwise close
@@ -158,7 +165,7 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
       }
       socket = undefined;
       if (stopped) return;
-      await wait(backoff);
+      await Promise.race([wait(backoff), stopping]);
       backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
     }
   })();
@@ -167,6 +174,7 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
     stop: () => {
       stopped = true;
       socket?.close();
+      wake();
     },
   };
 }
