@@ -5,6 +5,8 @@
  * has not earned any of them yet.
  */
 import { connectMessage, runConnect, type MintResult } from './connect.js';
+import { handleMention, type ConversationRef } from './mention.js';
+import { slackApi } from './slack-api.js';
 import { socketMode } from './socket-mode.js';
 
 const log = (message: string): void => {
@@ -43,6 +45,21 @@ function mintThrough(
   };
 }
 
+/** Everything the bot asks the gateway goes through one door, authenticated with
+ * the shared secret — it never reaches the database (§6). */
+function gatewayCall(gateway: string, token: string, team: string) {
+  return async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
+    const res = await fetch(`${gateway}${path}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ team, ...body }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    return (await res.json()) as T;
+  };
+}
+
 async function reply(responseUrl: string, text: string): Promise<void> {
   // Ephemeral without exception. A pairing code is a credential, and `/connect`
   // can be run in any channel the app is in — an in_channel reply would put one
@@ -64,12 +81,75 @@ const team = required('SYMMA_SLACK_TEAM');
 const gateway = required('SYMMA_GATEWAY').replace(/\/+$/, '');
 const gatewayToken = required('SYMMA_SLACK_GATEWAY_TOKEN');
 
+const botToken = required('SYMMA_SLACK_BOT_TOKEN');
+// A ceiling on injected context, not a tuning knob: §4 requires a hard budget
+// and an honest account of what it left out.
+const budgetBytes = Number(process.env.SYMMA_SLACK_BUDGET_BYTES) || 24_000;
+
 const mint = mintThrough(gateway, gatewayToken, team);
+const ask = gatewayCall(gateway, gatewayToken, team);
+const api = slackApi(botToken);
+
+/** A mention carries the member's Slack id, which is the trusted assertion of
+ * who is asking — the same one `/connect` pairs on. */
+const mentionDeps = (user: string) => ({
+  budgetBytes,
+  log,
+  threadReplies: api.threadReplies,
+  post: api.post,
+  // Read at the boundary rather than cast: an empty object is the gateway saying
+  // this thread has no conversation yet, which is the ordinary first mention.
+  find: async (sourceChannel: string, sourceThread: string) => {
+    const found = await ask<Partial<ConversationRef>>('/api/slack/conversation', {
+      user,
+      sourceChannel,
+      sourceThread,
+    });
+    const { id, dmChannel, rootThread, seenThroughTs } = found;
+    if (!id || !dmChannel || !rootThread) return undefined;
+    return { id, dmChannel, rootThread, ...(seenThroughTs ? { seenThroughTs } : {}) };
+  },
+  turn: (spec: Record<string, unknown>) =>
+    ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+});
 
 const connection = socketMode({
   appToken,
   log,
   onEnvelope: async (envelope) => {
+    if (envelope.type === 'events_api') {
+      const { event_id: eventId, event } = envelope.payload as {
+        event_id?: unknown;
+        event?: {
+          type?: unknown;
+          user?: unknown;
+          channel?: unknown;
+          ts?: unknown;
+          thread_ts?: unknown;
+        };
+      };
+      if (event?.type !== 'app_mention') return;
+      if (
+        typeof eventId !== 'string' ||
+        typeof event.user !== 'string' ||
+        typeof event.channel !== 'string' ||
+        typeof event.ts !== 'string'
+      ) {
+        return;
+      }
+      const outcome = await handleMention(
+        {
+          user: event.user,
+          channel: event.channel,
+          // A mention that starts a thread is its own thread.
+          threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
+          eventId,
+        },
+        mentionDeps(event.user),
+      );
+      log(`mention in ${event.channel}: ${outcome}`);
+      return;
+    }
     if (envelope.type !== 'slash_commands') return;
     const command = envelope.payload as { command?: unknown; response_url?: unknown };
     if (command.command !== '/connect') return;

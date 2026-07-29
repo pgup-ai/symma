@@ -685,6 +685,38 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value));
 }
 
+const str = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+
+/** The source thread a body names, as the pair the store takes. */
+function threadOf(body: Record<string, unknown>): [string, string] | undefined {
+  const { sourceChannel, sourceThread } = body;
+  return str(sourceChannel) && str(sourceThread) ? [sourceChannel, sourceThread] : undefined;
+}
+
+/**
+ * What every bot route needs before it can do anything: the shared secret, a
+ * body, and the member behind the Slack identity its socket authenticated.
+ * Answers the request itself and returns undefined when any of those is missing,
+ * so a route reads as the work it does rather than the checks it repeats.
+ */
+async function slackCaller(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<{ owner: Owner; body: Record<string, unknown> } | undefined> {
+  if (!databaseUrl || !botToken) return void sendJson(res, 404, { error: 'unsupported' });
+  if (!sameSecret(bearerToken(req) ?? '', botToken))
+    return void sendJson(res, 401, { error: 'unauthorized' });
+  const body = await readPairBody(req, res);
+  if (typeof body !== 'object' || body === null)
+    return void sendJson(res, 400, { error: 'request' });
+  const { team, user } = body as { team?: unknown; user?: unknown };
+  if (!str(team) || !str(user)) return void sendJson(res, 400, { error: 'request' });
+  const owner = await store.ensureMember(team, user);
+  // Deactivated, not absent — `ensureMember` creates whoever it has not seen.
+  if (!owner) return void sendJson(res, 403, { error: 'deactivated' });
+  return { owner, body: body as Record<string, unknown> };
+}
+
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method === 'GET' && url.pathname === '/healthz') {
@@ -761,25 +793,61 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return sendJson(res, 200, claimed);
   }
   // Before the client gate, because the bot holds no client token — see
-  // `botToken`. Everything below this line speaks for exactly one owner.
-  if (req.method === 'POST' && url.pathname === '/api/slack/pair') {
-    if (!databaseUrl || !botToken) return sendJson(res, 404, { error: 'unsupported' });
-    if (!sameSecret(bearerToken(req) ?? '', botToken))
-      return sendJson(res, 401, { error: 'unauthorized' });
-    const body = await readPairBody(req, res);
-    if (typeof body !== 'object' || body === null) return sendJson(res, 400, { error: 'request' });
-    const { team, user } = body as { team?: unknown; user?: unknown };
-    if (!team || typeof team !== 'string' || !user || typeof user !== 'string')
-      return sendJson(res, 400, { error: 'request' });
-    const member = await store.ensureMember(team, user);
-    // Deactivated, not absent — `ensureMember` creates whoever it has not seen.
-    if (!member) return sendJson(res, 403, { error: 'deactivated' });
+  // `botToken`. Everything below the gate speaks for exactly one owner.
+  if (req.method === 'POST' && url.pathname.startsWith('/api/slack/')) {
+    const caller = await slackCaller(req, res);
+    if (!caller) return;
+    const { owner, body } = caller;
+    if (url.pathname === '/api/slack/conversation') {
+      const source = threadOf(body);
+      if (!source) return sendJson(res, 400, { error: 'request' });
+      // An empty object rather than a 404: "no conversation yet" is the ordinary
+      // first mention, not a failure the bot should read as one.
+      return sendJson(res, 200, (await store.conversationForSource(owner, ...source)) ?? {});
+    }
+    if (url.pathname === '/api/slack/turn') {
+      const source = threadOf(body);
+      const { dmChannel, rootThread, slackEventId, seenThroughTs, endpoint, agent } = body as {
+        dmChannel?: unknown;
+        rootThread?: unknown;
+        slackEventId?: unknown;
+        seenThroughTs?: unknown;
+        endpoint?: unknown;
+        agent?: unknown;
+      };
+      if (!source || !str(dmChannel) || !str(rootThread) || !str(slackEventId))
+        return sendJson(res, 400, { error: 'request' });
+      // Find, else open, else find again: `openConversation` declines rather
+      // than overwrite when a concurrent mention won, and the loser's answer is
+      // to carry on in the thread that won.
+      const conversation =
+        (await store.conversationForSource(owner, ...source)) ??
+        (await store.openConversation(owner, {
+          dmChannel,
+          rootThread,
+          sourceChannel: source[0],
+          sourceThread: source[1],
+          ...(str(endpoint) ? { endpoint } : {}),
+          ...(str(agent) ? { agent } : {}),
+        })) ??
+        (await store.conversationForSource(owner, ...source));
+      if (!conversation) return sendJson(res, 409, { error: 'conflict' });
+      // An absent turn is a redelivery finding its own work, which the bot
+      // answers by not repeating it — not an error.
+      const turn = await store.recordTurn(
+        conversation.id,
+        slackEventId,
+        str(seenThroughTs) ? seenThroughTs : undefined,
+      );
+      return sendJson(res, 200, { conversation, ...(turn ? { turn } : {}) });
+    }
+    if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —
     // between the lookup above and the mint's own locked re-check.
-    const code = await store.mintPairingCode(member);
+    const code = await store.mintPairingCode(owner);
     if (!code) return sendJson(res, 403, { error: 'deactivated' });
     // The member, never the code, which is the credential itself.
-    log(`minted a pairing code for ${member}`);
+    log(`minted a pairing code for ${owner}`);
     return sendJson(res, 200, { code, expiresInMinutes: PAIRING_TTL_MINUTES });
   }
   const token = clientToken(req, url);
