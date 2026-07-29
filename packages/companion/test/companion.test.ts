@@ -261,7 +261,7 @@ describe('relay e2e', () => {
     }
   });
 
-  it('boots from a pairing on disk, and lets a variable override one field of it', async () => {
+  it('takes each field from the file or a variable, and says when it took none', async () => {
     const attaches: { url: string; auth: string }[] = [];
     let ingested = '';
     const stub = createServer((req, res) => {
@@ -280,23 +280,25 @@ describe('relay e2e', () => {
     await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
     const port = (stub.address() as { port: number }).port;
     const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    const homes = [home];
     writePairing(
       home,
       JSON.stringify({
         gateway: `http://127.0.0.1:${port}`,
         endpoint: 'from-file',
-        token: 'file-tok',
+        // Padded: a hand-edited file should not send a token with a space in it.
+        token: '  file-tok  ',
         device: "Tam's laptop",
       }),
     );
-    const start = (extra: Record<string, string>): ChildProcess =>
+    const start = (from: string, extra: Record<string, string>): ChildProcess =>
       spawn(
         process.execPath,
         ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
         {
           env: {
             ...process.env,
-            HOME: home,
+            HOME: from,
             SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
             ...extra,
           },
@@ -307,7 +309,7 @@ describe('relay e2e', () => {
     let companion: ChildProcess | undefined;
     try {
       // Nothing in the environment: gateway, endpoint and token off the file.
-      companion = start({});
+      companion = start(home, {});
       const first = await waitFor(async () => attaches[0], 'attaches from the file alone');
       assert.equal(first.url, '/api/endpoints/from-file/stream');
       assert.equal(first.auth, 'Bearer file-tok');
@@ -321,38 +323,67 @@ describe('relay e2e', () => {
 
       // Per field, not all-or-nothing: the variable replaces the endpoint and
       // the token still comes off the file.
-      companion = start({ SYMMA_COMPANION_ENDPOINT: 'from-env' });
+      companion = start(home, { SYMMA_COMPANION_ENDPOINT: 'from-env' });
       const second = await waitFor(async () => attaches[1], 'attaches with the override');
       assert.equal(second.url, '/api/endpoints/from-env/stream');
       assert.equal(second.auth, 'Bearer file-tok');
+      companion.kill('SIGKILL');
+
+      // A variable holding nothing but a space is not an override. Untrimmed it
+      // would win and then come to nothing, and the pairing would read absent.
+      companion = start(home, { SYMMA_COMPANION_ENDPOINT: '   ' });
+      const third = await waitFor(async () => attaches[2], 'attaches past a blank override');
+      assert.equal(third.url, '/api/endpoints/from-file/stream');
+      companion.kill('SIGKILL');
+
+      // Half a file is still a file in use: it supplies the gateway and token
+      // and leaves the endpoint to a variable, so calling it ignored would be a
+      // false alarm on a setup that works.
+      const half = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+      homes.push(half);
+      writePairing(
+        half,
+        JSON.stringify({ gateway: `http://127.0.0.1:${port}`, token: 'half-tok' }),
+      );
+      companion = start(half, { SYMMA_COMPANION_ENDPOINT: 'from-env-only' });
+      let said = '';
+      companion.stdout?.on('data', (c) => (said += String(c)));
+      const fourth = await waitFor(async () => attaches[3], 'attaches from half a file');
+      assert.equal(fourth.url, '/api/endpoints/from-env-only/stream');
+      assert.equal(fourth.auth, 'Bearer half-tok');
+      assert.doesNotMatch(said, /ignoring/);
     } finally {
       companion?.kill('SIGKILL');
       stub.close();
-      rmSync(home, { recursive: true, force: true });
+      for (const dir of homes) rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('says how to pair rather than starting on an unreadable one', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
-    writePairing(home, '{ broken');
-    try {
-      const companion = spawn(
-        process.execPath,
-        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
-        { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
-      );
-      let out = '';
-      companion.stdout?.on('data', (c) => (out += String(c)));
-      companion.stderr?.on('data', (c) => (out += String(c)));
-      const code = await new Promise((resolve) => companion.on('exit', resolve));
-      assert.equal(code, 1);
-      assert.match(out, /Not paired\. Run `symma pair <CODE>`/);
-      // And says why, so nobody re-pairs against a file that is sitting there.
-      assert.match(out, /ignoring .*pairing\.json/);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
+  // Unparseable, and parseable but useless — a typo'd key reads as valid JSON
+  // and contributes nothing, which is the case silence would hide.
+  for (const contents of ['{ broken', '{"endPoint":"typo","token":42}']) {
+    it(`says how to pair rather than starting on ${contents}`, async () => {
+      const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+      writePairing(home, contents);
+      try {
+        const companion = spawn(
+          process.execPath,
+          ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+          { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+        let out = '';
+        companion.stdout?.on('data', (c) => (out += String(c)));
+        companion.stderr?.on('data', (c) => (out += String(c)));
+        const code = await new Promise((resolve) => companion.on('exit', resolve));
+        assert.equal(code, 1);
+        assert.match(out, /Not paired\. Run `symma pair <CODE>`/);
+        // And says why, so nobody re-pairs against a file that is sitting there.
+        assert.match(out, /ignoring .*pairing\.json/);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
 
   it('drops a silent stream and keeps a chatty one', async () => {
     // A slept laptop's NAT entry expires without a FIN, so the down leg stays

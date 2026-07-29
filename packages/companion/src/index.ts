@@ -83,37 +83,45 @@ interface Pairing {
 }
 
 /** What `symma pair` left behind. Missing is the ordinary unpaired case;
- * unreadable is said out loud, or a member reads "not paired" with the file
- * sitting right there. */
+ * a file that yields nothing is said out loud, or a member reads "not paired"
+ * with the file sitting right there. */
 function readPairing(): Pairing {
   const path = join(stateDir, 'pairing.json');
+  const none: Pairing = { gateway: '', endpoint: '', token: '', device: '' };
+  if (!existsSync(path)) return none;
   let saved: Record<string, unknown> = {};
-  if (existsSync(path)) {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-      if (typeof parsed === 'object' && parsed !== null) saved = parsed as Record<string, unknown>;
-    } catch (error) {
-      log(`ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null) saved = parsed as Record<string, unknown>;
+  } catch (error) {
+    log(`ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    return none;
   }
-  const str = (key: keyof Pairing): string => (typeof saved[key] === 'string' ? saved[key] : '');
-  return {
+  const str = (key: keyof Pairing): string =>
+    typeof saved[key] === 'string' ? saved[key].trim() : '';
+  const pairing: Pairing = {
     gateway: str('gateway'),
     endpoint: str('endpoint'),
     token: str('token'),
     device: str('device'),
   };
+  // Valid JSON can still be useless — a typo'd key contributes nothing. Only
+  // when it contributes *nothing* though: one that supplies some fields and
+  // leaves the rest to the environment is in use, not ignored.
+  if (!pairing.gateway && !pairing.endpoint && !pairing.token)
+    log(`ignoring ${path}: no gateway, endpoint or token in it`);
+  return pairing;
 }
 
-// Env over file: the file is what pairing wrote, the variables are what someone
-// typed on purpose. Empty ones fall through rather than shadow a real pairing.
+// Env over file, per field: the file is what pairing wrote, a variable is what
+// someone typed on purpose. Trimmed before it decides, or a stray space in a
+// variable both wins and comes to nothing, and a real pairing reads as absent.
 const paired = readPairing();
-const gatewayUrl = (process.env.SYMMA_COMPANION_GATEWAY || paired.gateway)
-  .trim()
-  .replace(/\/+$/, '');
-const token = (process.env.SYMMA_COMPANION_TOKEN || paired.token).trim();
-const endpointId = (process.env.SYMMA_COMPANION_ENDPOINT || paired.endpoint).trim();
-const device = (process.env.SYMMA_COMPANION_DEVICE || paired.device).trim() || hostname();
+const pick = (name: string, saved: string): string => (process.env[name] ?? '').trim() || saved;
+const gatewayUrl = pick('SYMMA_COMPANION_GATEWAY', paired.gateway).replace(/\/+$/, '');
+const token = pick('SYMMA_COMPANION_TOKEN', paired.token);
+const endpointId = pick('SYMMA_COMPANION_ENDPOINT', paired.endpoint);
+const device = pick('SYMMA_COMPANION_DEVICE', paired.device) || hostname();
 const agentNames = (process.env.SYMMA_COMPANION_AGENTS ?? 'kilo')
   .split(',')
   .map((entry) => entry.trim())
