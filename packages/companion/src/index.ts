@@ -17,6 +17,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
@@ -245,6 +246,19 @@ function resolveBin(bin: string): string | undefined {
   return path && path.startsWith('/') && runnable(path) ? path : undefined;
 }
 
+/** A credential's contents, or undefined unless it is a readable, non-blank
+ * regular file. Leftovers fail detection, not the machine: a directory where
+ * kilo's auth goes crashed the start, and a blank codex auth.json advertised
+ * an agent whose every session then failed at setup. */
+function credential(path: string): string | undefined {
+  try {
+    const text = statSync(path).isFile() ? readFileSync(path, 'utf8') : undefined;
+    return text?.trim() ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Built-ins use the machine's ambient auth; `name=cmd arg…` entries add any
  * ACP binary (also the test seam). Returns an error string when auth is absent. */
 function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | string {
@@ -264,16 +278,17 @@ function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | str
   switch (entry) {
     case 'kilo': {
       const path = join(homedir(), '.local', 'share', 'kilo', 'auth.json');
-      if (!existsSync(path)) return `kilo: no auth at ${path} (run kilo login)`;
-      return { name: entry, spec: kiloAcpSpec(readFileSync(path, 'utf8').trim()) };
+      const auth = credential(path);
+      if (!auth) return `kilo: no auth at ${path} (run kilo login)`;
+      return { name: entry, spec: kiloAcpSpec(auth.trim()) };
     }
     case 'codex': {
       const home = join(homedir(), '.codex');
-      if (!existsSync(codexAuthPath(home))) return `codex: no auth at ${codexAuthPath(home)}`;
+      if (!credential(codexAuthPath(home))) return `codex: no auth at ${codexAuthPath(home)}`;
       return { name: entry, spec: codexAcpSpec(home) };
     }
     case 'devin': {
-      if (!existsSync(devinCredentialsPath(homedir())))
+      if (!credential(devinCredentialsPath(homedir())))
         return `devin: no credentials at ${devinCredentialsPath(homedir())}`;
       return { name: entry, spec: devinAcpSpec() };
     }
