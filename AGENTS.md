@@ -13,7 +13,10 @@ Section references below (§N) are to that document.
 
 - `npm test` — all tests (node:test via tsx). **Needs Docker running**: the
   gateway's tenancy test starts a throwaway Postgres via testcontainers, because
-  owner scoping is only worth asserting against a real database. Single file:
+  owner scoping is only worth asserting against a real database. Set
+  `SYMMA_TEST_DATABASE_URL` to use one that already exists and skip the
+  container — which is what CI does, since pulling the image there cost minutes
+  per run. Single file:
   `node --conditions=symma-source --import tsx --test packages/<pkg>/test/<file>.test.ts`
   (the condition is what resolves `@symma/*` to source)
 - `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`
