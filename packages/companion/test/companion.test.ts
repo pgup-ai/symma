@@ -261,6 +261,55 @@ describe('relay e2e', () => {
     }
   });
 
+  it('gives up on a gateway that accepts and then says nothing', async () => {
+    // Without a deadline this is a command that never returns and never fails.
+    const stub = createServer(() => {
+      /* accepted, and deliberately never answered */
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    let pair: ChildProcess | undefined;
+    try {
+      const child = (pair = spawn(
+        process.execPath,
+        [
+          '--conditions=symma-source',
+          '--import',
+          'tsx',
+          'packages/companion/src/index.ts',
+          'pair',
+          'BPB1-9W92-HTZJ-RA19',
+        ],
+        {
+          env: {
+            ...process.env,
+            HOME: home,
+            SYMMA_COMPANION_GATEWAY: `http://127.0.0.1:${port}`,
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+            SYMMA_COMPANION_PAIR_TIMEOUT_MS: '300',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      ));
+      let said = '';
+      child.stderr?.on('data', (c) => (said += String(c)));
+      // Raced, because "it fails eventually" is not the property: undici's own
+      // header timeout ends this after five minutes with no deadline at all,
+      // which is the hang the deadline exists to prevent.
+      const ended = await Promise.race([
+        new Promise((resolve) => child.on('exit', resolve)),
+        new Promise((resolve) => setTimeout(() => resolve('still running'), 5_000)),
+      ]);
+      assert.equal(ended, 1, `expected a prompt refusal, got ${String(ended)} — ${said}`);
+      assert.match(said, /Could not reach/);
+    } finally {
+      pair?.kill('SIGKILL');
+      stub.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('will not pair a machine with nothing to run', async () => {
     // §2: never attach an endpoint with zero agents. Refused here, before a
     // code is spent, and the reasons are the copy that tells them what to do.
@@ -285,10 +334,9 @@ describe('relay e2e', () => {
       assert.equal(await new Promise((resolve) => pair.on('exit', resolve)), 1);
       assert.match(said, /Nothing to connect/);
       assert.match(said, /kilo: no auth/);
-      assert.equal(
-        existsSync(join(home, '.local', 'share', 'symma-companion', 'pairing.json')),
-        false,
-      );
+      // Nothing persisted at all — not the pairing, and not the signing key,
+      // which a refused pair has no use for.
+      assert.equal(existsSync(join(home, '.local', 'share', 'symma-companion')), false);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
