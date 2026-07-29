@@ -6,8 +6,10 @@ own machine, with their own credentials. Being extracted from
 as its first downstream client. This file is the single source of truth for
 agents working in this repo; `CLAUDE.md` just points here.
 
-Full design: [`docs/design/m3-slack-companion.md`](docs/design/m3-slack-companion.md).
-Section references below (§N) are to that document.
+Full design: `docs/design/m3-slack-companion.md`, kept out of this repo and local
+to the maintainer's machine. Section references below (§N) are to it, so they
+resolve only in a checkout that has it — everything an agent must actually obey
+is here, and no rule below depends on reading it.
 
 ## Commands
 
