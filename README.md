@@ -57,16 +57,7 @@ Anything else that speaks ACP runs today via
 `SYMMA_COMPANION_AGENTS=name=cmd args`, with the permission floor as its only
 read-only layer. That is also what the gemini row means: it offers no read-only
 agent of its own, so it is fine where the caller is the machine's owner and not
-for a review path that depends on the floor being backed
-([design §3](docs/design/m3-slack-companion.md)).
+for a review path that depends on the floor being backed.
 
 Launch shapes track the
 [ACP registry](https://github.com/agentclientprotocol/registry).
-
-## Design
-
-[`docs/design/m3-slack-companion.md`](docs/design/m3-slack-companion.md) — tenancy,
-pairing, conversation model, approval boundary, launch phases, extraction plan.
-
-[`docs/strategy/open-core.md`](docs/strategy/open-core.md) — what gets published,
-what stays closed, and what we charge for. Thinking, not decided.
