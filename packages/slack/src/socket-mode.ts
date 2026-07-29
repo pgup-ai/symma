@@ -50,11 +50,15 @@ async function openConnection(appToken: string): Promise<SocketLike> {
     headers: { authorization: `Bearer ${appToken}` },
     signal: AbortSignal.timeout(DIAL_TIMEOUT_MS),
   });
+  // A non-2xx carries no Slack error to read, and a proxy can answer it with
+  // HTML — parsing that reports a syntax error where the status is the whole
+  // fact. A 429 here is rate limiting, which must not read as a bug in this file.
+  if (!res.ok) throw new Error(`apps.connections.open: http ${res.status}`);
   // Slack answers 200 with `ok: false` for a bad token, so the status alone
   // never says whether this worked.
   const body = (await res.json()) as { ok?: boolean; url?: string; error?: string };
   if (!body.ok || !body.url) {
-    throw new Error(`apps.connections.open: ${body.error ?? `http ${res.status}`}`);
+    throw new Error(`apps.connections.open: ${body.error ?? 'no url'}`);
   }
   return new WebSocket(body.url) as unknown as SocketLike;
 }
