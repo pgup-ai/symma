@@ -214,7 +214,7 @@ describe('relay', () => {
     // completely different things. A quit is "reopen it on your Mac"; a drop is
     // "asleep — send it again when it's back".
     const relay = createRelay();
-    relay.attachEndpoint(hello(), () => {}, OWNER);
+    const first = relay.attachEndpoint(hello(), () => {}, OWNER);
     const attached = relay.listEndpoints(OWNER)[0]!;
     assert.equal(attached.online, true);
     assert.equal(attached.quit, undefined, 'nothing to report while it is here');
@@ -230,8 +230,8 @@ describe('relay', () => {
     assert.ok((dropped.lastSeenAt ?? 0) >= before, 'dated, so "asleep" can say when');
 
     // Quit: the companion said so on its way out, before its leg closed.
-    relay.attachEndpoint(hello(), () => {}, OWNER);
-    relay.sayGoodbye('laptop');
+    const second = relay.attachEndpoint(hello(), () => {}, OWNER);
+    relay.sayGoodbye('laptop', second);
     assert.equal(relay.listEndpoints(OWNER)[0]!.quit, undefined, 'still here, still ready');
     relay.detachEndpoint('laptop');
     assert.equal(relay.listEndpoints(OWNER)[0]!.quit, true);
@@ -250,6 +250,15 @@ describe('relay', () => {
       undefined,
       'a crash after a quit still reads as a crash',
     );
+
+    // And a goodbye from a leg the companion has already replaced speaks for
+    // nobody. Its login service restarts it fast enough that the old ingest is
+    // still draining, and taking that frame would label this attachment's next
+    // crash as a deliberate quit.
+    relay.attachEndpoint(hello(), () => {}, OWNER);
+    relay.sayGoodbye('laptop', first);
+    relay.detachEndpoint('laptop');
+    assert.equal(relay.listEndpoints(OWNER)[0]!.quit, undefined, 'a stale goodbye is ignored');
   });
 
   it("hides and refuses another owner's endpoint", () => {

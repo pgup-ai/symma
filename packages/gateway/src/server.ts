@@ -232,17 +232,20 @@ async function handleEndpointIngest(
   id: string,
   owner: Owner,
 ): Promise<void> {
+  // The attachment this leg created, if any. A goodbye speaks only for its own:
+  // this request can still be draining after the companion restarted.
+  let attached: number | undefined;
   const { overflow } = await readNdjsonBody(req, (line) => {
     const control = parseRelayControl(line);
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
-        relay.attachEndpoint(control, sendToEndpoint(id), owner);
+        attached = relay.attachEndpoint(control, sendToEndpoint(id), owner);
         storeWrite(`markSeen ${id}`, store.markSeen(id));
-      } else if (control.kind === 'goodbye') {
+      } else if (control.kind === 'goodbye' && attached !== undefined) {
         // Recorded, not acted on: the leg closing is what detaches, and a
         // companion that is killed or sleeps never gets here — which is the
         // whole point of hearing it from the ones that do.
-        relay.sayGoodbye(id);
+        relay.sayGoodbye(id, attached);
         log(`endpoint ${id} said goodbye${control.reason ? `: ${control.reason}` : ''}`);
       } else if (control.kind === 'opened' || control.kind === 'refused') {
         // Only on an ack the relay actually applied: a companion naming

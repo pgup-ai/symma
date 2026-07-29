@@ -43,6 +43,10 @@ interface Attachment {
   lastSeenAt?: number;
   /** It said goodbye on the way out, rather than simply stopping. */
   quit?: boolean;
+  /** Bumped per attach. A restarted companion's old ingest leg can still be
+   * draining, so a frame from it must not speak for the attachment that
+   * replaced it. */
+  generation: number;
 }
 
 type ResumeLeg = 'endpointResume' | 'clientResume';
@@ -70,6 +74,7 @@ export interface RelayOptions {
 export function createRelay(options: RelayOptions = {}) {
   const resumeWindowMs = options.resumeWindowMs ?? 60_000;
   const endpoints = new Map<string, Attachment>();
+  let attachments = 0;
   const sessions = new Map<string, Session>();
 
   const disarm = (session: Session, leg: ResumeLeg): void => {
@@ -102,8 +107,11 @@ export function createRelay(options: RelayOptions = {}) {
   return {
     /** Companion (re)attached. Sessions the companion still declares resume
      * (cancel their resume timers); any it dropped — e.g. after a restart —
-     * fail loudly instead of lingering as zombies that hold capacity. */
-    attachEndpoint(hello: HelloControl, send: SendLine, owner: string): void {
+     * fail loudly instead of lingering as zombies that hold capacity.
+     *
+     * Returns this attachment's generation, which a later goodbye must present
+     * to be believed. */
+    attachEndpoint(hello: HelloControl, send: SendLine, owner: string): number {
       const existing = endpoints.get(hello.endpoint);
       const declared = new Set(hello.sessions ?? [...(existing?.sessions ?? [])]);
       const carried = new Set<string>();
@@ -118,6 +126,7 @@ export function createRelay(options: RelayOptions = {}) {
       }
       // `quit` is not carried across: it describes how the last attachment
       // ended, and this one has not.
+      const generation = ++attachments;
       endpoints.set(hello.endpoint, {
         hello,
         send,
@@ -125,6 +134,7 @@ export function createRelay(options: RelayOptions = {}) {
         sessions: carried,
         online: true,
         lastSeenAt: existing?.lastSeenAt,
+        generation,
       });
       // A companion may still be running agents for sessions the relay already
       // failed (resume window elapsed while it was gone) — tell it to close them.
@@ -133,14 +143,20 @@ export function createRelay(options: RelayOptions = {}) {
           send(JSON.stringify({ kind: 'close', sessionId, reason: 'session already ended' }));
         }
       }
+      return generation;
     },
 
     /** A companion said it is leaving. Recorded rather than acted on: the leg
      * closing is what detaches it, and this only marks which of the two ways
-     * that happened. */
-    sayGoodbye(endpoint: string): void {
+     * that happened.
+     *
+     * Scoped to the attachment that sent it. A companion restarted by its login
+     * service attaches while its old ingest leg is still draining, and that
+     * leg's goodbye would otherwise label the new attachment — so its next
+     * crash would read as a deliberate quit. */
+    sayGoodbye(endpoint: string, generation: number): void {
       const attachment = endpoints.get(endpoint);
-      if (attachment) attachment.quit = true;
+      if (attachment?.generation === generation) attachment.quit = true;
     },
     detachEndpoint(endpoint: string): void {
       const attachment = endpoints.get(endpoint);

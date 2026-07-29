@@ -44,6 +44,14 @@ describe('login service', () => {
     );
   });
 
+  it('doubles a percent systemd would read as a specifier', () => {
+    // Bare `%h`, `%n` and friends expand, so a path containing one launches
+    // something else or refuses to start.
+    const service = loginService('linux', '/home/nel', ['/opt/100%/node', '--x=50%']);
+    assert.ok(service);
+    assert.match(service.contents, /^ExecStart=\/opt\/100%%\/node --x=50%%$/m);
+  });
+
   it('escapes a command that would otherwise break the plist', () => {
     const service = loginService('darwin', '/Users/nel', ['/bin/x', '--flag=a&b<c>d']);
     assert.ok(service);

@@ -21,6 +21,12 @@ export interface LoginService {
 
 const LABEL = 'dev.symma.companion';
 
+/** Quoted when it would otherwise split, and `%` doubled always: systemd reads
+ * a bare one as a specifier prefix, so a path containing it launches something
+ * else or fails to start. */
+const systemdArgument = (value: string): string =>
+  (/[\s"'\\]/.test(value) ? JSON.stringify(value) : value).replace(/%/g, '%%');
+
 const xml = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -63,7 +69,7 @@ ${command.map((argument) => `      <string>${xml(argument)}</string>`).join('\n'
 Description=symma companion
 
 [Service]
-ExecStart=${command.map((argument) => (/[\s"'\\]/.test(argument) ? JSON.stringify(argument) : argument)).join(' ')}
+ExecStart=${command.map(systemdArgument).join(' ')}
 Restart=always
 RestartSec=5
 
