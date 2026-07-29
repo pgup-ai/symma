@@ -128,9 +128,8 @@ const gatewayUrl = pick('SYMMA_COMPANION_GATEWAY', paired.gateway).replace(/\/+$
 const token = pick('SYMMA_COMPANION_TOKEN', paired.token);
 const endpointId = pick('SYMMA_COMPANION_ENDPOINT', paired.endpoint);
 const device = pick('SYMMA_COMPANION_DEVICE', paired.device) || hostname();
-// Every built-in, not one: the resolve loop skips whatever is not logged in,
-// with a reason apiece, so the cost of trying all four is those log lines — and
-// §2 turns the same reasons into the pairing output that says what to log into.
+// Resolving an absent agent costs a skip reason, and §2 shows those reasons
+// while pairing — so the default is everything we know how to run.
 const agentNames = (process.env.SYMMA_COMPANION_AGENTS ?? 'kilo,codex,devin,cursor')
   .split(',')
   .map((entry) => entry.trim())

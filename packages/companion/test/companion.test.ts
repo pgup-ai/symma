@@ -391,8 +391,8 @@ describe('relay e2e', () => {
           'BPB1-9W92-HTZJ-RA19',
         ],
         // No gateway either: it must refuse without reaching for one. Cursor's
-        // key is blanked because it is ambient — the other three read the fake
-        // HOME, but a real CURSOR_API_KEY here would make this machine pairable.
+        // key is blanked: it is ambient where the other three read the fake
+        // HOME, and a real one would make this machine pairable.
         {
           env: { ...process.env, HOME: home, CURSOR_API_KEY: '' },
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -403,8 +403,7 @@ describe('relay e2e', () => {
       pair.stderr?.on('data', (c) => (said += String(c)));
       assert.equal(await new Promise((resolve) => pair.on('close', resolve)), 1);
       assert.match(said, /Nothing to connect/);
-      // All four built-ins, each with its reason: the default list is every
-      // agent we know how to run, not the one M2 started with.
+      // Each built-in's reason, so the default list cannot quietly shrink.
       assert.match(said, /kilo: no auth/);
       assert.match(said, /codex: no auth/);
       assert.match(said, /devin: no credentials/);
