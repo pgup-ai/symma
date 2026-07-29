@@ -106,8 +106,21 @@ describe('app_mention', () => {
     const { deps, posts, turns } = harness({ replies: undefined });
     assert.equal(await handleMention(MENTION, deps), 'unreadable channel');
     assert.equal(posts[0]!.channel, 'U-nel');
+    assert.equal(
+      posts[0]!.threadTs,
+      undefined,
+      'no thread ts without a conversation to thread it in',
+    );
     assert.match(posts[0]!.text, /invite me/);
     assert.deepEqual(turns, [], 'and no turn is recorded for work it cannot do');
+
+    // With a conversation, the refusal joins it — addressed by its own channel
+    // and root, not a user id paired with a thread ts from elsewhere.
+    const known = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
+    const going = harness({ existing: known, replies: undefined });
+    assert.equal(await handleMention(MENTION, going.deps), 'unreadable channel');
+    assert.equal(going.posts[0]!.channel, 'D-nel');
+    assert.equal(going.posts[0]!.threadTs, '200.0');
   });
 
   it('carries on in the winning thread when two mentions race', async () => {

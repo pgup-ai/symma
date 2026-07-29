@@ -43,6 +43,20 @@ describe('thread snapshot', () => {
     assert.match(snapshot.text, /second reply/);
   });
 
+  it('orders the thread itself rather than trusting the caller', () => {
+    // The delta branch used to filter without sorting, so an out-of-order page
+    // could drop the wrong replies and report a cursor that skipped work.
+    // Reversed, not merely shuffled: the filtered subset has to come out
+    // descending, or an unsorted filter would happen to yield the right order
+    // and the assertion would pass on a broken implementation.
+    const jumbled = [...thread].reverse();
+    assert.deepEqual(threadSnapshot(jumbled, { budgetBytes: 10_000, since: '101.0' }), {
+      text: threadSnapshot(thread, { budgetBytes: 10_000, since: '101.0' }).text,
+      seenThroughTs: '103.0',
+      omitted: 0,
+    });
+  });
+
   it('leaves the cursor alone when there is nothing new', () => {
     // A mention with no new replies still opens a turn; it just carries no
     // context, and must not claim to have read past where it stopped.

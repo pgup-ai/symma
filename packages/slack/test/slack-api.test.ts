@@ -28,6 +28,36 @@ describe('slack api', () => {
     assert.deepEqual(thread?.[1]?.files, [{ name: 'trace.log', size: 12 }]);
   });
 
+  it('reads every page, because the newest replies are on the last one', async () => {
+    // `conversations.replies` returns oldest first. Stopping at page one and
+    // advancing the cursor to its newest would put every later page permanently
+    // behind the cursor, with nothing saying so.
+    const pages = [
+      {
+        ok: true,
+        messages: [{ ts: '100.0', user: 'U-nel', text: 'oldest' }],
+        response_metadata: { next_cursor: 'page2' },
+      },
+      {
+        ok: true,
+        messages: [{ ts: '101.0', user: 'U-ola', text: 'newest' }],
+        response_metadata: { next_cursor: '' },
+      },
+    ];
+    const asked: unknown[] = [];
+    globalThis.fetch = ((_url: string, init: { body: string }) => {
+      asked.push(JSON.parse(init.body));
+      return Promise.resolve(new Response(JSON.stringify(pages[asked.length - 1])));
+    }) as unknown as typeof fetch;
+
+    const thread = await slackApi('xoxb-test').threadReplies('C-incidents', '100.0');
+    assert.deepEqual(
+      thread?.map((m) => m.text),
+      ['oldest', 'newest'],
+    );
+    assert.equal((asked[1] as { cursor?: string }).cursor, 'page2', 'the cursor is carried');
+  });
+
   it('reports a channel it cannot see as unreadable, not as broken', async () => {
     // The difference is what the member is told: "invite me to that channel" or
     // nothing at all while an error goes to a log they never read (§4).

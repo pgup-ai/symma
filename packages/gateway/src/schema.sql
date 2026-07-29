@@ -146,6 +146,15 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   PRIMARY KEY (conversation_id, ordinal)
 );
 
+-- #27 shipped `conversations`, so CREATE TABLE IF NOT EXISTS skips it on any
+-- database that already ran that release and these columns would never arrive.
+-- Declared above for a fresh database and added here for an upgraded one —
+-- ADD COLUMN IF NOT EXISTS is idempotent, which is what keeps this file
+-- re-appliable and the migration runner still unbuilt.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS seen_through_ts text;
+ALTER TABLE conversations
+  ADD COLUMN IF NOT EXISTS last_activity_at timestamptz NOT NULL DEFAULT now();
+
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);
 CREATE INDEX IF NOT EXISTS endpoints_user_idx ON endpoints (user_id);
 CREATE INDEX IF NOT EXISTS turns_conversation_idx ON turns (conversation_id);

@@ -137,17 +137,27 @@ const connection = socketMode({
       ) {
         return;
       }
-      const outcome = await handleMention(
-        {
-          user: event.user,
-          channel: event.channel,
-          // A mention that starts a thread is its own thread.
-          threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
-          eventId,
-        },
-        mentionDeps(event.user),
-      );
-      log(`mention in ${event.channel}: ${outcome}`);
+      const mention = {
+        user: event.user,
+        channel: event.channel,
+        // A mention that starts a thread is its own thread.
+        threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
+        eventId,
+      };
+      try {
+        log(
+          `mention in ${event.channel}: ${await handleMention(mention, mentionDeps(event.user))}`,
+        );
+      } catch (error) {
+        // The envelope was acked before this ran, so Slack will not redeliver and
+        // a throw would leave the member waiting on nothing. Telling them costs
+        // one message and is the only definite outcome available; a durable queue
+        // is the fuller answer and is not built.
+        log(`mention in ${event.channel} failed: ${String(error)}`);
+        await api
+          .post(event.user, 'That did not get through — mention me again and I will retry.')
+          .catch(() => log('could not tell them it failed either'));
+      }
       return;
     }
     if (envelope.type !== 'slash_commands') return;

@@ -30,6 +30,10 @@ async function call<T>(token: string, method: string, body: unknown): Promise<T>
   return answer as T;
 }
 
+/** Threads cap far below this in practice; it is here so a pathological one
+ * cannot spin the fetch loop, not as a limit anybody should reach. */
+const MAX_PAGES = 20;
+
 interface RawMessage {
   ts?: unknown;
   user?: unknown;
@@ -58,12 +62,30 @@ export function slackApi(token: string): SlackApi {
   return {
     async threadReplies(channel, thread) {
       try {
-        const { messages } = await call<{ messages?: RawMessage[] }>(
-          token,
-          'conversations.replies',
-          { channel, ts: thread, limit: 200 },
-        );
-        return (messages ?? [])
+        // Paged to the end, because `conversations.replies` returns the *oldest*
+        // replies first: stopping at one page and advancing the cursor to its
+        // newest would put every later page permanently behind the cursor, so
+        // they could never enter a snapshot and nothing would say so.
+        const raw: RawMessage[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < MAX_PAGES; page += 1) {
+          const answer = await call<{
+            messages?: RawMessage[];
+            response_metadata?: { next_cursor?: string };
+          }>(token, 'conversations.replies', {
+            channel,
+            ts: thread,
+            limit: 200,
+            ...(cursor ? { cursor } : {}),
+          });
+          raw.push(...(answer.messages ?? []));
+          cursor = answer.response_metadata?.next_cursor || undefined;
+          if (!cursor) break;
+        }
+        // Only reachable on a thread past MAX_PAGES × 200 replies, where what is
+        // missing is the newest end — the part that matters most.
+        if (cursor) throw new SlackError('thread too long to read', 'conversations.replies');
+        return raw
           .filter((m): m is RawMessage & { ts: string } => typeof m.ts === 'string')
           .map((m) => ({
             ts: m.ts,

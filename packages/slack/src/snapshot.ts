@@ -41,10 +41,11 @@ export function threadSnapshot(
   messages: ThreadMessage[],
   options: { budgetBytes: number; since?: string },
 ): Snapshot {
-  // Slack ts values are fixed-width decimal strings, so they order lexically.
-  const candidates = options.since
-    ? messages.filter((m) => m.ts > options.since!)
-    : [...messages].sort((a, b) => (a.ts < b.ts ? -1 : 1));
+  // Sorted before filtering, so a delta cannot depend on the caller having
+  // ordered its pages. Slack ts values are fixed-width decimal strings, which is
+  // why they order lexically.
+  const ordered = [...messages].sort((a, b) => (a.ts < b.ts ? -1 : 1));
+  const candidates = options.since ? ordered.filter((m) => m.ts > options.since!) : ordered;
   if (candidates.length === 0) return { text: '', omitted: 0 };
 
   // A delta has no root among its candidates — the agent was already shown it.
@@ -64,7 +65,10 @@ export function threadSnapshot(
   }
 
   const omitted = rest.length - tail.length;
-  const kept = [...(root ? [root] : []), ...tail];
+  // No assertion on the tail: an earlier draft read the last element of an empty
+  // array and crashed. Absent is also the safe answer — a cursor that does not
+  // move is a turn re-read, where one that moves too far is work never seen.
+  const newest = tail.at(-1) ?? root;
   const note = omitted
     ? [`… ${omitted} earlier ${omitted === 1 ? 'reply' : 'replies'} omitted to fit the budget …`]
     : [];
@@ -73,5 +77,5 @@ export function threadSnapshot(
   const lines = root
     ? [render(root), ...note, ...tail.map(render)]
     : [...note, ...tail.map(render)];
-  return { text: lines.join('\n'), seenThroughTs: kept[kept.length - 1]!.ts, omitted };
+  return { text: lines.join('\n'), ...(newest ? { seenThroughTs: newest.ts } : {}), omitted };
 }

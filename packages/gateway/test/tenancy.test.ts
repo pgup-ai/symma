@@ -1540,4 +1540,50 @@ describe('tenancy', () => {
       await store.close();
     }
   });
+
+  it('adds the conversation columns to a database that predates them', async () => {
+    // #27 shipped `conversations` without them, and CREATE TABLE IF NOT EXISTS
+    // skips a table that exists — so on that database the columns would never
+    // arrive and every conversation query would fail on one. Dropping them is
+    // how a fresh container can look like that release.
+    const url = pg.getConnectionUri();
+    const pool = new Pool({ connectionString: url });
+    const schema = join(import.meta.dirname, '../src/schema.sql');
+    const columns = async (): Promise<string[]> =>
+      (
+        await pool.query(
+          `SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'conversations'
+              AND column_name IN ('seen_through_ts', 'last_activity_at') ORDER BY 1`,
+        )
+      ).rows.map((r: { column_name: string }) => r.column_name);
+    try {
+      // CASCADE takes the activity index with the column, which the re-apply has
+      // to rebuild too.
+      await pool.query(
+        `ALTER TABLE conversations DROP COLUMN seen_through_ts,
+                                   DROP COLUMN last_activity_at CASCADE`,
+      );
+      assert.deepEqual(await columns(), []);
+
+      await (await openStore(url, schema)).close();
+      assert.deepEqual(await columns(), ['last_activity_at', 'seen_through_ts']);
+      assert.equal(
+        (
+          await pool.query(
+            `SELECT 1 FROM pg_indexes WHERE indexname = 'conversations_activity_idx'`,
+          )
+        ).rowCount,
+        1,
+        'and the index the drop cascaded away',
+      );
+
+      // Re-appliable, which is the property that lets this file stand in for a
+      // migration runner at all.
+      await (await openStore(url, schema)).close();
+      assert.deepEqual(await columns(), ['last_activity_at', 'seen_through_ts']);
+    } finally {
+      await pool.end();
+    }
+  });
 });

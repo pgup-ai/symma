@@ -69,8 +69,11 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   if (!replies) {
     // §4: say so rather than answer from a partial snapshot. Sent to the DM, not
     // the channel, because the refusal is as private as the answer would be.
+    // Addressed the way the rest of the path addresses an existing conversation —
+    // its own channel and root — rather than pairing a user id with a thread ts
+    // that belongs to a channel we did not name.
     await deps.post(
-      mention.user,
+      existing?.dmChannel ?? mention.user,
       'I can add you to this once I can read that channel — invite me to it, then mention me again.',
       existing?.rootThread,
     );
