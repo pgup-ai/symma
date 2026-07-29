@@ -706,6 +706,73 @@ describe('relay e2e', () => {
     }
   });
 
+  it('says to upgrade when the gateway refuses its generation, and stops hammering', async () => {
+    // Nothing this process does fixes a refused protocol version, so the hazard
+    // is the shape every other failure has: retry at the minimum backoff. That
+    // reconnects every second forever, never recovers, never says why, and
+    // keeps a laptop busy doing it. Both halves are the test — the sentence the
+    // member can act on, and the silence after it.
+    const companionHome = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    const streamOpens: number[] = [];
+    const held: ServerResponse[] = [];
+    const stub = createServer((req, res) => {
+      if (req.url?.endsWith('/stream')) {
+        streamOpens.push(Date.now());
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(': open\n\n');
+        held.push(res);
+        return;
+      }
+      // Drained before answering, so the companion reads a status rather than a
+      // severed socket — the same order the gateway's own 413 uses.
+      req.resume();
+      res.writeHead(426, { 'content-type': 'text/plain' });
+      res.end('companion too old for this gateway');
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+
+    let companion: ChildProcess | undefined;
+    try {
+      companion = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        {
+          env: {
+            ...process.env,
+            HOME: companionHome,
+            SYMMA_COMPANION_GATEWAY: `http://127.0.0.1:${port}`,
+            SYMMA_COMPANION_TOKEN: 'tok',
+            SYMMA_COMPANION_ENDPOINT: 'stale',
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let said = '';
+      companion.stdout?.on('data', (c) => (said += String(c)));
+
+      await waitFor(
+        async () => (/upgrade: npm i -g symma/.test(said) ? true : undefined),
+        `an upgrade instruction — ${said.slice(-300)}`,
+      );
+      // An attached-then-dropped epoch comes back in about a second (the idle
+      // test above pins that), so a second attach inside this window is the
+      // regression: only the maximum backoff keeps it down this long.
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      assert.equal(
+        streamOpens.length,
+        1,
+        `a refused generation waits out the long backoff — ${said.slice(-300)}`,
+      );
+    } finally {
+      companion?.kill('SIGKILL');
+      for (const res of held) res.destroy();
+      stub.close();
+      rmSync(companionHome, { recursive: true, force: true });
+    }
+  });
+
   it('skips an agent whose binary is missing, and finds one PATH hides', async () => {
     // Detection checked credentials and never the binary, so an agent could
     // report ready and then ENOENT at spawn — past onboarding, on first use.

@@ -8,6 +8,7 @@ import {
   isSafeId,
   parseEnvelope,
   parseRelayControl,
+  servesProtocol,
   type AckControl,
   type RefusalCode,
   readNdjsonBody,
@@ -235,10 +236,25 @@ async function handleEndpointIngest(
   // The attachment this leg created, if any. A goodbye speaks only for its own:
   // this request can still be draining after the companion restarted.
   let attached: number | undefined;
+  // Answered while the body is still open, because a companion streams for the
+  // life of its attachment: waiting for the request to end would mean never
+  // answering. The remaining lines are then read and dropped rather than the
+  // socket torn down, so what the companion sees is the status, not a reset.
+  let outdated = false;
   const { overflow } = await readNdjsonBody(req, (line) => {
+    if (outdated) return;
     const control = parseRelayControl(line);
     if (control) {
       if (control.kind === 'hello' && control.endpoint === id) {
+        if (!servesProtocol(control.version)) {
+          outdated = true;
+          log(`endpoint ${id} speaks protocol ${control.version ?? 0}; refused`);
+          res.writeHead(426, { 'content-type': 'text/plain' });
+          // Neutral about direction: a generation too new is refused too, and
+          // the log above is where an operator reads which way it went.
+          res.end('unsupported protocol generation');
+          return;
+        }
         attached = relay.attachEndpoint(control, sendToEndpoint(id), owner);
         storeWrite(`markSeen ${id}`, store.markSeen(id));
       } else if (control.kind === 'goodbye' && attached !== undefined) {
@@ -271,7 +287,11 @@ async function handleEndpointIngest(
     const envelope = parseEnvelope(line);
     if (envelope) relay.endpointLine(id, envelope.sessionId, line);
   });
-  overflowOr(res, req, overflow);
+  if (outdated) {
+    // The 426 flushed long before a body could reach the overflow cap, so this
+    // only takes the socket back from a peer that ignored it and kept streaming.
+    if (overflow) req.destroy();
+  } else overflowOr(res, req, overflow);
 }
 
 // Client upstream: open pairs, frames relay, close tears down. The path sid

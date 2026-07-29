@@ -2,6 +2,24 @@ import { isSafeId } from './ids.js';
 
 export type SendLine = (line: string) => void;
 
+/** Wire generation, bumped when a companion speaking the previous one can no
+ * longer be served correctly. */
+export const PROTOCOL_VERSION = 1;
+
+/** Whether a gateway serves a companion of this generation: the current one and
+ * the one below (§7.1), so an upgrade never has to land atomically across
+ * laptops we don't control. Absent is generation 0 — every companion published
+ * before `version` existed is exactly that — so nothing is refused until the
+ * first bump, which is the point of shipping the field early.
+ *
+ * A newer one is refused as well. Lines this gateway cannot read are dropped
+ * rather than rejected, so a control from a generation it never learned would
+ * vanish silently and hang the session instead of failing it. Gateways learn a
+ * generation before any companion claims it, so this only fires on a bad
+ * deploy order — which is exactly when it should be loud. */
+export const servesProtocol = (version = 0): boolean =>
+  version >= PROTOCOL_VERSION - 1 && version <= PROTOCOL_VERSION;
+
 export interface EndpointAgent {
   agent: string;
 }
@@ -32,6 +50,9 @@ export interface HelloControl {
   device: string;
   agents: EndpointAgent[];
   maxSessions: number;
+  /** Wire generation this companion speaks. Absent from every companion
+   * published before the field existed, which is precisely generation 0. */
+  version?: number;
   /** Sessions the companion still has live, so a reattach resumes those and
    * fails the rest (a restarted companion sends none). */
   sessions?: string[];
@@ -117,12 +138,22 @@ export function parseRelayControl(line: string): RelayControl | undefined {
           return undefined;
         sessions = raw.sessions as string[];
       }
+      // A JSON number or nothing. Strict where `maxSessions` beside it coerces,
+      // because `Number(true)` is 1: a gate on compatibility must not be
+      // passable by a value that means nothing. Anything else drops to
+      // generation 0 rather than failing the hello — the direction an unknown
+      // refusal code drops, and the safe one, since 0 is refused first.
+      const version =
+        typeof raw.version === 'number' && Number.isInteger(raw.version) && raw.version > 0
+          ? raw.version
+          : undefined;
       return {
         kind: 'hello',
         endpoint: raw.endpoint,
         device: raw.device,
         agents,
         maxSessions: max,
+        ...(version ? { version } : {}),
         ...(sessions ? { sessions } : {}),
         ...(str(raw.publicKey) ? { publicKey: raw.publicKey } : {}),
       };

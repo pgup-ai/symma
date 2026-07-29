@@ -6,8 +6,10 @@ own machine, with their own credentials. Being extracted from
 as its first downstream client. This file is the single source of truth for
 agents working in this repo; `CLAUDE.md` just points here.
 
-Full design: [`docs/design/m3-slack-companion.md`](docs/design/m3-slack-companion.md).
-Section references below (§N) are to that document.
+Full design: `docs/design/m3-slack-companion.md`, kept out of this repo and local
+to the maintainer's machine. Section references below (§N) are to it, so they
+resolve only in a checkout that has it — everything an agent must actually obey
+is here, and no rule below depends on reading it.
 
 ## Commands
 
@@ -114,6 +116,10 @@ extraction fixes, prevented from recurring.
   canonical package, bin and launch flags — `npx` runs deprecated packages
   without a word, and the registry is what caught claude-code-acp's rename —
   then a live probe of the real CLI before the spec is written (§3's bar).
+- `PROTOCOL_VERSION` is the wire generation; a gateway serves it and the one
+  below (§7.1), and `hello` without one is generation 0. A bump refuses every
+  companion two back — laptops we do not control — so teach both sides to
+  tolerate a change before the release that requires it, never in the same one.
 - Tests: node:test + `node:assert/strict`; pin invariants, not incidental prose.
 - Prettier owns formatting. Never hand-format, and never reformat a file you did
   not otherwise change — copied files must stay byte-identical to their origin

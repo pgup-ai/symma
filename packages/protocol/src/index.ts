@@ -87,6 +87,8 @@ export { readNdjsonBody } from './ndjson.js';
 
 export {
   parseRelayControl,
+  PROTOCOL_VERSION,
+  servesProtocol,
   type AckControl,
   type CloseControl,
   type GoodbyeControl,
