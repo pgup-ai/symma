@@ -731,7 +731,7 @@ async function connectOnce(): Promise<void> {
     .then((res) => {
       if (res.status === 426) {
         outdated = true;
-        log('gateway no longer serves this protocol version; upgrade: npm i -g symma');
+        log("gateway does not serve this build's protocol version; upgrade: npm i -g symma");
       }
       // A non-2xx (413 overflow, 401, 5xx) means the gateway stopped reading;
       // don't keep streaming into it.
