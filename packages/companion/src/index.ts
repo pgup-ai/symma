@@ -176,14 +176,14 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
 
 // `symma pair <CODE>` trades a code for this machine's identity and exits. With
 // no command the companion attaches using whatever it already has.
-const [command, ...rest] = process.argv.slice(2);
+const [command, argument] = process.argv.slice(2);
 if (command !== undefined && command !== 'pair') {
   console.error(`Unknown command: ${command}. Usage: symma [pair <CODE>]`);
   process.exit(1);
 }
 const pairing = command === 'pair';
-// Trimmed: a code arrives pasted, and the gateway sees only what is sent.
-const pairCode = (rest[0] ?? '').trim();
+// Trimmed: a pasted code often brings a newline with it.
+const pairCode = (argument ?? '').trim();
 if (pairing && !pairCode) {
   console.error('Usage: symma pair <CODE>');
   process.exit(1);
@@ -773,9 +773,9 @@ function savePairing(saved: Pairing): string {
  * an unauthenticated caller naming an identity is one code away from someone
  * else's endpoint. */
 async function runPair(code: string): Promise<never> {
-  // A default is the point: without one the §2 one-liner needs a second field,
-  // which is the flow it exists to remove.
+  // A default is the point: without one the §2 one-liner needs a second field.
   const pairTarget = gatewayUrl || 'https://symma.dev';
+  const running = [...agents.keys()];
   const refused = (why: string): never => {
     console.error(why);
     process.exit(1);
@@ -785,7 +785,7 @@ async function runPair(code: string): Promise<never> {
     res = await fetch(`${pairTarget}/api/pair`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code, device, agents: [...agents.keys()] }),
+      body: JSON.stringify({ code, device, agents: running }),
     });
   } catch (error) {
     return refused(
@@ -810,14 +810,11 @@ async function runPair(code: string): Promise<never> {
     token: body.token,
     device,
   });
-  // Detection output is the onboarding copy (§2) — what ran, and what would
-  // have if it were logged in.
-  console.log(`✅ Connected — ${device} · ${[...agents.keys()].join(', ')}`);
+  // Detection output is the onboarding copy (§2).
+  console.log(`✅ Connected — ${device} · ${running.join(', ')}`);
   for (const why of skipped) console.log(`⚪ ${why}`);
   console.log(`Saved to ${path}. Run \`symma\` to stay connected.`);
-  // Explicit: fetch leaves a keep-alive socket that would hold a finished
-  // command open for seconds.
-  process.exit(0);
+  process.exit(0); // fetch's keep-alive socket would hold a finished command open
 }
 
 if (pairing) {

@@ -881,8 +881,6 @@ describe('tenancy', () => {
     }
   });
 
-  const COMPANION = 'packages/companion/src/index.ts';
-
   it('pairs a fresh machine from one command, and it stays paired', async () => {
     // M3b's bar. Nothing is configured on this machine but a code.
     const url = pg.getConnectionUri();
@@ -899,11 +897,20 @@ describe('tenancy', () => {
         SYMMA_COMPANION_DEVICE: "Wen's laptop",
         SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
       };
-      const companionArgs = ['--conditions=symma-source', '--import', 'tsx', COMPANION];
-      const pair = spawn(process.execPath, [...companionArgs, 'pair', code], {
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      const runCompanion = (...args: string[]): ChildProcess =>
+        spawn(
+          process.execPath,
+          [
+            '--conditions=symma-source',
+            '--import',
+            'tsx',
+            'packages/companion/src/index.ts',
+            ...args,
+          ],
+          { env, stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+      const savedAt = join(home, '.local', 'share', 'symma-companion', 'pairing.json');
+      const pair = runCompanion('pair', code);
       let said = '';
       pair.stdout?.on('data', (c: Buffer) => (said += String(c)));
       pair.stderr?.on('data', (c: Buffer) => (said += String(c)));
@@ -911,18 +918,18 @@ describe('tenancy', () => {
       assert.match(said, /✅ Connected — Wen's laptop · probe/);
 
       // The identity came back from the gateway; the request never named one.
-      const saved = JSON.parse(
-        readFileSync(join(home, '.local', 'share', 'symma-companion', 'pairing.json'), 'utf8'),
-      ) as { gateway: string; endpoint: string; token: string; device: string };
+      const saved = JSON.parse(readFileSync(savedAt, 'utf8')) as {
+        gateway: string;
+        endpoint: string;
+        token: string;
+        device: string;
+      };
       assert.match(saved.endpoint, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
       assert.equal(saved.gateway, base);
       assert.equal(saved.device, "Wen's laptop");
 
       // And a plain start now attaches on it, with nothing else configured.
-      companion = spawn(process.execPath, companionArgs, {
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      companion = runCompanion();
       await waitFor(async () => {
         const listed = (await (await as(wen.clientToken, '/api/endpoints')).json()) as {
           endpoint: string;
@@ -931,23 +938,14 @@ describe('tenancy', () => {
       }, `the paired endpoint attaches (${said})`);
 
       // Single-use reaches this far too: the same code cannot pair twice.
-      const again = spawn(process.execPath, [...companionArgs, 'pair', code], {
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      const again = runCompanion('pair', code);
       let complaint = '';
       again.stderr?.on('data', (c: Buffer) => (complaint += String(c)));
       assert.equal(await new Promise((r) => again.on('exit', r)), 1);
       assert.match(complaint, /expired or been used/);
-      // And left the working pairing alone. Re-running pair with a stale code
-      // is the likeliest way to reach this, and losing a good file for it would
-      // unpair a machine that was fine.
-      assert.deepEqual(
-        JSON.parse(
-          readFileSync(join(home, '.local', 'share', 'symma-companion', 'pairing.json'), 'utf8'),
-        ),
-        saved,
-      );
+      // And left the working pairing alone: a stale code is the likeliest way
+      // here, and losing the file for it would unpair a machine that was fine.
+      assert.deepEqual(JSON.parse(readFileSync(savedAt, 'utf8')), saved);
     } finally {
       companion?.kill('SIGKILL');
       rmSync(home, { recursive: true, force: true });
