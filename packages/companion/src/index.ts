@@ -69,23 +69,22 @@ const log = (msg: string): void => {
   console.log(`[symma-companion] ${msg}`);
 };
 
-/** Everything this machine keeps between runs lives here, created 0700 with the
- * signing key: that key, and since §2 the identity the gateway assigned. */
+/** What this machine keeps between runs — the signing key, and since §2 the
+ * identity the gateway assigned. Created 0700 alongside the key. */
 const stateDir = join(homedir(), '.local', 'share', 'symma-companion');
 
 interface Pairing {
   gateway: string;
   endpoint: string;
   token: string;
-  /** The label the member gave the machine while pairing. Kept here so `hello`
-   * carries the same name the gateway stored, rather than quietly replacing it
-   * with a hostname and leaving the DM and the listing disagreeing. */
+  /** The label given while pairing. Here because `hello` carries it: left out,
+   * the gateway stores that name and the listing shows a hostname instead. */
   device: string;
 }
 
-/** What `symma pair` left behind, if this machine has paired. Missing is the
- * ordinary unpaired case; unreadable or wrongly shaped is said out loud, since
- * otherwise a member stares at "not paired" with the file sitting right there. */
+/** What `symma pair` left behind. Missing is the ordinary unpaired case;
+ * unreadable is said out loud, or a member reads "not paired" with the file
+ * sitting right there. */
 function readPairing(): Pairing {
   const path = join(stateDir, 'pairing.json');
   let saved: Record<string, unknown> = {};

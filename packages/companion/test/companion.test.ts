@@ -46,13 +46,11 @@ const envelope = (sessionId: string, seq: number, frame: object): string =>
     frame,
   });
 
-/** What `symma pair` will write. Hand-rolled here because nothing writes it
- * until the pair command lands, and this is the shape it will produce. */
-const writePairing = (home: string, contents: string): string => {
+/** The shape `symma pair` will write, until it exists to write it. */
+const writePairing = (home: string, contents: string): void => {
   const dir = join(home, '.local', 'share', 'symma-companion');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'pairing.json'), contents);
-  return home;
 };
 
 async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Promise<T> {
@@ -308,8 +306,7 @@ describe('relay e2e', () => {
 
     let companion: ChildProcess | undefined;
     try {
-      // Nothing in the environment: gateway, endpoint and token all come off
-      // the file, which is the whole point of pairing.
+      // Nothing in the environment: gateway, endpoint and token off the file.
       companion = start({});
       const first = await waitFor(async () => attaches[0], 'attaches from the file alone');
       assert.equal(first.url, '/api/endpoints/from-file/stream');
@@ -336,7 +333,8 @@ describe('relay e2e', () => {
   });
 
   it('says how to pair rather than starting on an unreadable one', async () => {
-    const home = writePairing(mkdtempSync(join(tmpdir(), 'symma-companion-home-')), '{ broken');
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    writePairing(home, '{ broken');
     try {
       const companion = spawn(
         process.execPath,
