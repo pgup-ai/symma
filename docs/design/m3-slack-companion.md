@@ -462,7 +462,17 @@ reconnect — it never runs the request on someone else's machine.
 - **Two distribution paths, both supported.** `curl | sh` is primary because 3
   of 4 agent CLIs already install that way (devin via Homebrew, cursor-agent and
   codex via their own installers); those users may have no Node at all. `npx
-symma` is secondary for the Node crowd and nearly free from the same codebase.
+symma` is secondary for the Node crowd and nearly free from the same codebase —
+  **shipped 2026-07-29 (#22)**, as the unscoped `symma`, because `npx symma`
+  resolves a package by that name and a `bin` on a scoped one does not give it.
+
+  One wrinkle worth recording: `npx` runs from a cache its package manager
+  evicts, so pairing there writes **no** login service and says to
+  `npm i -g symma` instead. A unit pointing into that cache would keep a member
+  paired and quietly stop coming back after a reboot, which is worse than not
+  supervising at all. `curl | sh` has no such problem, which is a second reason
+  it is the primary path.
+
 - **`versions/<v>/` + `current` symlink**, copying codex and cursor-agent. Gives
   atomic upgrade and rollback.
 - **Self-update on start.** Not a nicety: external companions cannot be upgraded
@@ -1047,8 +1057,9 @@ where all three depend on it equally.
                    credential helpers, read-only permission floor, envelope
                    signing, observer envelope, relay control types, ndjson
 @symma/gateway     relay, journal store, viewer, HTTP API, tenancy   → protocol
-@symma/companion   attach loop, agent detection, checkout *mechanism*,
-                   local spawn/lifecycle, self-update                → protocol
+symma              the companion CLI — attach loop, agent detection, checkout
+                   *mechanism*, local spawn/lifecycle, pairing,
+                   self-update                                       → protocol
 @symma/client      drive an ACP prompt: local spawn/lifecycle, plus a gateway
                    transport — config, readiness, SSE, runRemotePrompt
                                                                      → protocol
@@ -1255,12 +1266,12 @@ names the origin SHA keeps the provenance without dragging that along.
 
 ## 9. Milestones
 
-|         | scope                                                                                                                                                                                                                                                                                                                                                             | done when                                                                                                                                                                 |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle — **shipped 2026-07-28**. `pairings`/`key_changes` go with M3b and `conversations`/`turns` with M3d, so those tables are not built yet                                                                                                                                                        | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
-| **M3b** | pairing: codes, `/connect`, token exchange — **shipped 2026-07-29**. Codes minted and spent in the store (#15), `POST /api/pair` exchanging one for an endpoint and token (#16), the companion booting from the pairing on disk (#17), and `symma pair <CODE>` writing it (#18). Minting still has no Slack button in front of it, so an operator mints until M3d | a fresh laptop pairs from one command with no config file — proven end to end: mint, `pair`, then a plain start attaches on what it saved                                 |
-| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                                                                                                                                                                                                                                            | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
-| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging                                                                                                                                                                                                              | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
+|         | scope                                                                                                                                                                                                                                                                                                                                                                                         | done when                                                                                                                                                                 |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle — **shipped 2026-07-28**. `pairings`/`key_changes` go with M3b and `conversations`/`turns` with M3d, so those tables are not built yet                                                                                                                                                                                    | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
+| **M3b** | pairing: codes, `/connect`, token exchange — **shipped 2026-07-29**. Codes minted and spent in the store (#15), `POST /api/pair` exchanging one for an endpoint and token (#16), the companion booting from the pairing on disk (#17), and `symma pair <CODE>` writing it (#18). Minting still has no Slack button in front of it, so an operator mints until M3d                             | a fresh laptop pairs from one command with no config file — proven end to end: mint, `pair`, then a plain start attaches on what it saved                                 |
+| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control. **Shipped so far:** auto-detect (#19), goodbye control and the login service (#21), and `npx symma` (#22). Remaining: `curl \| sh`, `versions/<v>` + `current`, and self-update — which §9's own note keeps as a security gate, since an unsigned updater reaches every companion that ever installed | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
+| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging                                                                                                                                                                                                                                          | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
 
 M3d's bar is a person, not a passing test. If a tester needs a hand, the
 milestone is not done.

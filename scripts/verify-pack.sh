@@ -81,8 +81,14 @@ echo "==> the CLI a member actually runs"
 # `env -i` because the alternative is a hang: on a machine that has paired, or
 # one exporting SYMMA_COMPANION_*, the companion would attach and this script
 # would wait on it forever.
-cli_out=$(env -i PATH="$PATH" HOME="$work/nowhere" ./node_modules/.bin/symma 2>&1 || true)
-grep -q 'Not paired' <<<"$cli_out" || { echo "FAIL: symma did not start: $cli_out"; exit 1; }
+set +e
+cli_out=$(env -i PATH="$PATH" HOME="$work/nowhere" ./node_modules/.bin/symma 2>&1)
+cli_status=$?
+set -e
+# The status as well as the words: a CLI that printed the refusal and then
+# exited 0 would be telling a caller it had started.
+[ "$cli_status" -eq 1 ] || { echo "FAIL: symma exited $cli_status: $cli_out"; exit 1; }
+grep -q 'Not paired' <<<"$cli_out" || { echo "FAIL: symma did not refuse: $cli_out"; exit 1; }
 
 echo "==> publint"
 for tgz in "${tarballs[@]}"; do npx --yes publint@latest "$tgz"; done

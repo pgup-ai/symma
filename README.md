@@ -31,8 +31,12 @@ bot and the tenancy model that M3 needs are not.
 | `@symma/slack`    | the Slack bot                                                                                  | planned                                                 |
 
 ```bash
-npx symma pair BPB1-9W92-HTZJ-RA19   # or: npm i -g symma && symma pair …
+npm i -g symma && symma pair BPB1-9W92-HTZJ-RA19
 ```
+
+`npx symma pair …` works too, but installs no login service: npx runs from a
+cache that is eventually deleted, and a companion supervised out of one stops
+coming back after a reboot without saying so.
 
 ## Supported agents
 
