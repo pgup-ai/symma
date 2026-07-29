@@ -584,7 +584,10 @@ function callerIp(req: IncomingMessage): string {
 // Abuse control, not the guarantee: guessing a code is answered by its 80 bits
 // (§2), and this bounds the database work one caller can ask for.
 const PAIR_WINDOW_MS = Number(process.env.SYMMA_GATEWAY_PAIR_WINDOW_MS) || 60_000;
-const PAIR_TRIES = 10;
+const PAIR_TRIES =
+  Number(process.env.SYMMA_GATEWAY_PAIR_TRIES) > 0
+    ? Number(process.env.SYMMA_GATEWAY_PAIR_TRIES)
+    : 10;
 const pairTries = new Map<string, { count: number; resetAt: number }>();
 
 function pairThrottled(ip: string): boolean {
