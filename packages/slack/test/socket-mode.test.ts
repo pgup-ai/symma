@@ -177,6 +177,7 @@ describe('socket mode', () => {
 
     socket.deliver({ type: 'hello' });
     socket.deliverRaw('{ not json');
+    socket.deliver({ type: 'events_api' }); // parseable, but no envelope id to ack
     socket.deliver(envelope('e1'));
     await tick();
     assert.equal(socket.closed, false);

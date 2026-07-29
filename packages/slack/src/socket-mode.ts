@@ -105,7 +105,12 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
     }
     const envelopeId = frame.envelope_id;
     const type = frame.type;
-    if (typeof envelopeId !== 'string' || typeof type !== 'string') return;
+    if (typeof envelopeId !== 'string' || typeof type !== 'string') {
+      // Every envelope type Slack sends carries both, so this should never
+      // fire — which is why it is worth hearing about when it does.
+      log('ignoring a frame with no envelope id or type');
+      return;
+    }
 
     // Acked before the work, not after: Slack redelivers what is unacked, so a
     // handler slower than its window would earn a second copy of itself. The
