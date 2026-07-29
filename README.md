@@ -32,6 +32,16 @@ bot and the tenancy model that M3 needs are not.
 
 `symma` (unscoped) is the companion's install path.
 
+## Supported agents
+
+The companion detects every built-in at start — logged in on the machine it
+attaches, and pairing names what it skipped and why:
+
+`kilo` · `codex` · `devin` · `cursor` · `claude` (via the ACP registry's
+`claude-agent-acp`) · `gemini` · `opencode`
+
+Any other ACP binary runs untiered via `SYMMA_COMPANION_AGENTS=name=cmd args`.
+
 ## Design
 
 [`docs/design/m3-slack-companion.md`](docs/design/m3-slack-companion.md) — tenancy,

@@ -801,10 +801,12 @@ export function geminiAcpSpec(geminiHome = process.env.HOME || homedir()): AcpAg
       env.NO_BROWSER = 'true';
       return { env, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
     },
-    // No plan mode (approval modes are default/auto_edit/yolo — none is a
-    // read-only agent), so gemini has no agent-side layer: the client floor is
-    // the only one. DM tier per §3 of the M3 design; a review caller that
-    // depends on invariant 1 must not route here.
+    // No plan mode exists (approval modes are default/auto_edit/yolo — none a
+    // read-only agent), so requiring one refuses every session. Deliberate:
+    // invariant 1 is unconditional until the DM path exists, and "DM tier" as
+    // prose alone is a tier that closes by accident — this is the mechanism.
+    // Whoever builds the DM path amends this in the same commit (§3).
+    requirePlanMode: true,
   };
 }
 

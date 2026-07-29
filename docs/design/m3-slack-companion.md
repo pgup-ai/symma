@@ -522,9 +522,12 @@ could not run:
 - `gemini` — first-party `--experimental-acp`. Temp HOME with only the OAuth
   material; settings written fresh so a member's `mcpServers` never leak into a
   session; ambient provider keys stripped; `NO_BROWSER` pinned so a stale login
-  fails as words, not a browser hijack. **No agent-side layer** — its approval
-  modes contain no read-only agent — so gemini is DM-tier only: a review caller
-  that depends on invariant 1 must not route to it.
+  fails as words, not a browser hijack. **No agent-side layer exists** — its
+  approval modes contain no read-only agent — so its spec requires plan mode
+  anyway and every session refuses, closed: invariant 1 is unconditional until
+  the DM path lands, and a tier that is only prose closes by accident. Pairing
+  still detects and lists it; the DM path lifts the refusal in the same commit
+  that builds the write-path rules (§4).
 - `opencode` — kilo's lineage, kilo's treatment: `opencode acp`, per-spawn
   data dir holding only `auth.json`, plan required via the same `mode` config
   option contract.

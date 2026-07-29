@@ -597,7 +597,9 @@ describe('acp', () => {
       '-m',
       'gemini-2.5-pro',
     ]);
-    assert.equal(gemini.requirePlanMode, undefined, 'gemini has no agent-side layer (DM tier)');
+    // No plan mode exists to satisfy this, so every session refuses — the
+    // mechanism keeping DM-tier prose from closing invariant 1 by accident.
+    assert.equal(gemini.requirePlanMode, true);
     const savedGemini = process.env.GEMINI_API_KEY;
     process.env.GEMINI_API_KEY = 'ambient';
     const geminiLeakPrefix = 'symma-gemini-acp-';

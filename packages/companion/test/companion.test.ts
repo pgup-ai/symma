@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { generateSigningKeys, verifyEnvelope, type ObserverEnvelope } from '@symma/protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
@@ -423,6 +431,11 @@ describe('relay e2e', () => {
       assert.match(said, /claude: not logged in/);
       assert.match(said, /gemini: not logged in/);
       assert.match(said, /opencode: no auth/);
+      // The README's supported-agents list rides the same seven names: pinned
+      // here, beside the reasons, so adding an agent updates both or fails.
+      const readme = readFileSync(join(import.meta.dirname, '..', '..', '..', 'README.md'), 'utf8');
+      for (const name of ['kilo', 'codex', 'devin', 'cursor', 'claude', 'gemini', 'opencode'])
+        assert.ok(readme.includes(`\`${name}\``), `README supported-agents lists ${name}`);
       // Nothing persisted at all — not the pairing, and not the signing key,
       // which a refused pair has no use for.
       assert.equal(existsSync(join(home, '.local', 'share', 'symma-companion')), false);
