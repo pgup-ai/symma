@@ -54,7 +54,6 @@ describe('/connect', () => {
 
   it('says something actionable for every outcome', () => {
     const success = connectMessage(minted);
-    assert.match(success, /BPB1-9W92-HTZJ-RA19/);
     assert.match(success, /symma pair BPB1-9W92-HTZJ-RA19/, 'the whole command, not just the code');
     assert.match(success, /10 minutes/);
     // Minting supersedes, so a second `/connect` kills the code they may have
@@ -66,11 +65,13 @@ describe('/connect', () => {
       { ok: false, why: 'not-a-member' },
       { ok: false, why: 'unavailable' },
     ] as const;
-    for (const outcome of outcomes) {
-      const said = connectMessage(outcome);
-      assert.ok(said.length > 20, `${outcome.why} says something`);
-      assert.doesNotMatch(said, /undefined|\[object/, outcome.why);
+    const said = outcomes.map(connectMessage);
+    for (const [i, message] of said.entries()) {
+      assert.doesNotMatch(message, /undefined|\[object/, outcomes[i]!.why);
     }
+    // Three distinct sentences, so a branch that falls through to another
+    // outcome's copy is caught rather than reading as merely terse.
+    assert.equal(new Set(said).size, 3);
     // Only the outage invites a retry: the other two would not change.
     assert.match(connectMessage({ ok: false, why: 'unavailable' }), /again is safe/);
     assert.match(connectMessage({ ok: false, why: 'not-a-member' }), /administers/);

@@ -156,18 +156,16 @@ function bearerToken(req: IncomingMessage): string | undefined {
   return typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined;
 }
 
-/** Query token is for EventSource/browser GETs only (they cannot set headers);
- * ingest (POST) must use the Authorization header so the token never lands in
- * access logs or proxy caches. */
-/** Digested first so both sides are 32 bytes, which is what `timingSafeEqual`
- * requires and what stops the comparison from also leaking the length. Every
- * other secret here is compared as a hash in the database; this one has no row
- * to be, so it does the same work in process. */
+/** Digested first so both sides are 32 bytes, which `timingSafeEqual` requires
+ * and which stops the comparison leaking the length too. */
 function sameSecret(offered: string, expected: string): boolean {
   const digest = (value: string): Buffer => createHash('sha256').update(value).digest();
   return timingSafeEqual(digest(offered), digest(expected));
 }
 
+/** Query token is for EventSource/browser GETs only (they cannot set headers);
+ * ingest (POST) must use the Authorization header so the token never lands in
+ * access logs or proxy caches. */
 function clientToken(req: IncomingMessage, url: URL): string {
   return bearerToken(req) ?? (req.method === 'GET' ? (url.searchParams.get('token') ?? '') : '');
 }
@@ -784,8 +782,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Deactivated, not absent — `ensureMember` creates whoever it has not seen.
     if (!member) return sendJson(res, 403, { error: 'deactivated' });
     const code = await store.mintPairingCode(member);
-    // The member, never the code: this log is the operator's record that a
-    // pairing was offered, and a code in it would be the credential in plaintext.
+    // The member, never the code, which is the credential itself.
     log(`minted a pairing code for ${member}`);
     return sendJson(res, 200, { code, expiresInMinutes: PAIRING_TTL_MINUTES });
   }

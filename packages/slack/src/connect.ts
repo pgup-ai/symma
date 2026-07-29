@@ -1,17 +1,14 @@
 /**
- * `/connect` — the Slack half of pairing (§2). Until now an operator minted
- * codes by hand; this is the button in front of that.
+ * `/connect` — the Slack half of pairing (§2).
  *
- * The member's Slack identity is the whole input. It is never asked for, typed,
- * or carried in the command text: Socket Mode delivers `team_id` and `user_id`
- * on an authenticated connection, so they are the trusted assertion of who is
- * asking. A code minted from anything the member could type would let them pair
- * as somebody else.
+ * The member's Slack identity is the whole input, and it is never typed: Socket
+ * Mode delivers `team_id` and `user_id` on an authenticated connection, so they
+ * are the trusted assertion of who is asking. A code minted from anything a
+ * member could type would pair them as somebody else.
  */
 
-/** What the gateway said. `not-a-member` is a real answer, not an error: a
- * deactivated member keeps their row, so their `/connect` must fail rather than
- * quietly re-admit them. */
+/** `not-a-member` is an answer, not an error: a deactivated member keeps their
+ * row, so their `/connect` must fail rather than quietly re-admit them. */
 export type MintResult =
   { ok: true; code: string; expiresInMinutes: number } | { ok: false; why: 'not-a-member' };
 
@@ -23,12 +20,9 @@ export interface SlashCommand {
   response_url?: unknown;
 }
 
-/**
- * Pinned to the one workspace this bot was installed in. A Slack Connect guest
- * arrives with their own `team_id`, and §6 refuses that rather than guessing:
- * `(team_id, user_id) → owner` is not well defined for someone whose identity
- * belongs to another workspace.
- */
+/** Pinned to the workspace this bot was installed in: a Slack Connect guest
+ * arrives with their own `team_id`, and `(team_id, user_id) → owner` is not
+ * well defined for them (§6). */
 export async function runConnect(
   command: SlashCommand,
   team: string,
@@ -44,15 +38,11 @@ export async function runConnect(
   }
 }
 
-/**
- * Every outcome reaches a sentence the member can act on. A command that fails
- * silently is the failure mode §3 spends its presence copy avoiding, and the
- * one an operator never hears about.
- */
+/** Every outcome reaches a sentence the member can act on (§3). */
 export function connectMessage(outcome: ConnectOutcome): string {
   if (outcome.ok) {
     return [
-      `Run this on the machine you want to reach — your agent, your credentials, your files:`,
+      'Run this on the machine you want to reach — your agent, your credentials, your files:',
       '',
       '```',
       `npm i -g symma && symma pair ${outcome.code}`,

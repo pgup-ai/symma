@@ -24,14 +24,13 @@ export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unkn
 
 export interface Store {
   ownerForClientToken(token: string): Promise<Owner | undefined>;
-  /** The owner behind a Slack identity, created on first sight. `/connect` is
-   * the only caller: it holds an authenticated `team_id`/`user_id` from Slack,
-   * which §6's pilot treats as membership — one privately administered
-   * workspace, one custom app, known internal members.
+  /** The owner behind a Slack identity, created on first sight — `/connect`
+   * holds an authenticated `team_id`/`user_id`, which §6's pilot treats as
+   * membership: one privately administered workspace, known internal members.
    *
-   * Undefined for a member who was deactivated. Their row survives the soft
-   * delete, so re-creating them here is what re-admitting a removed member
-   * would look like; refusing leaves that as an administrative act. */
+   * Undefined for a deactivated member. Their row survives the soft delete, so
+   * re-creating them here would be re-admitting someone who was removed, which
+   * stays an administrative act rather than something their own command does. */
   ensureMember(slackTeamId: string, slackUserId: string): Promise<Owner | undefined>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
    * supersedes this owner's outstanding code. Throws if they are not a member
@@ -155,9 +154,7 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
          RETURNING id, deactivated_at`,
         [randomUUID(), workspace!.id, slackUserId],
       );
-      // Deliberately not clearing `deactivated_at`: re-admitting a removed
-      // member is an administrative act, not something their own `/connect`
-      // can do.
+      // Read, never cleared — see the contract above.
       return member!.deactivated_at ? undefined : member!.id;
     },
     async mintPairingCode(owner) {

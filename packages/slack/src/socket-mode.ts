@@ -1,12 +1,7 @@
 /**
  * Socket Mode: the bot dials OUT and holds one WebSocket open, so it needs no
- * public URL, no TLS site and no event endpoint (§6). That is the whole reason
- * the pilot needs no OAuth infrastructure — and the reason it can never be
- * listed in the Marketplace, which §6 keeps as a deliberate phase-1 trade.
- *
- * Node's global `WebSocket` and `fetch` are the transport, so this costs no
- * dependency. Slack's Socket Mode API is the specification here; a competitor's
- * client is evidence about edge cases, never the contract.
+ * public URL, no TLS site and no event endpoint (§6). Node's global `WebSocket`
+ * and `fetch` are the transport, which is what keeps it dependency-free.
  */
 
 /** One inbound work item. Slack redelivers an envelope that is not acked, which
@@ -33,14 +28,14 @@ export interface SocketModeOptions {
    * URL and dials it. Each connection gets a fresh URL — they are single-use
    * and short-lived, so a reconnect cannot reuse the last one. */
   dial?: () => Promise<SocketLike>;
-  /** Interrupts the reconnect wait so a test does not sleep. */
+  /** Replaces the reconnect wait so a test does not sleep. */
   wait?: (ms: number) => Promise<void>;
 }
 
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-/** Bounded so a long-lived bot does not grow one entry per envelope forever.
- * Redelivery follows within seconds, so recent is the only window that matters. */
+/** Redelivery follows within seconds, so recent is the only window that matters
+ * — and a long-lived bot must not keep one entry per envelope forever. */
 const SEEN_LIMIT = 512;
 
 async function openConnection(appToken: string): Promise<SocketLike> {
@@ -91,14 +86,15 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
       return;
     }
     const envelopeId = frame.envelope_id;
-    if (typeof envelopeId !== 'string' || typeof frame.type !== 'string') return;
+    const type = frame.type;
+    if (typeof envelopeId !== 'string' || typeof type !== 'string') return;
 
     // Acked before the work, not after: Slack redelivers what is unacked, so a
     // handler slower than its window would earn a second copy of itself. The
     // dedupe below is what makes that safe rather than merely unlikely.
     from.send(JSON.stringify({ envelope_id: envelopeId }));
     if (seen.has(envelopeId)) {
-      log(`ignoring a redelivered ${frame.type}`);
+      log(`ignoring a redelivered ${type}`);
       return;
     }
     if (seen.size >= SEEN_LIMIT) seen.delete(seen.values().next().value!);
@@ -108,12 +104,12 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
       try {
         await onEnvelope({
           envelopeId,
-          type: frame.type as string,
+          type,
           payload: (frame.payload ?? {}) as Record<string, unknown>,
         });
       } catch (error) {
         // One member's failed command must not take the socket down with it.
-        log(`handling ${String(frame.type)} failed: ${String(error)}`);
+        log(`handling ${type} failed: ${String(error)}`);
       }
     })();
   };

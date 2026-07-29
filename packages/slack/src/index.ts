@@ -1,10 +1,8 @@
 /**
  * The bot. Holds one outbound WebSocket to Slack and no agent credentials, and
- * spawns nothing (§6). Today it answers exactly one command: `/connect`.
- *
- * Deliberately one command. cc-connect's chat surface grows model, provider,
- * directory, shell and relay controls, and every one of them is support and
- * security surface this workflow has not earned yet.
+ * spawns nothing (§6). One command, deliberately: model, provider, directory
+ * and shell controls are all support and security surface, and this workflow
+ * has not earned any of them yet.
  */
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import { socketMode } from './socket-mode.js';
