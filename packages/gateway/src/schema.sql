@@ -1,5 +1,5 @@
--- M3a. Only what owner-scoping needs; pairings and key_changes arrive with M3b,
--- conversations and turns with M3d. openStore applies this file as-is, so every
+-- M3a's owner-scoping tables, plus pairings (M3b) and conversations (M3d);
+-- `key_changes` is what remains. openStore applies this file as-is, so every
 -- statement is IF NOT EXISTS; a real migration runner arrives with the first
 -- change that cannot be expressed that way.
 
@@ -71,5 +71,68 @@ CREATE TABLE IF NOT EXISTS pairings (
   consumed_at timestamptz
 );
 
+-- §4. One DM thread is one conversation, and the thread is its identity — never
+-- the ACP session underneath, which is replaced on every resume while a member
+-- typing in an old thread still has to reach the same conversation.
+--
+-- `user_id` is part of that identity rather than merely its owner: several
+-- members can each tag one channel thread, and each must get a private
+-- conversation of their own instead of joining one.
+CREATE TABLE IF NOT EXISTS conversations (
+  id                text PRIMARY KEY,
+  user_id           text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  dm_channel_id     text NOT NULL,
+  root_thread_ts    text NOT NULL,
+  -- Captured at invocation so a later share-back has a destination that cannot
+  -- be redirected. Null when the conversation began in the DM, with no source.
+  source_channel_id text,
+  source_thread_ts  text,
+  -- Nulled rather than cascaded: deactivation drops endpoints, and the record of
+  -- what was asked should outlive the machine it was asked of.
+  endpoint_id       text REFERENCES endpoints(id) ON DELETE SET NULL,
+  agent             text NOT NULL DEFAULT '',
+  model             text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, dm_channel_id, root_thread_ts)
+);
+
+-- §5. Delivery is a state machine, not a boolean. `slack_event_id` is unique
+-- across the table rather than per conversation because the id is Slack's and
+-- the Events API retries: a redelivery has to find the turn it already made,
+-- wherever that turn was.
+CREATE TABLE IF NOT EXISTS turns (
+  id                text PRIMARY KEY,
+  conversation_id   text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  slack_event_id    text UNIQUE NOT NULL,
+  delivery_mode     text NOT NULL DEFAULT 'private' CHECK (
+                      delivery_mode IN ('private', 'post_when_ready', 'posted', 'cancelled')),
+  status            text NOT NULL DEFAULT 'running' CHECK (
+                      status IN ('running', 'awaiting_approval', 'completed', 'failed', 'cancelled')),
+  result_ref        text,
+  published_channel text,
+  published_ts      text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  -- Publishing and having published are one fact. A `posted` turn always says
+  -- where it landed, and a destination cannot be recorded against a turn that
+  -- never published — so "posted once" is answerable from the row alone.
+  CONSTRAINT turns_posted_has_destination CHECK (
+    (delivery_mode = 'posted') = (published_channel IS NOT NULL AND published_ts IS NOT NULL))
+);
+
+-- §4 resuming. `resume_kind` is why this is a table rather than a column on
+-- `conversations`: a conversation outlives its sessions, and whether a resume
+-- was exact or recovered is a fact to store, not one for a UI to infer.
+CREATE TABLE IF NOT EXISTS conversation_sessions (
+  conversation_id text NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  -- Cascaded, so retention deleting a session takes the link and leaves the
+  -- conversation and its turns standing. Unique, because a session belongs to
+  -- the one conversation that started it.
+  session_id      text UNIQUE NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  ordinal         int NOT NULL,
+  resume_kind     text NOT NULL CHECK (resume_kind IN ('new', 'exact', 'recovered')),
+  PRIMARY KEY (conversation_id, ordinal)
+);
+
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);
 CREATE INDEX IF NOT EXISTS endpoints_user_idx ON endpoints (user_id);
+CREATE INDEX IF NOT EXISTS turns_conversation_idx ON turns (conversation_id);
