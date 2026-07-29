@@ -67,6 +67,17 @@ const within = async <T>(ms: number, settled: Promise<T>): Promise<T | 'timeout'
   }
 };
 
+/** A child inheriting no configuration of ours — for the tests that assert what
+ * a machine does with none. A runner's own SYMMA_COMPANION_AGENTS would replace
+ * the built-in default one of them is about, its GATEWAY and TOKEN would start a
+ * companion that should have said it was unpaired, and CURSOR_API_KEY is the one
+ * credential living outside HOME, so a real one makes a bare machine pairable. */
+const bare = (home: string): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, CURSOR_API_KEY: '' };
+  for (const key of Object.keys(env)) if (key.startsWith('SYMMA_COMPANION_')) delete env[key];
+  return env;
+};
+
 async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Promise<T> {
   for (let i = 0; i < 100; i += 1) {
     const value = await probe();
@@ -390,15 +401,18 @@ describe('relay e2e', () => {
           'pair',
           'BPB1-9W92-HTZJ-RA19',
         ],
-        // No gateway either: it must refuse without reaching for one.
-        { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
+        { env: bare(home), stdio: ['ignore', 'pipe', 'pipe'] },
       );
       let said = '';
       pair.stdout?.on('data', (c) => (said += String(c)));
       pair.stderr?.on('data', (c) => (said += String(c)));
       assert.equal(await new Promise((resolve) => pair.on('close', resolve)), 1);
       assert.match(said, /Nothing to connect/);
+      // Each built-in's reason, so the default list cannot quietly shrink.
       assert.match(said, /kilo: no auth/);
+      assert.match(said, /codex: no auth/);
+      assert.match(said, /devin: no credentials/);
+      assert.match(said, /cursor: CURSOR_API_KEY not set/);
       // Nothing persisted at all — not the pairing, and not the signing key,
       // which a refused pair has no use for.
       assert.equal(existsSync(join(home, '.local', 'share', 'symma-companion')), false);
@@ -443,8 +457,7 @@ describe('relay e2e', () => {
         ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
         {
           env: {
-            ...process.env,
-            HOME: from,
+            ...bare(from),
             SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
             ...extra,
           },
@@ -515,7 +528,7 @@ describe('relay e2e', () => {
         const companion = spawn(
           process.execPath,
           ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
-          { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
+          { env: bare(home), stdio: ['ignore', 'pipe', 'pipe'] },
         );
         let out = '';
         companion.stdout?.on('data', (c) => (out += String(c)));
