@@ -52,6 +52,7 @@ import {
   type RelayControl,
 } from '@symma/protocol';
 
+import { installLoginService } from './login-service.js';
 import { fetchWorkspace } from './workspace.js';
 
 const KILL_GRACE_MS = 2_000;
@@ -912,6 +913,16 @@ async function runPair(code: string): Promise<never> {
   console.log(`✅ Connected — ${device} · ${running.join(', ')}`);
   for (const why of skipped) console.log(`⚪ ${why}`);
   console.log(`Saved to ${path}. Run \`symma\` to stay connected.`);
+  // §2 step 4: pairing installs the login service. Written, not started —
+  // bootstrapping a service is a persistent change to someone's machine, and
+  // the installer that ran this command is what does that unattended.
+  for (const line of installLoginService(process.platform, homedir(), [
+    process.execPath,
+    ...process.execArgv,
+    process.argv[1] ?? '',
+  ])) {
+    console.log(line);
+  }
   process.exit(0); // fetch's keep-alive socket would hold a finished command open
 }
 

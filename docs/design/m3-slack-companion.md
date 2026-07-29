@@ -468,10 +468,10 @@ symma` is secondary for the Node crowd and nearly free from the same codebase.
 - **Self-update on start.** Not a nicety: external companions cannot be upgraded
   by us, and without self-update every protocol change compounds into a
   permanent compatibility tax.
-- **Login service** — launchd user agent on macOS, systemd user unit on Linux.
-  "Keep this terminal open" is where non-technical users fall off. See
-  "Staying attached" below for why it is a _user_ service and what it cannot
-  cover.
+- **Login service** — **shipped 2026-07-29** (#21): launchd user agent on
+  macOS, systemd user unit on Linux, written by `symma pair`. "Keep this
+  terminal open" is where non-technical users fall off. See "Staying attached"
+  below for why it is a _user_ service and what it cannot cover.
 
 ### The four built-ins are a hardening list, not a compatibility list
 
@@ -595,9 +595,12 @@ Two halves, and only one of them is solvable. Supervision is packaging. Sleep is
 physics, and pretending otherwise is how this becomes the top support issue §2
 already predicts.
 
-**The service is a _user_ service, and that is load-bearing.** On macOS a
-launchd **LaunchAgent**, not a LaunchDaemon; on Linux a systemd **user** unit
-with `loginctl enable-linger` as a deliberate opt-in, not a system unit. The
+**The service is a _user_ service, and that is load-bearing** — **shipped
+2026-07-29 (#21)**. On macOS a launchd **LaunchAgent**, not a LaunchDaemon; on
+Linux a systemd **user** unit with `loginctl enable-linger` as a deliberate
+opt-in, not a system unit. Pairing writes it and prints the one command that
+starts it: bootstrapping a service is a persistent change to someone's machine,
+so §2's installer is what does that unattended. The
 whole premise is that the agent runs on the machine's ambient auth — kilo's
 `auth.json`, `~/.codex`, the login keychain. A root daemon starting before login
 cannot see any of it, and a design that reaches for one has quietly decided to

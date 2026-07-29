@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -947,6 +947,15 @@ describe('tenancy', () => {
       assert.match(saved.endpoint, /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
       assert.equal(saved.gateway, base);
       assert.equal(saved.device, "Wen's laptop");
+      // §2 step 4: pairing leaves a login service behind, so the machine comes
+      // back after a reboot without the member being told to keep a terminal
+      // open. Written under this HOME, and darwin is what this suite runs on.
+      if (process.platform === 'darwin') {
+        const plist = join(home, 'Library', 'LaunchAgents', 'dev.symma.companion.plist');
+        assert.ok(existsSync(plist), said);
+        assert.match(readFileSync(plist, 'utf8'), /<key>RunAtLoad<\/key><true\/>/);
+        assert.match(said, /Starts at login from/);
+      }
 
       // And a plain start now attaches on it, with nothing else configured.
       companion = runCompanion();
