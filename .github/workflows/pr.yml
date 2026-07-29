@@ -28,6 +28,10 @@ jobs:
       - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck
-      # Before the build, so a fresh clone is what gets tested.
+      # Before the build, so a fresh clone is what gets tested. Capped because
+      # a test that wedges is indistinguishable from one that is slow: a
+      # recursive mkdir under /proc never returned and held a runner until
+      # someone noticed, rather than failing in minutes.
       - run: npm test
+        timeout-minutes: 5
       - run: npm run verify:pack

@@ -1,10 +1,31 @@
 {
-  "name": "@symma/companion",
+  "name": "symma",
   "version": "0.1.0",
-  "description": "Outbound-dialing companion: attach loop, agent detection, workspace checkout, local agent lifecycle",
+  "description": "Connect a chat surface to the coding agents already logged in on your own machine",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pgup-ai/symma.git",
+    "directory": "packages/companion"
+  },
+  "homepage": "https://github.com/pgup-ai/symma/tree/main/packages/companion",
+  "bugs": {
+    "url": "https://github.com/pgup-ai/symma/issues"
+  },
   "license": "MIT",
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
+  "bin": {
+    "symma": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
+  },
   "dependencies": {
     "@symma/protocol": "0.3.0"
   },

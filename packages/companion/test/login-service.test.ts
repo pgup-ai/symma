@@ -59,6 +59,36 @@ describe('login service', () => {
     assert.doesNotMatch(service.contents, /a&b<c>d/);
   });
 
+  it('writes nothing when it is running from a cache that will be deleted', () => {
+    // `npx symma pair` is the flow the README advertises, and it runs from a
+    // directory npm evicts. A unit pointing there fails silently later — the
+    // member paired, and then simply stops coming back after a reboot.
+    const home = mkdtempSync(join(tmpdir(), 'symma-service-'));
+    try {
+      for (const cache of [
+        '/Users/nel/.npm/_npx/9f2/node_modules/symma/dist/index.js',
+        '/Users/nel/Library/Caches/pnpm/dlx/9f2/node_modules/symma/dist/index.js',
+      ]) {
+        const said = installLoginService('darwin', home, ['/usr/bin/node', cache]).join(' ');
+        assert.match(said, /Not installing a login service/, cache);
+        assert.match(said, /npm i -g symma/, 'and says which install is durable');
+      }
+      assert.equal(
+        existsSync(join(home, 'Library', 'LaunchAgents', 'dev.symma.companion.plist')),
+        false,
+        'a stale unit is worse than none',
+      );
+      // A durable install still gets one, or the guard has eaten the feature.
+      installLoginService('darwin', home, [
+        '/usr/bin/node',
+        '/usr/local/lib/node_modules/symma/dist/index.js',
+      ]);
+      assert.ok(existsSync(join(home, 'Library', 'LaunchAgents', 'dev.symma.companion.plist')));
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('has nothing to install where there is no user service', () => {
     assert.equal(loginService('win32', 'C:\\Users\\nel', COMMAND), undefined);
     assert.deepEqual(installLoginService('win32', 'C:\\Users\\nel', COMMAND), []);

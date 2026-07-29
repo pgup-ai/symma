@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Companion: dials OUT to the gateway (no listeners) and bridges local ACP
  * agent binaries — with the machine's own ambient auth — to relayed sessions.

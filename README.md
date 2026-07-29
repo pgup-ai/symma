@@ -22,15 +22,21 @@ bot and the tenancy model that M3 needs are not.
 
 ## Packages
 
-| package            | what it is                                                                                     | status                                                  |
-| ------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `@symma/protocol`  | ACP framing, JSON-RPC peer, session driver, agent specs, envelope signing, relay control types | [on npm](https://www.npmjs.com/package/@symma/protocol) |
-| `@symma/client`    | drive a prompt against a local agent, or a remote one through a gateway                        | [on npm](https://www.npmjs.com/package/@symma/client)   |
-| `@symma/gateway`   | relay, journal store, viewer, tenancy                                                          | private — ships as an image                             |
-| `@symma/companion` | attach loop, agent detection, pairing, local spawn/lifecycle, self-update                      | private — installs as `symma`                           |
-| `@symma/slack`     | the Slack bot                                                                                  | planned                                                 |
+| package           | what it is                                                                                     | status                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `@symma/protocol` | ACP framing, JSON-RPC peer, session driver, agent specs, envelope signing, relay control types | [on npm](https://www.npmjs.com/package/@symma/protocol) |
+| `@symma/client`   | drive a prompt against a local agent, or a remote one through a gateway                        | [on npm](https://www.npmjs.com/package/@symma/client)   |
+| `@symma/gateway`  | relay, journal store, viewer, tenancy                                                          | private — ships as an image                             |
+| `symma`           | the companion CLI: attach loop, agent detection, pairing, local spawn/lifecycle                | [on npm](https://www.npmjs.com/package/symma)           |
+| `@symma/slack`    | the Slack bot                                                                                  | planned                                                 |
 
-`symma` (unscoped) is the companion's install path.
+```bash
+npm i -g symma && symma pair BPB1-9W92-HTZJ-RA19
+```
+
+`npx symma pair …` works too, but installs no login service: npx runs from a
+cache that is eventually deleted, and a companion supervised out of one stops
+coming back after a reboot without saying so.
 
 ## Supported agents
 

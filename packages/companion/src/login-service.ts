@@ -21,6 +21,12 @@ export interface LoginService {
 
 const LABEL = 'dev.symma.companion';
 
+/** `npx` runs from a cache its package manager may evict, so a unit pointing
+ * into one starts failing silently the first time that happens — the member
+ * paired successfully and then simply stops coming back after a reboot. Better
+ * to write nothing and say which install is durable. */
+const EPHEMERAL = /(^|[/\\])(_npx|dlx)([/\\]|$)/;
+
 /** Quoted when it would otherwise split, and `%` doubled always: systemd reads
  * a bare one as a specifier prefix, so a path containing it launches something
  * else or fails to start. */
@@ -92,6 +98,12 @@ export function installLoginService(
 ): string[] {
   const service = loginService(platform, home, command);
   if (!service) return [];
+  if (command.some((argument) => EPHEMERAL.test(argument))) {
+    return [
+      'Not installing a login service: this ran from a temporary npx cache,',
+      'which is deleted eventually. `npm i -g symma`, then pair again.',
+    ];
+  }
   try {
     mkdirSync(dirname(service.path), { recursive: true });
     writeFileSync(service.path, service.contents, { mode: 0o644 });

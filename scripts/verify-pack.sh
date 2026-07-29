@@ -21,10 +21,14 @@ echo "==> building"
 
 echo "==> packing"
 tarballs=()
-for pkg in protocol client; do
+for pkg in protocol client companion; do
+  name=$(node -p "require('$root/packages/$pkg/package.json').name")
   ver=$(node -p "require('$root/packages/$pkg/package.json').version")
   (cd "$root/packages/$pkg" && npm pack --silent --pack-destination "$work" >/dev/null)
-  tgz="symma-$pkg-$ver.tgz"
+  # npm flattens a scope into the filename, so the CLI packs as symma-<ver>.tgz
+  # rather than symma-companion-<ver>.tgz.
+  stem="${name#@}"
+  tgz="${stem/\//-}-$ver.tgz"
   files=$(tar tzf "$work/$tgz" | wc -l | tr -d ' ')
   # npm ships LICENSE, README and package.json whatever `files` says, so a
   # dist-less pack still produces a plausible-looking tarball. The entry point
@@ -41,7 +45,7 @@ for pkg in protocol client; do
     exit 1
   fi
   tarballs+=("./$tgz")
-  echo "    @symma/$pkg@$ver: $files files"
+  echo "    $name@$ver: $files files"
 done
 
 cd "$work"
@@ -69,7 +73,24 @@ printf '{"compilerOptions":{"module":"nodenext","moduleResolution":"nodenext","s
 printf 'import { parseEnvelope } from "@symma/protocol";\nimport { checkEndpointReady, type LocalAcpPromptOptions } from "@symma/client";\nexport const seq = parseEnvelope("{}")?.seq;\nexport const ready = checkEndpointReady;\nexport const opts: LocalAcpPromptOptions = { timeoutMs: 1 };\n' > probe.ts
 "$root/node_modules/.bin/tsc" -p tsconfig.json
 
+echo "==> the CLI a member actually runs"
+# The bin, not an import: `symma` publishes no exports, so nothing above would
+# notice a dist that cannot start. Unpaired is the expected refusal, and it
+# proves the shebang, the bin mapping and the protocol dependency all resolved.
+#
+# `env -i` because the alternative is a hang: on a machine that has paired, or
+# one exporting SYMMA_COMPANION_*, the companion would attach and this script
+# would wait on it forever.
+set +e
+cli_out=$(env -i PATH="$PATH" HOME="$work/nowhere" ./node_modules/.bin/symma 2>&1)
+cli_status=$?
+set -e
+# The status as well as the words: a CLI that printed the refusal and then
+# exited 0 would be telling a caller it had started.
+[ "$cli_status" -eq 1 ] || { echo "FAIL: symma exited $cli_status: $cli_out"; exit 1; }
+grep -q 'Not paired' <<<"$cli_out" || { echo "FAIL: symma did not refuse: $cli_out"; exit 1; }
+
 echo "==> publint"
 for tgz in "${tarballs[@]}"; do npx --yes publint@latest "$tgz"; done
 
-echo "OK: both packages install, import and typecheck as a consumer"
+echo "OK: every package installs, and the CLI starts, as a consumer"

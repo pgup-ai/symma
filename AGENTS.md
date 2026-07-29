@@ -18,35 +18,38 @@ Section references below (§N) are to that document.
   (the condition is what resolves `@symma/*` to source)
 - `npm run typecheck` / `npm run lint` / `npm run format` / `npm run format:check`
   — tsc, oxlint (deny-warnings), prettier (owns formatting)
-- `npm run build` — `tsc` emits JS + `.d.ts` into `dist/` for the two packages
-  that publish, `@symma/protocol` and `@symma/client`. `gateway` and `companion`
-  are private applications: they run from source under tsx and build nothing.
-- `npm run verify:pack` — packs both packages and loads them as a consumer
-  would: resolution, the tarball's contents and the types, none of which
-  anything else covers. It does not check the barrel is complete — it imports a
-  handful of symbols, so a missing export still passes. Run it for any change to
-  `exports`, `files` or the emitted types. the suite runs under `--conditions=symma-source` and
+- `npm run build` — `tsc` emits into `dist/` for the three packages that
+  publish: `@symma/protocol` and `@symma/client` (JS + `.d.ts`, they are
+  libraries) and `symma` (JS only, it is a CLI with a `bin` and no exports).
+  `gateway` stays private: it runs from source under tsx and builds nothing.
+- `npm run verify:pack` — packs all three published packages and loads them the
+  way a consumer does. The suite runs under `--conditions=symma-source` and
   `tsc` resolves `@symma/*` to source, so the `dist` entry, the published types
-  and the tarball's contents are exercised only here.
+  and the tarball's contents are exercised only here. `symma` exports nothing to
+  import, so what it checks there is that the installed binary starts. Run it for
+  any change to `exports`, `files`, `bin` or the emitted types. It does not check
+  a barrel is complete — it imports a handful of symbols, so a missing export
+  still passes.
 - Sources import each other as `./foo.js` — NodeNext convention: write the
   extension the output will have, and `tsc` and tsx both resolve the `.ts`.
   Writing `.ts` breaks the emit.
-- The two published packages resolve to `src` in the workspace through the
-  `symma-source` export condition, and to `dist` everywhere else. Any process
+- The two published libraries resolve to `src` in the workspace through the
+  `symma-source` export condition, and to `dist` everywhere else. `symma` has no
+  exports, so nothing resolves into it — it is only ever run. Any process
   that runs from source needs `--conditions=symma-source`, including ones a test
   spawns — a child does not inherit the flag. `@symma/gateway` is private and
   maps straight to source with no condition.
 
 ## Packages
 
-§8 "Package graph". `@symma/protocol`, `@symma/gateway`, `@symma/companion` and
-`@symma/client` exist today; `slack` arrives with M3.
+§8 "Package graph". `@symma/protocol`, `@symma/gateway`, `symma` (the
+companion) and `@symma/client` exist today; `slack` arrives with M3.
 
 | package                    | what it is                                                                                                                                                                         | depends on       |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | `@symma/protocol`          | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                |
 | `@symma/gateway`           | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol         |
-| `@symma/companion`         | attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update, pairing                                                                                      | protocol         |
+| `symma`                    | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, pairing, login service                                                                | protocol         |
 | `@symma/client`            | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol         |
 | `@symma/slack` _(planned)_ | the bot — dials the gateway like any other client                                                                                                                                  | client, protocol |
 
@@ -94,11 +97,13 @@ extraction fixes, prevented from recurring.
    release _and_ a pin bump there — the pins are exact, and publishing alone
    moves nothing. Patching its copy re-forks the code that was just unforked.
 
-   **`gateway` and `companion` are outside this.** They publish nothing, so
-   jbot-review still runs its own, and the two have already drifted: symma's
-   `server.ts` has a cross-run guard, a fail-open journal write and a
-   `q=0`-aware `acceptsGzip` that jbot-review's does not. Whoever ships those
-   packages reconciles the drift and extends this entry to cover them.
+   **`gateway` is outside this.** It publishes nothing, so jbot-review still
+   runs its own and the two have already drifted: symma's `server.ts` has a
+   cross-run guard, a fail-open journal write and a `q=0`-aware `acceptsGzip`
+   that jbot-review's does not. Whoever ships it reconciles the drift and
+   extends this entry to cover it. The companion left this exemption when it
+   became `symma` on npm, so a fix to it now travels as a release like the
+   libraries do.
 
 ## Conventions
 
@@ -147,8 +152,9 @@ without losing behavior, it should not have been written.
    generic halves; `ReviewBackend` wrappers and routing policy never leave
    jbot-review. **done** — `observer.ts` stays behind: every caller of it is
    review-side, so it is not symma's to hold.
-4. Publish `@symma/*`, exact-pinned. **done** — `@symma/protocol` and
-   `@symma/client` are on npm; `gateway` and `companion` stay private.
+4. Publish `@symma/*`, exact-pinned. **done** — `@symma/protocol`,
+   `@symma/client` and the companion as unscoped `symma` are on npm; only
+   `gateway` stays private.
    Intra-workspace pins must equal the workspace version exactly (the
    package.json files are the record; `*` resolves to the registry copy instead
    of the local one), so bumping a package means bumping every pin on it in the
