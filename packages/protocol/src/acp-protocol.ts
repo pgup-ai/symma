@@ -49,10 +49,11 @@ const ACP_MAX_FRAME_BYTES = 32 * 1024 * 1024;
 // arrive within an I/O tick; this covers it without paying 750ms per session.
 const ACP_POST_TURN_DRAIN_MS = 300;
 export const CODEX_ACP_BIN = 'codex-acp';
-/** Zed's adapter, not the claude binary: `claude` itself speaks no ACP, the
- * adapter wraps it (live-verified 2026-07-29, @zed-industries/claude-code-acp
- * 0.16.2 against Claude Code 2.1.193). */
-export const CLAUDE_ACP_BIN = 'claude-code-acp';
+/** The canonical adapter, not the claude binary: `claude` itself speaks no
+ * ACP. Zed's claude-code-acp was renamed to this and deprecated; live-verified
+ * 2026-07-29 against @agentclientprotocol/claude-agent-acp 0.63.0 over Claude
+ * Code 2.1.193, and it is what the ACP registry distributes. */
+export const CLAUDE_ACP_BIN = 'claude-agent-acp';
 export const GEMINI_CLI_BIN = 'gemini';
 export const OPENCODE_CLI_BIN = 'opencode';
 
@@ -441,8 +442,6 @@ export async function driveAcpSession(
   }
   if (options.configOptionModelIds?.length) {
     await selectModelConfigOption(conn, sessionId, session, options);
-  } else if (options.model) {
-    await selectSessionModel(conn, sessionId, session, options, options.model);
   }
   const modes = session.modes as
     { currentModeId?: string; availableModes?: { id?: string }[] } | undefined;
@@ -606,36 +605,6 @@ export interface AcpAgentSpec {
   /** See AcpSessionOptions.requirePlanMode. */
   requirePlanMode?: boolean;
 }
-/** Model via ACP session model state (`session/set_model`), for agents that
- * advertise `models` instead of a config option (claude's adapter,
- * live-verified). Same fail-closed contract as the config-option path: a
- * caller-named model that cannot be selected throws rather than silently
- * running the session default. No `models` surface is not a failure — agents
- * without one route the model through their spec's args or config. */
-async function selectSessionModel(
-  conn: AcpConnection,
-  sessionId: string,
-  session: Record<string, unknown>,
-  options: AcpSessionOptions,
-  model: string,
-): Promise<void> {
-  const { modelID } = parseModelName(model);
-  if (modelID === 'default') return;
-  const models = session.models as
-    { availableModels?: { modelId?: string; name?: string }[] } | undefined;
-  if (!models?.availableModels?.length) return;
-  const match = matchModelOptionValue(
-    models.availableModels.map((m) => ({ value: m.modelId, name: m.name })),
-    modelID,
-  );
-  if (!match) {
-    throw new Error(
-      `acp:${options.agent} ${options.label}: agent offers no model ${JSON.stringify(modelID)}`,
-    );
-  }
-  await conn.request('session/set_model', { sessionId, modelId: match });
-}
-
 export function cursorAcpSpec(apiKey: string): AcpAgentSpec {
   return {
     id: 'cursor',
@@ -768,7 +737,6 @@ export function claudeAcpSpec(): AcpAgentSpec {
     // Ambient identity on purpose: the OAuth lives in the macOS Keychain, so
     // there is no credential file to copy into a temp HOME, and
     // ANTHROPIC_API_KEY stays — it is a way to be the account, not a shadow.
-    // Model rides session/set_model; env cannot carry it (live-checked).
     env: () => {
       const env: NodeJS.ProcessEnv = { ...process.env };
       // The CLI refuses to nest while CLAUDECODE is set (live-hit: a companion
@@ -777,6 +745,13 @@ export function claudeAcpSpec(): AcpAgentSpec {
       delete env.CLAUDECODE;
       delete env.CLAUDE_CODE_ENTRYPOINT;
       return { env };
+    },
+    // Model is a config option (live readout: bare ids — default, sonnet,
+    // opus[1m] — with display names the matcher already handles). `default`
+    // skips selection, which keeps the member's own configured model.
+    modelConfigCandidates: (model) => {
+      const { modelID } = parseModelName(model);
+      return modelID === 'default' ? [] : [modelID];
     },
     // "Planning mode, no actual tool execution" — the agent-side layer.
     requirePlanMode: true,
@@ -789,6 +764,8 @@ export function geminiAcpSpec(geminiHome = process.env.HOME || homedir()): AcpAg
     bin: GEMINI_CLI_BIN,
     args: (model) => {
       const { modelID } = parseModelName(model);
+      // The registry's current flag is --acp; this is its deprecated alias,
+      // deliberately — it is the one spelling old and new installs both accept.
       return modelID === 'default' ? ['--experimental-acp'] : ['--experimental-acp', '-m', modelID];
     },
     // Temp HOME with only the OAuth material copied — settings.json is written

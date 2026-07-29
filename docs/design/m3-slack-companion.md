@@ -512,13 +512,13 @@ them, which is a real caller and the right reason.
 members bring whatever is on their laptop, and pairing now shows them what we
 could not run:
 
-- `claude` — via Zed's `claude-code-acp` adapter (the CLI itself speaks no
-  ACP). Ambient identity: the OAuth lives in the macOS Keychain, so there is no
-  file to copy into a temp HOME. Plan mode is offered as a session mode
-  ("no actual tool execution"), so it carries an agent-side layer. Model rides
-  the ACP `models` surface (`session/set_model`) — the driver learned that
-  surface here, since `ANTHROPIC_MODEL` demonstrably does not reach the
-  session's readout.
+- `claude` — via the canonical `claude-agent-acp` adapter (the CLI itself
+  speaks no ACP; Zed's `claude-code-acp` was renamed into the ACP org and
+  deprecated, and the registry distributes the new name). Ambient identity: the
+  OAuth lives in the macOS Keychain, so there is no file to copy into a temp
+  HOME. Plan mode is offered as a session mode ("no actual tool execution"),
+  so it carries an agent-side layer, and model is a config option with bare-id
+  values — the same selection path kilo uses.
 - `gemini` — first-party `--experimental-acp`. Temp HOME with only the OAuth
   material; settings written fresh so a member's `mcpServers` never leak into a
   session; ambient provider keys stripped; `NO_BROWSER` pinned so a stale login
@@ -530,10 +530,14 @@ could not run:
   option contract.
 
 Verification note: claude and opencode were handshake-verified end to end
-(modes, models, config options, isolation). Gemini's cached login was
+(modes, config options, isolation), and every launch shape was cross-checked
+against the ACP registry — which is also what caught the adapter rename, and
+confirms the first four built-ins unchanged. Gemini's cached login was
 invalidated mid-verification, so its spec is verified to the handshake's auth
 gate; the driver's existing authenticate-and-retry path covers the rest and
-wants one live pass once a login exists.
+wants one live pass once a login exists. Its `--experimental-acp` flag is the
+deprecated alias of the registry's `--acp`, kept because it is the one spelling
+old and new installs both accept.
 
 **`curl | sh` plus self-update is a supply-chain boundary, so it needs the
 supply-chain treatment.** We are asking non-technical people to run our script

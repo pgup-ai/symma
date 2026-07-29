@@ -41,7 +41,6 @@ interface FakeAgentApi {
 
 interface FakeAgentScript {
   modes?: Record<string, unknown>;
-  models?: Record<string, unknown>;
   configOptions?: unknown[];
   authMethods?: unknown[];
   /** First session/new fails -32000 until authenticate is called. */
@@ -57,14 +56,12 @@ function fakeAgentIo(script: FakeAgentScript): {
   output: PassThrough;
   setModeIds: string[];
   setConfigCalls: unknown[];
-  setModelIds: string[];
   authCalls: unknown[];
 } {
   const input = new PassThrough();
   const output = new PassThrough();
   const setModeIds: string[] = [];
   const setConfigCalls: unknown[] = [];
-  const setModelIds: string[] = [];
   const authCalls: unknown[] = [];
   let authed = false;
   let promptId: unknown;
@@ -110,7 +107,6 @@ function fakeAgentIo(script: FakeAgentScript): {
         result: {
           sessionId: 's1',
           ...(script.modes ? { modes: script.modes } : {}),
-          ...(script.models ? { models: script.models } : {}),
           ...(script.configOptions ? { configOptions: script.configOptions } : {}),
         },
       });
@@ -124,9 +120,6 @@ function fakeAgentIo(script: FakeAgentScript): {
           configOptions: [{ id: params.configId, currentValue: params.value }],
         },
       });
-    } else if (method === 'session/set_model') {
-      setModelIds.push((message.params as { modelId?: string })?.modelId ?? '');
-      send({ jsonrpc: '2.0', id, result: null });
     } else if (method === 'session/set_mode') {
       setModeIds.push((message.params as { modeId?: string })?.modeId ?? '');
       send({ jsonrpc: '2.0', id, result: {} });
@@ -139,7 +132,7 @@ function fakeAgentIo(script: FakeAgentScript): {
   });
   input.setEncoding('utf8');
   input.on('data', (chunk: string) => read(chunk));
-  return { input, output, setModeIds, setConfigCalls, setModelIds, authCalls };
+  return { input, output, setModeIds, setConfigCalls, authCalls };
 }
 
 describe('acp', () => {
@@ -564,68 +557,6 @@ describe('acp', () => {
     );
   });
 
-  it('selects the session model for agents that advertise one, and only then', async () => {
-    const MODELS = {
-      currentModelId: 'default',
-      availableModels: [{ modelId: 'default' }, { modelId: 'sonnet', name: 'Sonnet' }],
-    };
-    const answered = (): FakeAgentScript => ({
-      models: MODELS,
-      onPrompt: (agent) => {
-        agent.update({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'ok' },
-        });
-        agent.finish();
-      },
-    });
-    const base = { cwd: '/x', prompt: 'p', agent: 'fake', label: 'l', log: noLog };
-
-    // Caller names a model the agent offers: exactly one set_model, matched.
-    const named = fakeAgentIo(answered());
-    await driveAcpSession(
-      { input: named.input, output: named.output },
-      { ...base, model: 'claude/sonnet' },
-    );
-    assert.deepEqual(named.setModelIds, ['sonnet']);
-
-    // `default` keeps the session default rather than selecting one.
-    const defaulted = fakeAgentIo(answered());
-    await driveAcpSession(
-      { input: defaulted.input, output: defaulted.output },
-      { ...base, model: 'claude/default' },
-    );
-    assert.deepEqual(defaulted.setModelIds, []);
-
-    // A model the agent does not offer fails closed — running the session
-    // default under a caller's named model would misrepresent the session.
-    const missing = fakeAgentIo(answered());
-    await assert.rejects(
-      driveAcpSession(
-        { input: missing.input, output: missing.output },
-        { ...base, model: 'claude/nope' },
-      ),
-      /offers no model "nope"/,
-    );
-
-    // No models surface at all is the spec-owned path (cursor/codex ride argv
-    // and config), never a failure.
-    const surfaceless = fakeAgentIo({
-      onPrompt: (agent) => {
-        agent.update({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'ok' },
-        });
-        agent.finish();
-      },
-    });
-    await driveAcpSession(
-      { input: surfaceless.input, output: surfaceless.output },
-      { ...base, model: 'cursor/composer-2' },
-    );
-    assert.deepEqual(surfaceless.setModelIds, []);
-  });
-
   it('materializes the claude, gemini and opencode specs', () => {
     // claude: ambient identity, with the nested-session guard stripped and the
     // API key deliberately kept — it is a way to be the account, not a shadow.
@@ -636,6 +567,10 @@ describe('acp', () => {
       const claude = claudeAcpSpec();
       assert.equal(claude.requirePlanMode, true);
       assert.deepEqual(claude.args('claude/sonnet'), []);
+      // Model is a config option with bare-id values; default keeps the
+      // member's own configured model rather than selecting one.
+      assert.deepEqual(claude.modelConfigCandidates?.('claude/default'), []);
+      assert.deepEqual(claude.modelConfigCandidates?.('claude/sonnet'), ['sonnet']);
       const env = claude.env('claude/sonnet').env;
       assert.equal(env.CLAUDECODE, undefined);
       assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
