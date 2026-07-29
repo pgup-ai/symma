@@ -15,20 +15,6 @@ jobs:
   checks:
     name: Format, lint, typecheck & test
     runs-on: ubuntu-latest
-    # Started alongside the job rather than pulled inside it. The tenancy suite
-    # needs a real Postgres, and reaching for one through testcontainers made a
-    # ~10s test run into a multi-minute image pull on every cold runner — and,
-    # once, a job that hung past its own startup timeout.
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd pg_isready --health-interval 5s
-          --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -44,6 +30,4 @@ jobs:
       - run: npm run typecheck
       # Before the build, so a fresh clone is what gets tested.
       - run: npm test
-        env:
-          SYMMA_TEST_DATABASE_URL: postgres://postgres:test@127.0.0.1:5432/test
       - run: npm run verify:pack

@@ -15,13 +15,7 @@ import { openStore, provision } from '../src/store.js';
 // M3a's bar: a second user can neither open a session on, nor list, nor read
 // journals or the viewer for, the first user's companion. Black box on purpose
 // — these are HTTP answers, not function returns.
-/** A Postgres the environment already provides. CI declares one as a service
- * container, which starts alongside the job; without it this suite pulls an
- * image, and on a cold runner that pull is the whole of its cost. Falls back to
- * testcontainers so a laptop still needs no setup. */
-const providedDatabase = process.env.SYMMA_TEST_DATABASE_URL?.trim();
-let pg: StartedPostgreSqlContainer | undefined;
-const databaseUrl = (): string => providedDatabase ?? pg!.getConnectionUri();
+let pg: StartedPostgreSqlContainer;
 let gateway: ChildProcess | undefined;
 let base: string;
 let dataDir: string;
@@ -53,8 +47,8 @@ const waitFor = async <T>(probe: () => Promise<T | undefined>, what: string): Pr
 
 before(
   async () => {
-    if (!providedDatabase) pg = await new PostgreSqlContainer('postgres:17-alpine').start();
-    const url = databaseUrl();
+    pg = await new PostgreSqlContainer('postgres:17-alpine').start();
+    const url = pg.getConnectionUri();
     // Creating the schema is openStore's job; do it once up front so provision()
     // has tables to write into.
     await (await openStore(url, join(import.meta.dirname, '../src/schema.sql'))).close();
@@ -239,7 +233,10 @@ describe('tenancy', () => {
       // Nor may the refusal leave a row. It would name ALICE's endpoint, so
       // bob could never open that id for real afterwards — the insert would
       // conflict and close his session.
-      const store = await openStore(databaseUrl(), join(import.meta.dirname, '../src/schema.sql'));
+      const store = await openStore(
+        pg.getConnectionUri(),
+        join(import.meta.dirname, '../src/schema.sql'),
+      );
       try {
         assert.equal(
           await store.sessionBelongsTo(alice.owner, 'run-bob', 'sid-bob'),
@@ -272,7 +269,10 @@ describe('tenancy', () => {
       dir: 'out',
       frame: { method: 'initialize' },
     });
-    const store = await openStore(databaseUrl(), join(import.meta.dirname, '../src/schema.sql'));
+    const store = await openStore(
+      pg.getConnectionUri(),
+      join(import.meta.dirname, '../src/schema.sql'),
+    );
     try {
       await store.recordSession({
         id: 'sid-alice',
@@ -298,7 +298,7 @@ describe('tenancy', () => {
   });
 
   it('deletes, expires and uninstalls frames with their rows', async () => {
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const schema = join(import.meta.dirname, '../src/schema.sql');
     const frame = (runId: string, sessionId: string): void =>
       appendEnvelope(dataDir, {
@@ -374,7 +374,7 @@ describe('tenancy', () => {
   });
 
   it('revokes tokens and unpairs endpoints when a member is deactivated', async () => {
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const schema = join(import.meta.dirname, '../src/schema.sql');
     const carol = await provision(url, {
       team: 'other',
@@ -421,7 +421,7 @@ describe('tenancy', () => {
     // unchecked connect takes the owner's leg away as well as reading it.
     // Own tenants: the uninstall case above deletes the acme workspace, so
     // alice and bob no longer exist by the time this runs.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const dana = await provision(url, { team: 'live', slackUser: 'dana', endpoint: 'dana-laptop' });
     const eve = await provision(url, { team: 'live', slackUser: 'eve', endpoint: 'eve-laptop' });
     const detach = await attach(dana.endpointToken, 'dana-laptop');
@@ -508,7 +508,7 @@ describe('tenancy', () => {
         await new Promise((resolve) => setTimeout(resolve, 200));
         assert.equal(await live(), 1, "eve's forged refusal did not end dana's session");
         const store = await openStore(
-          databaseUrl(),
+          pg.getConnectionUri(),
           join(import.meta.dirname, '../src/schema.sql'),
         );
         try {
@@ -543,7 +543,7 @@ describe('tenancy', () => {
     // sessionId are whatever the caller says — there is nothing to check them
     // against, and unchecked any tenant writes into another's journal.
     // Fresh tenant: the uninstall case deleted acme, so alice and bob are gone.
-    const frank = await provision(databaseUrl(), {
+    const frank = await provision(pg.getConnectionUri(), {
       team: 'tee',
       slackUser: 'frank',
       endpoint: 'frank-laptop',
@@ -568,7 +568,7 @@ describe('tenancy', () => {
     // historical journals to the new owner and leave the old owner's token
     // authenticating as them.
     await assert.rejects(
-      provision(databaseUrl(), {
+      provision(pg.getConnectionUri(), {
         team: 'live',
         slackUser: 'mallory',
         endpoint: 'dana-laptop',
@@ -580,7 +580,7 @@ describe('tenancy', () => {
   it('keeps a shared run id from leaking session ids across owners', async () => {
     // runId is caller-chosen, so two tenants can land in one run directory and
     // listRuns returns every journal filename in it.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const gina = await provision(url, { team: 'shared', slackUser: 'gina', endpoint: 'gina-box' });
     const hank = await provision(url, { team: 'shared', slackUser: 'hank', endpoint: 'hank-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
@@ -619,7 +619,7 @@ describe('tenancy', () => {
     // owner read and delete the other's frames. That makes a cross-tenant
     // collision a refusal rather than a leak: the wrong trade to reverse, and
     // the real fix is a server-assigned identity, not a looser key here.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const one = await provision(url, { team: 'uniq', slackUser: 'one', endpoint: 'one-box' });
     const two = await provision(url, { team: 'uniq', slackUser: 'two', endpoint: 'two-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
@@ -647,7 +647,7 @@ describe('tenancy', () => {
     // Deleting a live session's row does not stop the frames: the relay keeps
     // writing, recreating a journal with no row — unreadable, and invisible to
     // every sweep after.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     try {
       await store.recordSession({
@@ -677,7 +677,7 @@ describe('tenancy', () => {
   });
 
   it('lets a pre-open stream be claimed once, and answers conflicts only to their sender', async () => {
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const jo = await provision(url, { team: 'claim', slackUser: 'jo', endpoint: 'jo-box' });
     const kim = await provision(url, { team: 'claim', slackUser: 'kim', endpoint: 'kim-box' });
 
@@ -749,7 +749,7 @@ describe('tenancy', () => {
     // tokens.subject_id names a user or an endpoint and the ids are not
     // namespaced, so an endpoint named after another workspace's user id used
     // to lose its token when that workspace was removed.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const victim = await provision(url, {
       team: 'collide',
       slackUser: 'liz',
@@ -773,7 +773,7 @@ describe('tenancy', () => {
     // journaled before a refusal arrives. Deleting only the row leaves a file
     // no owner-scoped route reaches and retention never sees, which a
     // misbehaving companion could repeat until the disk is gone.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     try {
       appendEnvelope(dataDir, {
@@ -808,7 +808,7 @@ describe('tenancy', () => {
     // store predicate, because a predicate over endpoint ids cannot see which
     // legs exist — which is how the ingest body and the whole client side stayed
     // open through a revocation that the store-level test called covered.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const nia = await provision(url, { team: 'revoke', slackUser: 'nia', endpoint: 'nia-box' });
     // A second provisioning of the same endpoint issues a second token: revoking
     // one must drop the legs it opened and leave its siblings serving.
@@ -882,7 +882,7 @@ describe('tenancy', () => {
     // `u-${team}-${user}` made the hyphen a boundary the caller picks, so
     // ("a", "b-c") and ("a-b", "c") collided — the second insert no-opped onto
     // the first tenant's owner and handed it their endpoint and tokens.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const first = await provision(url, { team: 'x', slackUser: 'y-z', endpoint: 'first-box' });
     const second = await provision(url, { team: 'x-y', slackUser: 'z', endpoint: 'second-box' });
     assert.notEqual(first.owner, second.owner);
@@ -903,7 +903,7 @@ describe('tenancy', () => {
 
   it('pairs a fresh machine from one command, and it stays paired', async () => {
     // M3b's bar. Nothing is configured on this machine but a code.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const wen = await provision(url, { team: 'paire2e', slackUser: 'wen', endpoint: 'wen-old' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const home = mkdtempSync(join(tmpdir(), 'symma-pair-home-'));
@@ -983,7 +983,7 @@ describe('tenancy', () => {
   });
 
   it('pairs a code into an endpoint only its own member can see', async () => {
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const tam = await provision(url, { team: 'pairhttp', slackUser: 'tam', endpoint: 'tam-old' });
     const uma = await provision(url, { team: 'pairhttp', slackUser: 'uma', endpoint: 'uma-old' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
@@ -1027,7 +1027,7 @@ describe('tenancy', () => {
   });
 
   it('refuses a spent code, and a companion with nothing to run', async () => {
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const pool = new Pool({ connectionString: url });
@@ -1087,7 +1087,7 @@ describe('tenancy', () => {
   });
 
   it('spends a pairing code once, and takes the retyping a member will do', async () => {
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const nel = await provision(url, { team: 'pair', slackUser: 'nel', endpoint: 'nel-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const pool = new Pool({ connectionString: url });
@@ -1118,7 +1118,7 @@ describe('tenancy', () => {
   });
 
   it('retires a code when it expires or when the next one is minted', async () => {
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const ora = await provision(url, { team: 'pair', slackUser: 'ora', endpoint: 'ora-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const pool = new Pool({ connectionString: url });
@@ -1161,7 +1161,7 @@ describe('tenancy', () => {
     // Deactivation is a soft delete, so the users row stays and the cascade
     // never reaches the code. Without the join it outlives the member's tokens
     // and endpoints and still names them.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const sev = await provision(url, { team: 'pair', slackUser: 'sev', endpoint: 'sev-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const pool = new Pool({ connectionString: url });
@@ -1211,7 +1211,7 @@ describe('tenancy', () => {
   it('lets exactly one of two racing redeems win the same code', async () => {
     // Single-use rests on the check and the claim being one statement, so the
     // loser reads the winner's consumed_at, not a snapshot taken before it.
-    const url = databaseUrl();
+    const url = pg.getConnectionUri();
     const rai = await provision(url, { team: 'pair', slackUser: 'rai', endpoint: 'rai-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     try {
