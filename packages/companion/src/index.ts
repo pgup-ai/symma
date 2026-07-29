@@ -829,12 +829,22 @@ async function runPair(code: string): Promise<never> {
       `Pairing failed (${status}${body.error ? `: ${body.error}` : ''}) at ${pairTarget}.`,
     );
 
-  const path = savePairing({
-    gateway: pairTarget,
-    endpoint: body.endpoint,
-    token: body.token,
-    device,
-  });
+  let path: string;
+  try {
+    path = savePairing({
+      gateway: pairTarget,
+      endpoint: body.endpoint,
+      token: body.token,
+      device,
+    });
+  } catch (error) {
+    // The code is gone whatever happens here, so say that rather than let a
+    // stack trace stand in for it — §2's failure modes want words.
+    return refused(
+      `Paired, but could not save it to ${stateDir}: ${because(error)}. ` +
+        'That code is spent now — ask for another.',
+    );
+  }
   // Detection output is the onboarding copy (§2).
   console.log(`✅ Connected — ${device} · ${running.join(', ')}`);
   for (const why of skipped) console.log(`⚪ ${why}`);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateSigningKeys, verifyEnvelope, type ObserverEnvelope } from '@symma/protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
@@ -305,6 +305,60 @@ describe('relay e2e', () => {
       assert.match(said, /Could not reach/);
     } finally {
       pair?.kill('SIGKILL');
+      stub.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('says the code is spent when it cannot save what it got', async () => {
+    // A directory where the file goes: rename fails, deterministically, after
+    // the gateway has already consumed the code.
+    const stub = createServer((req, res) => {
+      req.resume();
+      req.on('end', () =>
+        res
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ endpoint: 'e1', token: 't1' })),
+      );
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    const dir = join(home, '.local', 'share', 'symma-companion');
+    mkdirSync(join(dir, 'pairing.json'), { recursive: true });
+    try {
+      const pair = spawn(
+        process.execPath,
+        [
+          '--conditions=symma-source',
+          '--import',
+          'tsx',
+          'packages/companion/src/index.ts',
+          'pair',
+          'BPB1-9W92-HTZJ-RA19',
+        ],
+        {
+          env: {
+            ...process.env,
+            HOME: home,
+            SYMMA_COMPANION_GATEWAY: `http://127.0.0.1:${port}`,
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let said = '';
+      pair.stderr?.on('data', (c) => (said += String(c)));
+      assert.equal(await new Promise((resolve) => pair.on('exit', resolve)), 1, said);
+      assert.match(said, /could not save it/);
+      assert.match(said, /code is spent/);
+      // And took the staged file with it, rather than leaving a token under a
+      // name nothing will ever read.
+      assert.deepEqual(
+        readdirSync(dir).filter((entry) => entry.startsWith('pairing.json.')),
+        [],
+      );
+    } finally {
       stub.close();
       rmSync(home, { recursive: true, force: true });
     }
