@@ -104,6 +104,11 @@ extraction fixes, prevented from recurring.
 
 - TypeScript ESM. Import specifiers end in `.js` and resolve to `.ts` — writing
   `.ts` breaks the emit. No new dependencies without clear need.
+- Agent specs are verified twice, in this order: the
+  [ACP registry](https://github.com/agentclientprotocol/registry) first for the
+  canonical package, bin and launch flags — `npx` runs deprecated packages
+  without a word, and the registry is what caught claude-code-acp's rename —
+  then a live probe of the real CLI before the spec is written (§3's bar).
 - Tests: node:test + `node:assert/strict`; pin invariants, not incidental prose.
 - Prettier owns formatting. Never hand-format, and never reformat a file you did
   not otherwise change — copied files must stay byte-identical to their origin
