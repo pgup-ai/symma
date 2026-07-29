@@ -14,13 +14,18 @@ import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 
 import {
+  claudeAcpSpec,
   codexAcpSpec,
   createNdjsonReader,
   cursorAcpSpec,
   devinAcpSpec,
   driveAcpSession,
+  geminiAcpSpec,
+  geminiOauthPath,
   kiloAcpSpec,
   matchModelOptionValue,
+  opencodeAcpSpec,
+  opencodeAuthPath,
   respondToPermissionRequest,
 } from '../src/acp-protocol.js';
 import { codexAuthPath } from '../src/codex.js';
@@ -550,6 +555,114 @@ describe('acp', () => {
       ),
       /offered no plan mode/,
     );
+  });
+
+  it('materializes the claude, gemini and opencode specs', () => {
+    // claude: ambient identity, with the nested-session guard stripped and the
+    // API key deliberately kept — it is a way to be the account, not a shadow.
+    const seeded = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'ANTHROPIC_API_KEY'] as const;
+    const saved = seeded.map((key) => [key, process.env[key]] as const);
+    for (const key of seeded) process.env[key] = `ambient-${key}`;
+    try {
+      const claude = claudeAcpSpec();
+      assert.equal(claude.requirePlanMode, true);
+      assert.deepEqual(claude.args('claude/sonnet'), []);
+      // Model is a config option with bare-id values; default keeps the
+      // member's own configured model rather than selecting one.
+      assert.deepEqual(claude.modelConfigCandidates?.('claude/default'), []);
+      assert.deepEqual(claude.modelConfigCandidates?.('claude/sonnet'), ['sonnet']);
+      const env = claude.env('claude/sonnet').env;
+      assert.equal(env.CLAUDECODE, undefined);
+      assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
+      assert.equal(env.ANTHROPIC_API_KEY, 'ambient-ANTHROPIC_API_KEY');
+      assert.equal(env.HOME, process.env.HOME);
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+
+    // gemini: temp HOME with only the OAuth material, settings written fresh —
+    // the member's own settings.json carries mcpServers a session must not
+    // inherit — and ambient provider keys stripped.
+    const geminiHome = mkdtempSync(join(tmpdir(), 'symma-test-gemini-'));
+    mkdirSync(join(geminiHome, '.gemini'), { recursive: true });
+    writeFileSync(geminiOauthPath(geminiHome), '{"access_token":"t"}');
+    writeFileSync(join(geminiHome, '.gemini', 'google_accounts.json'), '{}');
+    const gemini = geminiAcpSpec(geminiHome);
+    assert.deepEqual(gemini.args('gemini/default'), ['--experimental-acp']);
+    assert.deepEqual(gemini.args('gemini/gemini-2.5-pro'), [
+      '--experimental-acp',
+      '-m',
+      'gemini-2.5-pro',
+    ]);
+    // No plan mode exists to satisfy this, so every session refuses — the
+    // mechanism keeping DM-tier prose from closing invariant 1 by accident.
+    assert.equal(gemini.requirePlanMode, true);
+    const savedGemini = process.env.GEMINI_API_KEY;
+    process.env.GEMINI_API_KEY = 'ambient';
+    const geminiLeakPrefix = 'symma-gemini-acp-';
+    const geminiEnv = gemini.env('gemini/default');
+    try {
+      const home = geminiEnv.env.HOME as string;
+      // Anchors the leak check below — against a stale prefix both its
+      // snapshots are empty and it passes without observing anything.
+      assert.ok(home.includes(geminiLeakPrefix));
+      assert.notEqual(home, process.env.HOME);
+      assert.equal(readFileSync(geminiOauthPath(home), 'utf8'), '{"access_token":"t"}');
+      assert.ok(existsSync(join(home, '.gemini', 'google_accounts.json')));
+      assert.deepEqual(JSON.parse(readFileSync(join(home, '.gemini', 'settings.json'), 'utf8')), {
+        selectedAuthType: 'oauth-personal',
+      });
+      assert.equal(geminiEnv.env.GEMINI_API_KEY, undefined);
+      assert.equal(geminiEnv.env.NO_BROWSER, 'true');
+    } finally {
+      geminiEnv.cleanup?.();
+      if (savedGemini === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = savedGemini;
+    }
+    rmSync(geminiHome, { recursive: true, force: true });
+    // A machine with no OAuth material cannot spawn, and the refusal reclaims
+    // its temp dir rather than leaking one per attempt.
+    const before = readdirSync(tmpdir()).filter((entry) => entry.startsWith(geminiLeakPrefix));
+    const bareHome = mkdtempSync(join(tmpdir(), 'symma-test-gemini-bare-'));
+    try {
+      assert.throws(() => geminiAcpSpec(bareHome).env('gemini/default'));
+    } finally {
+      rmSync(bareHome, { recursive: true, force: true });
+    }
+    assert.deepEqual(
+      readdirSync(tmpdir()).filter((entry) => entry.startsWith(geminiLeakPrefix)),
+      before,
+    );
+
+    // opencode: kilo's lineage — auth materialized into a per-spawn data dir,
+    // ambient provider keys stripped, plan required, prefixed model first.
+    const opencode = opencodeAcpSpec('{"anthropic":{"type":"oauth"}}');
+    assert.equal(opencode.requirePlanMode, true);
+    assert.deepEqual(opencode.args('opencode/default'), ['acp']);
+    assert.deepEqual(opencode.modelConfigCandidates?.('opencode/default'), []);
+    assert.deepEqual(opencode.modelConfigCandidates?.('opencode/claude-sonnet-4-5'), [
+      'opencode/claude-sonnet-4-5',
+      'claude-sonnet-4-5',
+    ]);
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'ambient';
+    const opencodeEnv = opencode.env('opencode/default');
+    try {
+      const dataHome = opencodeEnv.env.XDG_DATA_HOME as string;
+      assert.notEqual(opencodeEnv.env.HOME, process.env.HOME);
+      assert.equal(
+        readFileSync(opencodeAuthPath(dataHome), 'utf8'),
+        '{"anthropic":{"type":"oauth"}}',
+      );
+      assert.equal(opencodeEnv.env.ANTHROPIC_API_KEY, undefined);
+    } finally {
+      opencodeEnv.cleanup?.();
+      if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = savedKey;
+    }
   });
 
   it('materializes per-agent read-only and model config', () => {

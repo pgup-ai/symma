@@ -6,7 +6,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@symma/protocol": "0.2.0"
+    "@symma/protocol": "0.3.0"
   },
   "devDependencies": {
     "@symma/gateway": "0.1.0"

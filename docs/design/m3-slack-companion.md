@@ -478,9 +478,8 @@ symma` is secondary for the Node crowd and nearly free from the same codebase.
 Worth stating because the natural reading is the other one, and the other one is
 wrong in both directions. `SYMMA_COMPANION_AGENTS=name=cmd args` already runs any
 ACP binary — that path exists today as the test seam and needs no work to become
-a supported tier. Conversely, `codex`/`cursor`/`devin`/`kilo` are not "the agents
-that work". They are the agents someone has done four specific pieces of work
-for:
+a supported tier. Conversely, the built-ins are not "the agents that work". They
+are the agents someone has done four specific pieces of work for:
 
 |                                               | built-in spec                                      | any ACP binary                      |
 | --------------------------------------------- | -------------------------------------------------- | ----------------------------------- |
@@ -506,10 +505,42 @@ invariant 1.**
 
 **Add built-ins on demand.** Each one is a credential path, an isolation story
 and a read-only story, plus a standing maintenance liability the next time that
-CLI changes its auth layout. The four here exist because jbot-review drives them,
-which is a real caller and the right reason. Claude Code and Gemini CLI have ACP
-adapters and are the obvious next candidates — worth checking their current shape
-before committing to either.
+CLI changes its auth layout. The first four exist because jbot-review drives
+them, which is a real caller and the right reason.
+
+**Added 2026-07-29 (#20), because the DM path is the second real caller** —
+members bring whatever is on their laptop, and pairing now shows them what we
+could not run:
+
+- `claude` — via the canonical `claude-agent-acp` adapter (the CLI itself
+  speaks no ACP; Zed's `claude-code-acp` was renamed into the ACP org and
+  deprecated, and the registry distributes the new name). Ambient identity: the
+  OAuth lives in the macOS Keychain, so there is no file to copy into a temp
+  HOME. Plan mode is offered as a session mode ("no actual tool execution"),
+  so it carries an agent-side layer, and model is a config option with bare-id
+  values — the same selection path kilo uses.
+- `gemini` — first-party `--experimental-acp`. Temp HOME with only the OAuth
+  material; settings written fresh so a member's `mcpServers` never leak into a
+  session; ambient provider keys stripped; `NO_BROWSER` pinned so a stale login
+  fails as words, not a browser hijack. **No agent-side layer exists** — its
+  approval modes contain no read-only agent — so its spec requires plan mode
+  anyway and every session refuses, closed: invariant 1 is unconditional until
+  the DM path lands, and a tier that is only prose closes by accident. Pairing
+  still detects and lists it; the DM path lifts the refusal in the same commit
+  that builds the write-path rules (§4).
+- `opencode` — kilo's lineage, kilo's treatment: `opencode acp`, per-spawn
+  data dir holding only `auth.json`, plan required via the same `mode` config
+  option contract.
+
+Verification note: claude and opencode were handshake-verified end to end
+(modes, config options, isolation), and every launch shape was cross-checked
+against the ACP registry — which is also what caught the adapter rename, and
+confirms the first four built-ins unchanged. Gemini's cached login was
+invalidated mid-verification, so its spec is verified to the handshake's auth
+gate; the driver's existing authenticate-and-retry path covers the rest and
+wants one live pass once a login exists. Its `--experimental-acp` flag is the
+deprecated alias of the registry's `--acp`, kept because it is the one spelling
+old and new installs both accept.
 
 **`curl | sh` plus self-update is a supply-chain boundary, so it needs the
 supply-chain treatment.** We are asking non-technical people to run our script

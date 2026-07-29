@@ -1118,7 +1118,9 @@ describe('tenancy', () => {
 
       // And when the two clicks overlap. Delete-then-insert let both find
       // nothing to delete and insert their own; the unique user_id is what
-      // makes the second an update instead.
+      // makes the second an update instead. (Warmed for the same reason as the
+      // racing-redeems test: no connect may be in flight when close() runs.)
+      await Promise.all([store.runsFor(ora.owner), store.runsFor(ora.owner)]);
       const [a, b] = await Promise.all([
         store.mintPairingCode(ora.owner),
         store.mintPairingCode(ora.owner),
@@ -1192,6 +1194,11 @@ describe('tenancy', () => {
     const rai = await provision(url, { team: 'pair', slackUser: 'rai', endpoint: 'rai-box' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     try {
+      // Both connections opened, used and released before anything races: a
+      // connect still in flight when close() runs slips past pool.end() and
+      // survives to the container stop, where its death is an uncaught error
+      // pinned on whichever test ran last (live-hit, ~1 in 5 runs).
+      await Promise.all([store.runsFor(rai.owner), store.runsFor(rai.owner)]);
       const code = await store.mintPairingCode(rai.owner);
       // Two, in one tick on separate pooled connections. More prove nothing
       // further and widen the pool past what close() tears down in time.
