@@ -4,7 +4,15 @@
  * of review concerns — the companion and gateway depend on this half, and it
  * is what would extract as a standalone package.
  */
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
@@ -17,7 +25,13 @@ import {
   devinCredentialsPath,
   tomlString,
 } from './devin.js';
-import { KILO_CLI_BIN, KILO_GATEWAY_FREE_MODEL, KILO_PROVIDER_ID, kiloEnvForAuth } from './kilo.js';
+import {
+  KILO_CLI_BIN,
+  KILO_GATEWAY_FREE_MODEL,
+  KILO_PROVIDER_ID,
+  KILO_STRIPPED_ENV_KEYS,
+  kiloEnvForAuth,
+} from './kilo.js';
 import { parseModelName } from './model.js';
 
 const ACP_PROTOCOL_VERSION = 1;
@@ -35,6 +49,22 @@ const ACP_MAX_FRAME_BYTES = 32 * 1024 * 1024;
 // arrive within an I/O tick; this covers it without paying 750ms per session.
 const ACP_POST_TURN_DRAIN_MS = 300;
 export const CODEX_ACP_BIN = 'codex-acp';
+/** Zed's adapter, not the claude binary: `claude` itself speaks no ACP, the
+ * adapter wraps it (live-verified 2026-07-29, @zed-industries/claude-code-acp
+ * 0.16.2 against Claude Code 2.1.193). */
+export const CLAUDE_ACP_BIN = 'claude-code-acp';
+export const GEMINI_CLI_BIN = 'gemini';
+export const OPENCODE_CLI_BIN = 'opencode';
+
+/** Claude Code's OAuth on macOS lives in the Keychain, not a file — the
+ * config is what records the logged-in account there (`"oauthAccount"`), while
+ * Linux keeps a credentials file. Detection needs both surfaces. */
+export const claudeCredentialsPath = (home: string): string =>
+  join(home, '.claude', '.credentials.json');
+export const claudeConfigPath = (home: string): string => join(home, '.claude.json');
+export const geminiOauthPath = (home: string): string => join(home, '.gemini', 'oauth_creds.json');
+export const opencodeAuthPath = (dataHome: string): string =>
+  join(dataHome, 'opencode', 'auth.json');
 
 /**
  * Byte-exact budget test that skips the UTF-8 scan for all but near-cap
@@ -411,6 +441,8 @@ export async function driveAcpSession(
   }
   if (options.configOptionModelIds?.length) {
     await selectModelConfigOption(conn, sessionId, session, options);
+  } else if (options.model) {
+    await selectSessionModel(conn, sessionId, session, options);
   }
   const modes = session.modes as
     { currentModeId?: string; availableModes?: { id?: string }[] } | undefined;
@@ -574,6 +606,35 @@ export interface AcpAgentSpec {
   /** See AcpSessionOptions.requirePlanMode. */
   requirePlanMode?: boolean;
 }
+/** Model via ACP session model state (`session/set_model`), for agents that
+ * advertise `models` instead of a config option (claude's adapter,
+ * live-verified). Same fail-closed contract as the config-option path: a
+ * caller-named model that cannot be selected throws rather than silently
+ * running the session default. No `models` surface is not a failure — agents
+ * without one route the model through their spec's args or config. */
+async function selectSessionModel(
+  conn: AcpConnection,
+  sessionId: string,
+  session: Record<string, unknown>,
+  options: AcpSessionOptions,
+): Promise<void> {
+  const { modelID } = parseModelName(options.model ?? '');
+  if (modelID === 'default') return;
+  const models = session.models as
+    { availableModels?: { modelId?: string; name?: string }[] } | undefined;
+  if (!models?.availableModels?.length) return;
+  const match = matchModelOptionValue(
+    models.availableModels.map((m) => ({ value: m.modelId, name: m.name })),
+    modelID,
+  );
+  if (!match) {
+    throw new Error(
+      `acp:${options.agent} ${options.label}: agent offers no model ${JSON.stringify(modelID)}`,
+    );
+  }
+  await conn.request('session/set_model', { sessionId, modelId: match });
+}
+
 export function cursorAcpSpec(apiKey: string): AcpAgentSpec {
   return {
     id: 'cursor',
@@ -695,5 +756,117 @@ export function codexAcpSpec(codexHome: string): AcpAgentSpec {
         cleanup: () => rmSync(dir, { recursive: true, force: true }),
       };
     },
+  };
+}
+
+export function claudeAcpSpec(): AcpAgentSpec {
+  return {
+    id: 'claude',
+    bin: CLAUDE_ACP_BIN,
+    args: () => [],
+    // Ambient identity on purpose: the OAuth lives in the macOS Keychain, so
+    // there is no credential file to copy into a temp HOME — the adapter runs
+    // as this machine's logged-in account, and ANTHROPIC_API_KEY stays because
+    // it is a legitimate way to be that account. Model rides session/set_model
+    // (the adapter advertises `models`; ANTHROPIC_MODEL demonstrably does not
+    // reach the session's readout).
+    env: () => {
+      const env: NodeJS.ProcessEnv = { ...process.env };
+      // The CLI refuses to nest while CLAUDECODE is set (live-hit: a companion
+      // started from a Claude Code terminal inherits it); the adapter's spawn
+      // is not a nested session.
+      delete env.CLAUDECODE;
+      delete env.CLAUDE_CODE_ENTRYPOINT;
+      return { env };
+    },
+    // "Planning mode, no actual tool execution" — the agent-side layer.
+    requirePlanMode: true,
+  };
+}
+
+export function geminiAcpSpec(geminiHome = process.env.HOME || homedir()): AcpAgentSpec {
+  return {
+    id: 'gemini',
+    bin: GEMINI_CLI_BIN,
+    args: (model) => {
+      const { modelID } = parseModelName(model);
+      return modelID === 'default' ? ['--experimental-acp'] : ['--experimental-acp', '-m', modelID];
+    },
+    // Temp HOME with only the OAuth material copied — settings.json is written
+    // fresh rather than copied, because the member's own carries mcpServers and
+    // an ACP session must not inherit those. Ambient provider keys are
+    // stripped (same motive as kilo's list): a GEMINI_API_KEY would silently
+    // rebill a session the member expects on their OAuth plan.
+    env: () => {
+      const dir = mkdtempSync(join(tmpdir(), 'symma-gemini-acp-'));
+      try {
+        const dest = join(dir, '.gemini');
+        mkdirSync(dest, { recursive: true, mode: 0o700 });
+        copyFileSync(geminiOauthPath(geminiHome), join(dest, 'oauth_creds.json'));
+        for (const extra of ['google_accounts.json', 'installation_id', 'google_account_id']) {
+          const src = join(geminiHome, '.gemini', extra);
+          if (existsSync(src)) copyFileSync(src, join(dest, extra));
+        }
+        writeFileSync(
+          join(dest, 'settings.json'),
+          `${JSON.stringify({ selectedAuthType: 'oauth-personal' })}\n`,
+          { mode: 0o600 },
+        );
+      } catch (error) {
+        rmSync(dir, { recursive: true, force: true });
+        throw error;
+      }
+      const env: NodeJS.ProcessEnv = { ...process.env, HOME: dir };
+      delete env.XDG_CONFIG_HOME;
+      delete env.XDG_DATA_HOME;
+      for (const key of KILO_STRIPPED_ENV_KEYS) delete env[key];
+      // Never a browser: authenticate() on a stale login must fail as words on
+      // the companion's log, not hijack a display it may not have.
+      env.NO_BROWSER = 'true';
+      return { env, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+    },
+    // No plan mode (approval modes are default/auto_edit/yolo — none is a
+    // read-only agent), so gemini has no agent-side layer: the client floor is
+    // the only one. DM tier per §3 of the M3 design; a review caller that
+    // depends on invariant 1 must not route here.
+  };
+}
+
+export function opencodeAcpSpec(auth: string): AcpAgentSpec {
+  return {
+    id: 'opencode',
+    bin: OPENCODE_CLI_BIN,
+    args: () => ['acp'],
+    // kilo's lineage, kilo's treatment (live-verified: identical handshake
+    // under a temp HOME/XDG with only auth.json copied): per-spawn data dir,
+    // ambient provider keys stripped so auth.json is the whole identity.
+    env: () => {
+      const dir = mkdtempSync(join(tmpdir(), 'symma-opencode-acp-'));
+      try {
+        const dataHome = join(dir, '.local', 'share');
+        mkdirSync(join(dataHome, 'opencode'), { recursive: true, mode: 0o700 });
+        writeFileSync(opencodeAuthPath(dataHome), auth, { mode: 0o600 });
+      } catch (error) {
+        rmSync(dir, { recursive: true, force: true });
+        throw error;
+      }
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: dir,
+        XDG_DATA_HOME: join(dir, '.local', 'share'),
+      };
+      delete env.XDG_CONFIG_HOME;
+      for (const key of KILO_STRIPPED_ENV_KEYS) delete env[key];
+      return { env, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+    },
+    // Values are provider-prefixed (`opencode/<id>`, live readout), so the
+    // caller's full form leads and the bare id is the hedge.
+    modelConfigCandidates: (model) => {
+      const { modelID } = parseModelName(model);
+      return modelID === 'default' ? [] : [model, modelID];
+    },
+    // plan is "the read-only agent" via the mode config option — the exact
+    // contract selectPlanConfigOption was built against (kilo).
+    requirePlanMode: true,
   };
 }

@@ -24,14 +24,21 @@ import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  claudeAcpSpec,
+  claudeConfigPath,
+  claudeCredentialsPath,
   codexAcpSpec,
   codexAuthPath,
   createNdjsonReader,
   cursorAcpSpec,
   devinAcpSpec,
+  geminiAcpSpec,
+  geminiOauthPath,
   devinCredentialsPath,
   generateSigningKeys,
   kiloAcpSpec,
+  opencodeAcpSpec,
+  opencodeAuthPath,
   parseRelayControl,
   publicKeyFrom,
   respondToPermissionRequest,
@@ -131,7 +138,9 @@ const endpointId = pick('SYMMA_COMPANION_ENDPOINT', paired.endpoint);
 const device = pick('SYMMA_COMPANION_DEVICE', paired.device) || hostname();
 // Resolving an absent agent costs a skip reason, and §2 shows those reasons
 // while pairing — so the default is everything we know how to run.
-const agentNames = (process.env.SYMMA_COMPANION_AGENTS ?? 'kilo,codex,devin,cursor')
+const agentNames = (
+  process.env.SYMMA_COMPANION_AGENTS ?? 'kilo,codex,devin,cursor,claude,gemini,opencode'
+)
   .split(',')
   .map((entry) => entry.trim())
   .filter(Boolean);
@@ -296,6 +305,36 @@ function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | str
       const key = (process.env.CURSOR_API_KEY ?? '').trim();
       if (!key) return 'cursor: CURSOR_API_KEY not set';
       return { name: entry, spec: cursorAcpSpec(key) };
+    }
+    case 'claude': {
+      // Keychain on macOS, credentials file on Linux, API key anywhere: any of
+      // the three is a login. The config's oauthAccount is how the Keychain
+      // case shows up on disk.
+      const loggedIn =
+        credential(claudeCredentialsPath(homedir())) !== undefined ||
+        (credential(claudeConfigPath(homedir()))?.includes('"oauthAccount"') ?? false) ||
+        Boolean((process.env.ANTHROPIC_API_KEY ?? '').trim());
+      if (!loggedIn) return 'claude: not logged in (run `claude /login`)';
+      const spec = claudeAcpSpec();
+      // The bin is Zed's adapter, not `claude` itself — a member who has
+      // logged in has still probably never installed it, so the generic
+      // not-on-PATH line would name a binary they never chose.
+      if (!resolveBin(spec.bin))
+        return `claude: adapter missing (npm i -g @zed-industries/claude-code-acp)`;
+      return { name: entry, spec };
+    }
+    case 'gemini': {
+      if (!credential(geminiOauthPath(homedir())))
+        return `gemini: not logged in at ${geminiOauthPath(homedir())} (run gemini)`;
+      return { name: entry, spec: geminiAcpSpec() };
+    }
+    case 'opencode': {
+      const dataHome =
+        (process.env.XDG_DATA_HOME ?? '').trim() || join(homedir(), '.local', 'share');
+      const auth = credential(opencodeAuthPath(dataHome));
+      if (!auth)
+        return `opencode: no auth at ${opencodeAuthPath(dataHome)} (run opencode auth login)`;
+      return { name: entry, spec: opencodeAcpSpec(auth) };
     }
     default:
       return `unknown agent: ${entry}`;

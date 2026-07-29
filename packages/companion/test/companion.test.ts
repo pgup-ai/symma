@@ -70,10 +70,17 @@ const within = async <T>(ms: number, settled: Promise<T>): Promise<T | 'timeout'
 /** A child inheriting no configuration of ours — for the tests that assert what
  * a machine does with none. A runner's own SYMMA_COMPANION_AGENTS would replace
  * the built-in default one of them is about, its GATEWAY and TOKEN would start a
- * companion that should have said it was unpaired, and CURSOR_API_KEY is the one
- * credential living outside HOME, so a real one makes a bare machine pairable. */
+ * companion that should have said it was unpaired, and the blanked keys are the
+ * credentials that live outside HOME — any real one makes a bare machine
+ * pairable (XDG_DATA_HOME likewise points detection away from the fake HOME). */
 const bare = (home: string): NodeJS.ProcessEnv => {
-  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, CURSOR_API_KEY: '' };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    CURSOR_API_KEY: '',
+    ANTHROPIC_API_KEY: '',
+    XDG_DATA_HOME: '',
+  };
   for (const key of Object.keys(env)) if (key.startsWith('SYMMA_COMPANION_')) delete env[key];
   return env;
 };
@@ -413,6 +420,9 @@ describe('relay e2e', () => {
       assert.match(said, /codex: no auth/);
       assert.match(said, /devin: no credentials/);
       assert.match(said, /cursor: CURSOR_API_KEY not set/);
+      assert.match(said, /claude: not logged in/);
+      assert.match(said, /gemini: not logged in/);
+      assert.match(said, /opencode: no auth/);
       // Nothing persisted at all — not the pairing, and not the signing key,
       // which a refused pair has no use for.
       assert.equal(existsSync(join(home, '.local', 'share', 'symma-companion')), false);
