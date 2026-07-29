@@ -25,9 +25,10 @@ for pkg in protocol client companion; do
   name=$(node -p "require('$root/packages/$pkg/package.json').name")
   ver=$(node -p "require('$root/packages/$pkg/package.json').version")
   (cd "$root/packages/$pkg" && npm pack --silent --pack-destination "$work" >/dev/null)
-  # npm's tarball name, which is not "symma-<dir>": a scope becomes a prefix and
-  # an unscoped name keeps itself, so the CLI packs as symma-<ver>.tgz.
-  tgz="$(node -p "'$name'.replace('@','').replace('/','-')")-$ver.tgz"
+  # npm flattens a scope into the filename, so the CLI packs as symma-<ver>.tgz
+  # rather than symma-companion-<ver>.tgz.
+  stem="${name#@}"
+  tgz="${stem/\//-}-$ver.tgz"
   files=$(tar tzf "$work/$tgz" | wc -l | tr -d ' ')
   # npm ships LICENSE, README and package.json whatever `files` says, so a
   # dist-less pack still produces a plausible-looking tarball. The entry point
@@ -76,7 +77,11 @@ echo "==> the CLI a member actually runs"
 # The bin, not an import: `symma` publishes no exports, so nothing above would
 # notice a dist that cannot start. Unpaired is the expected refusal, and it
 # proves the shebang, the bin mapping and the protocol dependency all resolved.
-cli_out=$(HOME="$work/fake-home" ./node_modules/.bin/symma 2>&1 || true)
+#
+# `env -i` because the alternative is a hang: on a machine that has paired, or
+# one exporting SYMMA_COMPANION_*, the companion would attach and this script
+# would wait on it forever.
+cli_out=$(env -i PATH="$PATH" HOME="$work/nowhere" ./node_modules/.bin/symma 2>&1 || true)
 grep -q 'Not paired' <<<"$cli_out" || { echo "FAIL: symma did not start: $cli_out"; exit 1; }
 
 echo "==> publint"
