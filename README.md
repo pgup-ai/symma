@@ -17,8 +17,10 @@ subscription, their keys. The hosted service never holds a provider credential.
 Being extracted from
 [pgup-ai/jbot-review](https://github.com/pgup-ai/jbot-review), where the relay,
 companion, signed envelopes and viewer have been running and dogfooded since
-2026-07. The protocol, gateway, companion and client packages are in; the Slack
-bot and the tenancy model that M3 needs are not.
+2026-07. All five packages are in: owner-scoped tenancy and pairing ship, the
+companion detects its agents and survives a reboot, and the Slack bot pairs a
+machine with `/connect`. Asking your agent something from Slack is next — that
+flow is not built yet.
 
 ## Packages
 

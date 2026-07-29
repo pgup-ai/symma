@@ -113,6 +113,26 @@ describe('socket mode', () => {
     assert.equal(dialled.length, 2, 'stop() ends the loop rather than reconnecting');
   });
 
+  it('closes a socket that arrives after stop()', async () => {
+    // stop() during an in-flight dial had nothing to close, so the connection
+    // landed afterwards and the loop sat waiting on a close nobody would send.
+    let settle = (_socket: FakeSocket): void => {};
+    const dialling = new Promise<FakeSocket>((resolve) => (settle = resolve));
+    const late = new FakeSocket();
+    const connection = socketMode({
+      appToken: 'xapp-test',
+      log: () => {},
+      onEnvelope: () => {},
+      dial: () => dialling,
+      wait: () => Promise.resolve(),
+    });
+
+    connection.stop();
+    settle(late);
+    await tick();
+    assert.equal(late.closed, true, 'the late socket is closed rather than held open');
+  });
+
   it('survives a frame it cannot read and a handler that throws', async () => {
     // Neither is a reason to drop a connection that is otherwise fine: one bad
     // command must not take every other member's bot down.

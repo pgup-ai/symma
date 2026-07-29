@@ -90,6 +90,16 @@ export interface Store {
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
 
+/** Constant-time secret comparison, for the secrets that have no row to be
+ * looked up as a hash. Digested first so both sides are 32 bytes, which is what
+ * `timingSafeEqual` requires and what keeps the comparison from leaking the
+ * length as well. */
+export const sameSecret = (offered: string, expected: string): boolean =>
+  timingSafeEqual(
+    createHash('sha256').update(offered).digest(),
+    createHash('sha256').update(expected).digest(),
+  );
+
 // Crockford base32: no I, L, O or U, so nothing retyped off a screen reads as
 // another character. 256 is a whole multiple of its 32 symbols, so a random
 // byte taken modulo the alphabet is unbiased.
@@ -539,21 +549,16 @@ export function localStore(
   runsOnDisk: () => string[],
 ): Store {
   const LOCAL = 'local';
-  const matches = (presented: string, expected: string): boolean => {
-    const a = Buffer.from(presented);
-    const b = Buffer.from(expected);
-    return a.length === b.length && timingSafeEqual(a, b);
-  };
   const needsDatabase = (): never => {
     throw new Error('this gateway is single-tenant; pairing and workspaces need a database');
   };
   return {
     ownerForClientToken: (token) =>
       // No configured token is M2's local mode: loopback only, no auth.
-      Promise.resolve(!clientToken || matches(token, clientToken) ? LOCAL : undefined),
+      Promise.resolve(!clientToken || sameSecret(token, clientToken) ? LOCAL : undefined),
     endpointForToken: (token) => {
       for (const [endpoint, expected] of endpointTokens) {
-        if (matches(token, expected)) return Promise.resolve({ endpoint, owner: LOCAL });
+        if (sameSecret(token, expected)) return Promise.resolve({ endpoint, owner: LOCAL });
       }
       return Promise.resolve(undefined);
     },

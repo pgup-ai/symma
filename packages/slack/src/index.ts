@@ -47,12 +47,16 @@ async function reply(responseUrl: string, text: string): Promise<void> {
   // Ephemeral without exception. A pairing code is a credential, and `/connect`
   // can be run in any channel the app is in — an in_channel reply would put one
   // in front of everybody who can read it.
-  await fetch(responseUrl, {
+  const res = await fetch(responseUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ response_type: 'ephemeral', text }),
     signal: AbortSignal.timeout(10_000),
   });
+  // Slack answers 200 with an error body for some failures, but a non-2xx is
+  // unambiguous: the member saw nothing while the log above said `minted`.
+  // Thrown so the socket's handler catch turns it into a line an operator reads.
+  if (!res.ok) throw new Error(`slack refused the reply: ${res.status}`);
 }
 
 const appToken = required('SYMMA_SLACK_APP_TOKEN');

@@ -34,6 +34,9 @@ export interface SocketModeOptions {
 
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+/** A dial that never settles is a bot that never reconnects — the loop cannot
+ * reach its own retry while it waits on one. */
+const DIAL_TIMEOUT_MS = 10_000;
 /** Redelivery follows within seconds, so recent is the only window that matters
  * — and a long-lived bot must not keep one entry per envelope forever. */
 const SEEN_LIMIT = 512;
@@ -42,6 +45,7 @@ async function openConnection(appToken: string): Promise<SocketLike> {
   const res = await fetch('https://slack.com/api/apps.connections.open', {
     method: 'POST',
     headers: { authorization: `Bearer ${appToken}` },
+    signal: AbortSignal.timeout(DIAL_TIMEOUT_MS),
   });
   // Slack answers 200 with `ok: false` for a bad token, so the status alone
   // never says whether this worked.
@@ -119,6 +123,12 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
     while (!stopped) {
       try {
         const next = (socket = await dial());
+        // stop() may have run while this was in flight, when there was no
+        // socket yet for it to close.
+        if (stopped) {
+          next.close();
+          return;
+        }
         backoff = BACKOFF_MIN_MS;
         log('connected to slack');
         await new Promise<void>((resolve) => {

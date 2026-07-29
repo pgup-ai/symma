@@ -1,4 +1,3 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +32,7 @@ import {
   localStore,
   openStore,
   PAIRING_TTL_MINUTES,
+  sameSecret,
   type Owner,
   type SessionRef,
   type Store,
@@ -154,13 +154,6 @@ const sendToSession =
 function bearerToken(req: IncomingMessage): string | undefined {
   const header = req.headers.authorization;
   return typeof header === 'string' && header.startsWith('Bearer ') ? header.slice(7) : undefined;
-}
-
-/** Digested first so both sides are 32 bytes, which `timingSafeEqual` requires
- * and which stops the comparison leaking the length too. */
-function sameSecret(offered: string, expected: string): boolean {
-  const digest = (value: string): Buffer => createHash('sha256').update(value).digest();
-  return timingSafeEqual(digest(offered), digest(expected));
 }
 
 /** Query token is for EventSource/browser GETs only (they cannot set headers);
@@ -781,7 +774,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const member = await store.ensureMember(team, user);
     // Deactivated, not absent — `ensureMember` creates whoever it has not seen.
     if (!member) return sendJson(res, 403, { error: 'deactivated' });
-    const code = await store.mintPairingCode(member);
+    let code: string;
+    try {
+      code = await store.mintPairingCode(member);
+    } catch (error) {
+      // Deactivated between the lookup and the mint, which re-checks under lock
+      // and throws. Asked again rather than matched on a message — and rethrown
+      // while they are still active, since a store failure is not a decision
+      // about this member.
+      if (await store.ensureMember(team, user)) throw error;
+      return sendJson(res, 403, { error: 'deactivated' });
+    }
     // The member, never the code, which is the credential itself.
     log(`minted a pairing code for ${member}`);
     return sendJson(res, 200, { code, expiresInMinutes: PAIRING_TTL_MINUTES });
