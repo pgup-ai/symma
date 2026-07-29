@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateSigningKeys, verifyEnvelope, type ObserverEnvelope } from '@symma/protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
@@ -45,6 +45,15 @@ const envelope = (sessionId: string, seq: number, frame: object): string =>
     dir: 'out',
     frame,
   });
+
+/** What `symma pair` will write. Hand-rolled here because nothing writes it
+ * until the pair command lands, and this is the shape it will produce. */
+const writePairing = (home: string, contents: string): string => {
+  const dir = join(home, '.local', 'share', 'symma-companion');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'pairing.json'), contents);
+  return home;
+};
 
 async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Promise<T> {
   for (let i = 0; i < 100; i += 1) {
@@ -251,6 +260,99 @@ describe('relay e2e', () => {
       gateway?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(companionHome, { recursive: true, force: true });
+    }
+  });
+
+  it('boots from a pairing on disk, and lets a variable override one field of it', async () => {
+    const attaches: { url: string; auth: string }[] = [];
+    let ingested = '';
+    const stub = createServer((req, res) => {
+      if (req.url?.endsWith('/stream')) {
+        attaches.push({ url: req.url, auth: String(req.headers.authorization) });
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write(': open\n\n');
+        return;
+      }
+      // The ingest POST streams for the connection's life, so `end` never
+      // comes — take the lines as they arrive.
+      req.setEncoding('utf8');
+      req.on('data', (chunk: string) => (ingested += chunk));
+      req.on('end', () => res.writeHead(200).end('{}'));
+    });
+    await new Promise<void>((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    const port = (stub.address() as { port: number }).port;
+    const home = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
+    writePairing(
+      home,
+      JSON.stringify({
+        gateway: `http://127.0.0.1:${port}`,
+        endpoint: 'from-file',
+        token: 'file-tok',
+        device: "Tam's laptop",
+      }),
+    );
+    const start = (extra: Record<string, string>): ChildProcess =>
+      spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        {
+          env: {
+            ...process.env,
+            HOME: home,
+            SYMMA_COMPANION_AGENTS: `probe=${process.execPath} -e 0`,
+            ...extra,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+
+    let companion: ChildProcess | undefined;
+    try {
+      // Nothing in the environment: gateway, endpoint and token all come off
+      // the file, which is the whole point of pairing.
+      companion = start({});
+      const first = await waitFor(async () => attaches[0], 'attaches from the file alone');
+      assert.equal(first.url, '/api/endpoints/from-file/stream');
+      assert.equal(first.auth, 'Bearer file-tok');
+      // Including the label the member chose while pairing: `hello` has to
+      // carry it, or the listing shows a hostname the DM never mentioned.
+      await waitFor(
+        async () => (ingested.includes('"device":"Tam\'s laptop"') ? true : undefined),
+        `hello carries the paired label (saw ${ingested})`,
+      );
+      companion.kill('SIGKILL');
+
+      // Per field, not all-or-nothing: the variable replaces the endpoint and
+      // the token still comes off the file.
+      companion = start({ SYMMA_COMPANION_ENDPOINT: 'from-env' });
+      const second = await waitFor(async () => attaches[1], 'attaches with the override');
+      assert.equal(second.url, '/api/endpoints/from-env/stream');
+      assert.equal(second.auth, 'Bearer file-tok');
+    } finally {
+      companion?.kill('SIGKILL');
+      stub.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('says how to pair rather than starting on an unreadable one', async () => {
+    const home = writePairing(mkdtempSync(join(tmpdir(), 'symma-companion-home-')), '{ broken');
+    try {
+      const companion = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
+        { env: { ...process.env, HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let out = '';
+      companion.stdout?.on('data', (c) => (out += String(c)));
+      companion.stderr?.on('data', (c) => (out += String(c)));
+      const code = await new Promise((resolve) => companion.on('exit', resolve));
+      assert.equal(code, 1);
+      assert.match(out, /Not paired\. Run `symma pair <CODE>`/);
+      // And says why, so nobody re-pairs against a file that is sitting there.
+      assert.match(out, /ignoring .*pairing\.json/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 

@@ -385,6 +385,13 @@ needs: create app → scopes → enable Socket Mode → app token → event subs
 4. The companion detects locally authenticated ACP agents, dials out, exchanges
    the code for a durable endpoint token, persists it `0600`, installs a login
    service, and attaches.
+
+   Persisted as `~/.local/share/symma-companion/pairing.json` — the gateway,
+   the endpoint it assigned and the token — beside the signing key, which is
+   already the one directory this machine keeps secrets in. Environment
+   variables still override it per field, because they are what someone typed
+   on purpose; the file is what pairing wrote.
+
 5. **The endpoint id is assigned, never typed.** M2 has the operator choose it
    (`laptop`), which is one more field in a flow whose bar is zero fields — and
    it changes when someone reinstalls, orphaning the endpoint the gateway knows.
@@ -1202,12 +1209,12 @@ names the origin SHA keeps the provenance without dragging that along.
 
 ## 9. Milestones
 
-|         | scope                                                                                                                                                                                                      | done when                                                                                                                                                                 |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle — **shipped 2026-07-28**. `pairings`/`key_changes` go with M3b and `conversations`/`turns` with M3d, so those tables are not built yet | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
-| **M3b** | pairing: codes, `/connect`, token exchange                                                                                                                                                                 | a fresh laptop pairs from one command with no config file                                                                                                                 |
-| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                                                                                     | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
-| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging                                                       | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
+|         | scope                                                                                                                                                                                                                                                                      | done when                                                                                                                                                                 |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M3a** | Postgres + owner-scoped endpoints, tokens, journals, data lifecycle — **shipped 2026-07-28**. `pairings`/`key_changes` go with M3b and `conversations`/`turns` with M3d, so those tables are not built yet                                                                 | a second user can neither open a session on, nor list, nor read journals or the viewer for, the first user's companion — all four proven by test, not just `openSession`  |
+| **M3b** | pairing: codes, `/connect`, token exchange. **Shipped so far:** the store mints and spends codes (#15), `POST /api/pair` exchanges one for an endpoint and token (#16), and the companion boots from the pairing on disk (#17). Remaining: the `symma pair` command itself | a fresh laptop pairs from one command with no config file                                                                                                                 |
+| **M3c** | companion: auto-detect, dual distribution, self-update, login service, goodbye control                                                                                                                                                                                     | survives reboot and a closed lid — reattaches on wake untouched; upgrades itself; reports which agents it found and why it skipped others                                 |
+| **M3d** | Slack (custom app, Socket Mode): DM-thread conversations, turn routing, keep-private/post-when-ready, share-back, agent selection, offline messaging                                                                                                                       | a non-technical tester completes a task from Slack without help, including one sent to a sleeping laptop — §3's presence copy and a coded refusal, not a hang or an error |
 
 M3d's bar is a person, not a passing test. If a tester needs a hand, the
 milestone is not done.

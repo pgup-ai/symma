@@ -46,7 +46,7 @@ Section references below (§N) are to that document.
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
 | `@symma/protocol`          | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                |
 | `@symma/gateway`           | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol         |
-| `@symma/companion`         | attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update                                                                                               | protocol         |
+| `@symma/companion`         | attach loop, agent detection, checkout mechanism, local spawn/lifecycle, self-update, pairing state                                                                                | protocol         |
 | `@symma/client`            | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol         |
 | `@symma/slack` _(planned)_ | the bot — dials the gateway like any other client                                                                                                                                  | client, protocol |
 

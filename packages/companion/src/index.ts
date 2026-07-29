@@ -65,10 +65,56 @@ const STREAM_IDLE_MS =
     ? Number(process.env.SYMMA_COMPANION_IDLE_MS)
     : 70_000;
 
-const gatewayUrl = (process.env.SYMMA_COMPANION_GATEWAY ?? '').trim().replace(/\/+$/, '');
-const token = (process.env.SYMMA_COMPANION_TOKEN ?? '').trim();
-const endpointId = (process.env.SYMMA_COMPANION_ENDPOINT ?? '').trim();
-const device = (process.env.SYMMA_COMPANION_DEVICE ?? '').trim() || hostname();
+const log = (msg: string): void => {
+  console.log(`[symma-companion] ${msg}`);
+};
+
+/** Everything this machine keeps between runs lives here, created 0700 with the
+ * signing key: that key, and since §2 the identity the gateway assigned. */
+const stateDir = join(homedir(), '.local', 'share', 'symma-companion');
+
+interface Pairing {
+  gateway: string;
+  endpoint: string;
+  token: string;
+  /** The label the member gave the machine while pairing. Kept here so `hello`
+   * carries the same name the gateway stored, rather than quietly replacing it
+   * with a hostname and leaving the DM and the listing disagreeing. */
+  device: string;
+}
+
+/** What `symma pair` left behind, if this machine has paired. Missing is the
+ * ordinary unpaired case; unreadable or wrongly shaped is said out loud, since
+ * otherwise a member stares at "not paired" with the file sitting right there. */
+function readPairing(): Pairing {
+  const path = join(stateDir, 'pairing.json');
+  let saved: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      if (typeof parsed === 'object' && parsed !== null) saved = parsed as Record<string, unknown>;
+    } catch (error) {
+      log(`ignoring ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const str = (key: keyof Pairing): string => (typeof saved[key] === 'string' ? saved[key] : '');
+  return {
+    gateway: str('gateway'),
+    endpoint: str('endpoint'),
+    token: str('token'),
+    device: str('device'),
+  };
+}
+
+// Env over file: the file is what pairing wrote, the variables are what someone
+// typed on purpose. Empty ones fall through rather than shadow a real pairing.
+const paired = readPairing();
+const gatewayUrl = (process.env.SYMMA_COMPANION_GATEWAY || paired.gateway)
+  .trim()
+  .replace(/\/+$/, '');
+const token = (process.env.SYMMA_COMPANION_TOKEN || paired.token).trim();
+const endpointId = (process.env.SYMMA_COMPANION_ENDPOINT || paired.endpoint).trim();
+const device = (process.env.SYMMA_COMPANION_DEVICE || paired.device).trim() || hostname();
 const agentNames = (process.env.SYMMA_COMPANION_AGENTS ?? 'kilo')
   .split(',')
   .map((entry) => entry.trim())
@@ -84,13 +130,12 @@ const maxSessions =
  * tamper-evident against the relay rather than merely by it.
  */
 function loadSigningKeys(): { privateKey: string; publicKey: string } {
-  const dir = join(homedir(), '.local', 'share', 'symma-companion');
-  const path = join(dir, 'signing-key.pem');
+  const path = join(stateDir, 'signing-key.pem');
   // The public half sits beside it as a file the operator can copy off this
   // machine: a journal audit that distrusts the gateway needs a key that never
   // came from the gateway, and this is that channel.
   const publish = (publicKey: string): void =>
-    writeFileSync(join(dir, 'signing-key.pub.pem'), publicKey, { mode: 0o644 });
+    writeFileSync(join(stateDir, 'signing-key.pub.pem'), publicKey, { mode: 0o644 });
   if (existsSync(path)) {
     const privateKey = readFileSync(path, 'utf8');
     const publicKey = publicKeyFrom(privateKey);
@@ -98,7 +143,7 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
     return { privateKey, publicKey };
   }
   const keys = generateSigningKeys();
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   // Written elsewhere then linked into place: `wx` alone would expose the path
   // before the PEM is complete, and a racing start could read half a key. The
   // link fails if another start won, and that winner's key is the one used.
@@ -121,13 +166,10 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
   }
 }
 
-const log = (msg: string): void => {
-  console.log(`[symma-companion] ${msg}`);
-};
-
 if (!gatewayUrl || !token || !endpointId) {
   console.error(
-    'Set SYMMA_COMPANION_GATEWAY, SYMMA_COMPANION_TOKEN, and SYMMA_COMPANION_ENDPOINT.',
+    'Not paired. Run `symma pair <CODE>`, or set SYMMA_COMPANION_GATEWAY, ' +
+      'SYMMA_COMPANION_TOKEN and SYMMA_COMPANION_ENDPOINT.',
   );
   process.exit(1);
 }
