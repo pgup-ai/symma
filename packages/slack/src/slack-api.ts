@@ -20,12 +20,44 @@ export interface SlackApi {
     channel: string,
     text: string,
     threadTs?: string,
+    /** §5's action on a finished answer. The button carries the conversation and
+     * nothing else — where it may publish is the gateway's to state. */
+    offerShare?: { conversation: string; destination: string },
   ) => Promise<{ channel: string; ts: string }>;
+  /** Rewrites a posted message without its actions, so a share cannot be
+   * pressed twice. Never throws: the publication has already landed by then,
+   * and reporting a failed update as a failed share would be a lie the member
+   * acts on. */
+  settle: (channel: string, ts: string, text: string) => Promise<void>;
+  /** Publishes into the source thread. Returns why it could not rather than
+   * throwing: §5 keeps the answer in the DM and names which of these happened,
+   * and a publication that cannot land is not a lost answer. */
+  share: (
+    channel: string,
+    thread: string,
+    text: string,
+  ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
 }
+
+/** The ways a destination stops being one, as §5 lists them. */
+export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope';
+
+const UNUSABLE: Record<string, Unusable> = {
+  is_archived: 'archived',
+  not_in_channel: 'removed',
+  channel_not_found: 'gone',
+  thread_not_found: 'gone',
+  restricted_action: 'locked',
+  restricted_action_read_only_channel: 'locked',
+  missing_scope: 'scope',
+};
 
 /** Threads cap far below this in practice; it is here so a pathological one
  * cannot spin the fetch loop, not as a limit anybody should reach. */
 const MAX_PAGES = 20;
+
+/** The one action id the bot listens for, shared by the button and its handler. */
+export const SHARE_ACTION = 'share_to_thread';
 
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */
@@ -98,14 +130,69 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       if (!channel?.id) throw new Error('conversations.open returned no channel');
       return channel.id;
     },
-    async post(channel, text, threadTs) {
+    async post(channel, text, threadTs, offerShare) {
       const sent = await client.chat.postMessage({
         channel,
+        // Sent alongside the blocks as the notification and accessibility text,
+        // which Slack uses wherever it will not render them.
         text,
         ...(threadTs ? { thread_ts: threadTs } : {}),
+        ...(offerShare
+          ? {
+              blocks: [
+                { type: 'section', text: { type: 'mrkdwn', text } },
+                {
+                  type: 'actions',
+                  elements: [
+                    {
+                      type: 'button',
+                      action_id: SHARE_ACTION,
+                      text: { type: 'plain_text', text: 'Share to thread' },
+                      value: offerShare.conversation,
+                      // §5 wants the destination previewed before it is
+                      // published, and the content is the message this sits on.
+                      confirm: {
+                        title: { type: 'plain_text', text: 'Share this answer?' },
+                        text: {
+                          type: 'mrkdwn',
+                          text: `It will be posted to ${offerShare.destination}, with your name on it.`,
+                        },
+                        confirm: { type: 'plain_text', text: 'Share' },
+                        deny: { type: 'plain_text', text: 'Keep private' },
+                      },
+                    },
+                  ],
+                },
+              ],
+            }
+          : {}),
       });
       if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
       return { channel: sent.channel, ts: sent.ts };
+    },
+    async settle(channel, ts, text) {
+      try {
+        await client.chat.update({
+          channel,
+          ts,
+          text,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+        });
+      } catch {
+        /* the share landed; the button outliving it is the smaller problem */
+      }
+    },
+    async share(channel, thread, text) {
+      try {
+        await client.chat.postMessage({ channel, text, thread_ts: thread });
+        return { ok: true };
+      } catch (error) {
+        const why = UNUSABLE[slackCode(error) ?? ''];
+        // Only the ways a destination goes bad are answers. Anything else is
+        // this bot being broken, which the caller reports as a failure.
+        if (!why) throw error;
+        return { ok: false, why };
+      }
     },
   };
 }

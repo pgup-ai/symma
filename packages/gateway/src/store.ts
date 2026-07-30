@@ -41,6 +41,11 @@ export interface Conversation {
   /** The workspace this thread last ran in (§4). A preference, not a claim: the
    * endpoint chosen now may no longer advertise it. */
   workspaceId?: string;
+  /** Where a share goes back to, captured when the mention opened this (§5).
+   * Absent for a conversation that began in the DM and has nowhere to return
+   * to. Held here rather than travelling with the button, so a destination is
+   * something the gateway states and not something a payload claims. */
+  source?: { channel: string; thread: string };
 }
 
 export interface Store {
@@ -180,6 +185,8 @@ interface Row {
   root: string;
   seen: string | null;
   workspace: string | null;
+  sourceChannel: string | null;
+  sourceThread: string | null;
 }
 const conversationFrom = (row: Row): Conversation => ({
   id: row.id,
@@ -187,6 +194,9 @@ const conversationFrom = (row: Row): Conversation => ({
   rootThread: row.root,
   ...seen(row.seen),
   ...(row.workspace ? { workspaceId: row.workspace } : {}),
+  ...(row.sourceChannel && row.sourceThread
+    ? { source: { channel: row.sourceChannel, thread: row.sourceThread } }
+    : {}),
 });
 
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
@@ -294,7 +304,8 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async conversationForSource(owner, sourceChannel, sourceThread) {
       const row = await one<Row>(
         `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
-                workspace_id AS workspace
+                workspace_id AS workspace,
+                source_channel_id AS "sourceChannel", source_thread_ts AS "sourceThread"
            FROM conversations
           WHERE user_id = $1 AND source_channel_id = $2 AND source_thread_ts = $3`,
         [owner, sourceChannel, sourceThread],
@@ -304,7 +315,8 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async conversationForDm(owner, dmChannel, rootThread) {
       const row = await one<Row>(
         `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
-                workspace_id AS workspace
+                workspace_id AS workspace,
+                source_channel_id AS "sourceChannel", source_thread_ts AS "sourceThread"
            FROM conversations
           WHERE user_id = $1 AND dm_channel_id = $2 AND root_thread_ts = $3`,
         [owner, dmChannel, rootThread],
@@ -522,7 +534,8 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async conversationForId(owner, conversation) {
       const row = await one<Row>(
         `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
-                workspace_id AS workspace
+                workspace_id AS workspace,
+                source_channel_id AS "sourceChannel", source_thread_ts AS "sourceThread"
            FROM conversations
           WHERE user_id = $1 AND id = $2`,
         [owner, conversation],

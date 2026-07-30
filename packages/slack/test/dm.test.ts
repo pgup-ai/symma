@@ -30,9 +30,16 @@ function harness(
      * transient Slack error. */
     historyFails?: Error;
     budgetBytes?: number;
+    /** Where a share would land; absent is a conversation opened in the DM. */
+    destination?: { channel: string; thread: string };
   } = {},
 ) {
-  const posts: { channel: string; text: string; threadTs?: string }[] = [];
+  const posts: {
+    channel: string;
+    text: string;
+    threadTs?: string;
+    offerShare?: { conversation: string; destination: string };
+  }[] = [];
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
   let asked = 0;
@@ -52,10 +59,16 @@ function harness(
       return over.fails ? Promise.reject(over.fails) : Promise.resolve(over.answer ?? 'the answer');
     },
     find: () => Promise.resolve(over.existing),
-    post: (channel, text, threadTs) => {
-      posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
+    post: (channel, text, threadTs, offerShare) => {
+      posts.push({
+        channel,
+        text,
+        ...(threadTs ? { threadTs } : {}),
+        ...(offerShare ? { offerShare } : {}),
+      });
       return Promise.resolve({ channel, ts: '300.0' });
     },
+    destination: () => Promise.resolve(over.destination),
     turn: (spec) => {
       turns.push(spec);
       return Promise.resolve({
@@ -290,6 +303,28 @@ describe('dm message', () => {
     );
     assert.equal(runs[0]!.prompt, 'and now?');
     assert.equal(posts.at(-1)!.text, 'the answer');
+  });
+
+  it('offers a share only when there is a thread to share back to', async () => {
+    // §5: the answer is a private draft and the button is the only way it
+    // leaves. One that began in the DM has nowhere to go, so it is offered
+    // nothing rather than a button that would refuse itself.
+    const from = harness({ destination: { channel: 'C-incidents', thread: '100.0' } });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      from.deps,
+    );
+    assert.deepEqual(from.posts.at(-1)!.offerShare, {
+      conversation: 'conv-1',
+      destination: '<#C-incidents>',
+    });
+
+    const own = harness();
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      own.deps,
+    );
+    assert.equal(own.posts.at(-1)!.offerShare, undefined);
   });
 
   it('does not spend a laptop on a message with no question in it', async () => {

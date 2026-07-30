@@ -866,6 +866,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       await store.markConversationSeen(conversation, seenThroughTs);
       return sendJson(res, 200, {});
     }
+    if (url.pathname === '/api/slack/share') {
+      // §5: the destination is stated here, not carried on the button. A block
+      // payload names a conversation; where that conversation may publish is
+      // this member's row to answer, the same way pairing is.
+      const { conversation } = body as { conversation?: unknown };
+      if (!str(conversation)) return sendJson(res, 400, { error: 'request' });
+      const found = await store.conversationForId(owner, conversation);
+      // An empty object covers both "not yours" and "began in the DM, so it has
+      // nowhere to go back to" — neither is a failure the bot should read as one.
+      return sendJson(res, 200, found?.source ?? {});
+    }
     if (url.pathname === '/api/slack/endpoint') {
       const { conversation: asked } = body as { conversation?: unknown };
       // Absent when nothing is asking on a thread's behalf — a future `/status`
