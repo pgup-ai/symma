@@ -110,9 +110,9 @@ extraction fixes, prevented from recurring.
 ## Conventions
 
 - TypeScript ESM. Import specifiers end in `.js` and resolve to `.ts` — writing
-  `.ts` breaks the emit. No new dependencies without clear need — `@symma/slack`
-  takes `@slack/web-api` and `@slack/socket-mode`, which is the only one so far
-  and was argued from defects review had already found, not from anticipation.
+  `.ts` breaks the emit. No new dependencies without clear need: `@symma/slack`
+  takes `@slack/web-api` and `@slack/socket-mode`, and the bar they cleared was
+  defects the review had already found, not anticipation.
 - Agent specs are verified twice, in this order: the
   [ACP registry](https://github.com/agentclientprotocol/registry) first for the
   canonical package, bin and launch flags — `npx` runs deprecated packages

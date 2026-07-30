@@ -170,7 +170,6 @@ const connection = socketMode({
         await announcing(user, `dm in ${channel}`, () =>
           handleDm(
             {
-              user,
               channel,
               ts: dm.ts as string,
               ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),

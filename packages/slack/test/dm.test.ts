@@ -54,7 +54,7 @@ describe('dm message', () => {
   it('resumes the conversation the thread root names', async () => {
     const { deps, posts, turns } = harness({ existing: CONVERSATION });
     const outcome = await handleDm(
-      { user: 'U-nel', channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1' },
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1' },
       deps,
     );
     assert.equal(outcome, 'resumed');
@@ -69,7 +69,7 @@ describe('dm message', () => {
     // member's own message, which is what their replies will thread under.
     const { deps, turns } = harness();
     assert.equal(
-      await handleDm({ user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1' }, deps),
+      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1' }, deps),
       'opened',
     );
     // The whole spec, not one absent key: asserting `sourceChannel === undefined`
@@ -87,10 +87,7 @@ describe('dm message', () => {
     // message, and being ignored is the one answer a member cannot see.
     const { deps, posts, turns } = harness();
     assert.equal(
-      await handleDm(
-        { user: 'U-nel', channel: 'D-nel', ts: '250.0', threadTs: '111.0', eventId: 'Ev-1' },
-        deps,
-      ),
+      await handleDm({ channel: 'D-nel', ts: '250.0', threadTs: '111.0', eventId: 'Ev-1' }, deps),
       'opened',
     );
     // Rooted at the thread, so it joins whatever that root becomes rather than
@@ -102,10 +99,7 @@ describe('dm message', () => {
   it('says nothing twice when Slack redelivers', async () => {
     const { deps, posts } = harness({ existing: CONVERSATION, turn: false });
     assert.equal(
-      await handleDm(
-        { user: 'U-nel', channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1' },
-        deps,
-      ),
+      await handleDm({ channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1' }, deps),
       'already handled',
     );
     assert.deepEqual(posts, [], 'the turn is recorded before the post, so a repeat is silent');

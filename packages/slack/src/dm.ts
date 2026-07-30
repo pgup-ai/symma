@@ -8,7 +8,6 @@
 import type { ConversationRef } from './mention.js';
 
 export interface DmMessage {
-  user: string;
   /** The DM channel, always a `D` id — resolved by Slack, not by us. */
   channel: string;
   ts: string;
