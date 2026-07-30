@@ -1152,26 +1152,30 @@ function dropRevokedLegs(): void {
 }
 setInterval(dropRevokedLegs, REVOCATION_SWEEP_MS).unref();
 
-if (retentionDays > 0) {
+// Two policies, not one. Retention is a promise about the member's data and
+// `RETENTION_DAYS=0` turns it off on purpose; an expired token is a dead
+// credential, which nobody sets out to keep. They shared a switch until the
+// second one existed to notice.
+if (retentionDays > 0 || databaseUrl) {
   // A sweep that fails is a promise unkept, not a reason to stop serving — same
   // fail-open contract as the journal, and identical at boot and on the
   // interval so a transient failure does not decide whether we start.
   const sweep = (): void => {
     void (async () => {
-      const doomed = await store.expireSessions(retentionDays, relay.liveSessions());
-      forgetSessions(doomed);
-      if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
-      // Conversations forget on their own clock — last use, not age — and take
-      // their turns and session links with them. Nothing to unlink: frames belong
-      // to sessions, which the sweep above already answered for.
-      const gone = await store.expireConversations(retentionDays);
-      if (gone > 0) log(`retention: expired ${gone} conversations`);
-      // On their own clock, not the retention window: they are dead the moment
-      // they expire, and a Slack turn mints one per question.
+      if (retentionDays > 0) {
+        const doomed = await store.expireSessions(retentionDays, relay.liveSessions());
+        forgetSessions(doomed);
+        if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+        // Conversations forget on their own clock — last use, not age — and take
+        // their turns and session links with them. Nothing to unlink: frames belong
+        // to sessions, which the sweep above already answered for.
+        const gone = await store.expireConversations(retentionDays);
+        if (gone > 0) log(`retention: expired ${gone} conversations`);
+      }
       const stale = await store.expireTokens();
-      if (stale > 0) log(`retention: dropped ${stale} expired tokens`);
+      if (stale > 0) log(`dropped ${stale} expired tokens`);
     })().catch((error: unknown) =>
-      log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
+      log(`sweep failed: ${error instanceof Error ? error.message : String(error)}`),
     );
   };
   // Both modes, at boot as well as on the interval: retention is a product

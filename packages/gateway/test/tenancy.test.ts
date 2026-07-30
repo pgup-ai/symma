@@ -1217,6 +1217,53 @@ describe('tenancy', () => {
     }
   });
 
+  it('sweeps dead tokens even with retention switched off', async () => {
+    // `RETENTION_DAYS=0` is a decision about the member's data. An expired token
+    // is a dead credential nobody set out to keep, and the sweep that drops them
+    // used to live inside that switch — so turning retention off kept them all.
+    const url = pg.getConnectionUri();
+    const zed = await provision(url, { team: 'nokeep', slackUser: 'zed', endpoint: 'zed-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    const dir = mkdtempSync(join(tmpdir(), 'symma-nokeep-'));
+    let child: ChildProcess | undefined;
+    try {
+      await store.mintClientToken(zed.owner, -1);
+      child = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/gateway/src/server.ts'],
+        {
+          env: {
+            ...process.env,
+            SYMMA_GATEWAY_PORT: String(28000 + Math.floor(Math.random() * 1000)),
+            SYMMA_GATEWAY_DATA: dir,
+            SYMMA_GATEWAY_HOST: '127.0.0.1',
+            SYMMA_GATEWAY_DATABASE_URL: url,
+            SYMMA_GATEWAY_RETENTION_DAYS: '0',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      child.stdout?.resume();
+      child.stderr?.resume();
+
+      // The sweep runs at boot as well as on the interval, so booting is the
+      // whole test — nothing here ever has to speak HTTP to it.
+      await waitFor(async () => {
+        const { rowCount } = await pool.query(
+          `SELECT 1 FROM tokens WHERE subject_id = $1 AND expires_at < now()`,
+          [zed.owner],
+        );
+        return rowCount === 0 ? true : undefined;
+      }, 'a gateway with retention off still drops the expired token');
+    } finally {
+      child?.kill('SIGKILL');
+      rmSync(dir, { recursive: true, force: true });
+      await pool.end();
+      await store.close();
+    }
+  });
+
   it('refuses a spent code, and a companion with nothing to run', async () => {
     const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });
