@@ -22,6 +22,15 @@ export interface LiveSession extends SessionRef {
  * `unknown` is the mistyped code, which a log is worth telling apart. */
 export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unknown' | 'spent' };
 
+/** One endpoint row: paired, whether or not anything ever attached to it. A null
+ * `lastSeenAt` has never run — pairing writes the row, attaching writes the
+ * time. */
+export interface PairedEndpoint {
+  id: string;
+  device: string;
+  lastSeenAt: number | null;
+}
+
 export interface Conversation {
   id: string;
   dmChannel: string;
@@ -122,6 +131,10 @@ export interface Store {
     model?: string;
   }): Promise<void>;
   markSeen(endpoint: string): Promise<void>;
+  /** Every endpoint this owner has paired, attached or not. The relay knows only
+   * the ones that attached since it started, so without this a gateway restart
+   * would tell a paired member they had never paired. */
+  endpointsFor(owner: Owner): Promise<PairedEndpoint[]>;
   /** For an open the companion went on to refuse: the row outlives the relay's
    * in-memory session otherwise, and blocks the id from ever being reused.
    * Returns what it removed, like every other delete here — frames can already
@@ -457,6 +470,17 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [id, runId, endpoint, agent, model ?? null],
       );
     },
+    async endpointsFor(owner) {
+      const { rows } = await pool.query<{ id: string; device: string; seen: Date | null }>(
+        `SELECT id, device_name AS device, last_seen_at AS seen FROM endpoints WHERE user_id = $1`,
+        [owner],
+      );
+      return rows.map(({ id, device, seen }) => ({
+        id,
+        device,
+        lastSeenAt: seen?.getTime() ?? null,
+      }));
+    },
     async markSeen(endpoint) {
       await pool.query(`UPDATE endpoints SET last_seen_at = now() WHERE id = $1`, [endpoint]);
     },
@@ -738,6 +762,7 @@ export function localStore(
     // reached and expired through the filesystem either way.
     deleteSessionRow: () => Promise.resolve([]),
     markSeen: () => Promise.resolve(),
+    endpointsFor: needsDatabase,
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
       // One tenant, so a run and session id are the whole key here.

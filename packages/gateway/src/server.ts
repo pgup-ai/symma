@@ -28,6 +28,7 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
+import { selectEndpoint } from './select-endpoint.js';
 import {
   localStore,
   openStore,
@@ -860,6 +861,15 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         return sendJson(res, 404, { error: 'not found' });
       await store.markConversationSeen(conversation, seenThroughTs);
       return sendJson(res, 200, {});
+    }
+    if (url.pathname === '/api/slack/endpoint') {
+      const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
+      // `{}` is "nothing paired", the shape the conversation lookups already use.
+      return sendJson(
+        res,
+        200,
+        selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf) ?? {},
+      );
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —

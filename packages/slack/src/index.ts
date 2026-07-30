@@ -4,6 +4,8 @@
  * and shell controls are all support and security surface, and this workflow
  * has not earned any of them yet.
  */
+import type { SelectedEndpoint } from '@symma/protocol';
+
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import { handleDm, isMemberDm } from './dm.js';
 import { handleMention, type ConversationRef } from './mention.js';
@@ -140,6 +142,17 @@ const depsFor = (user: string) => {
       lookup('/api/slack/dm', { dmChannel, rootThread }),
     turn: (spec: Record<string, unknown>) =>
       ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+    endpoint: async () => {
+      // Read at the boundary like the lookups above: an empty object is the
+      // gateway saying this member has paired nothing at all.
+      const { endpoint, device, state } = await ask<Partial<SelectedEndpoint>>(
+        '/api/slack/endpoint',
+        { user },
+      );
+      // `device` is deliberately not required — it is empty until a companion
+      // attaches and says what it is, and the copy already covers that.
+      return endpoint && state ? { endpoint, device: device ?? '', state } : undefined;
+    },
     seen: async (conversation: string, seenThroughTs: string) => {
       await ask('/api/slack/seen', { user, conversation, seenThroughTs });
     },
@@ -175,7 +188,7 @@ const connection = socketMode({
               ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
               eventId,
             },
-            { find: deps.findDm, turn: deps.turn, post: deps.post },
+            { find: deps.findDm, turn: deps.turn, post: deps.post, endpoint: deps.endpoint },
           ),
         );
         return;

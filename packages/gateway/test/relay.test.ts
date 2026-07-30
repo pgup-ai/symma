@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import type { HelloControl, OpenControl } from '@symma/protocol';
+import type { EndpointPresence, HelloControl, OpenControl } from '@symma/protocol';
 
 import { createRelay, parseEndpointTokens } from '../src/relay.js';
 
@@ -36,6 +36,26 @@ describe('relay', () => {
       ],
     );
     assert.equal(parseEndpointTokens(undefined).size, 0);
+  });
+
+  it('turns a detach into the one word §3 needs', () => {
+    const relay = createRelay({ resumeWindowMs: 60_000 });
+    const seen = (over: Partial<EndpointPresence>): EndpointPresence => ({
+      endpoint: 'laptop',
+      device: 'macbook',
+      agents: [],
+      maxSessions: 2,
+      activeSessions: 0,
+      online: false,
+      ...over,
+    });
+
+    assert.equal(relay.stateOf(seen({ online: true })), 'ready');
+    // A goodbye outranks the clock: a machine they quit is not coming back on
+    // its own, however recently it was here.
+    assert.equal(relay.stateOf(seen({ quit: true, lastSeenAt: Date.now() })), 'quit');
+    assert.equal(relay.stateOf(seen({ lastSeenAt: Date.now() - 1_000 })), 'dropped');
+    assert.equal(relay.stateOf(seen({ lastSeenAt: Date.now() - 120_000 })), 'asleep');
   });
 
   it('pairs sessions, relays both directions, and journals via onLine', () => {

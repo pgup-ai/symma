@@ -9,6 +9,7 @@ import {
   isSafeId,
   type AckControl,
   type EndpointPresence,
+  type EndpointState,
   type CloseControl,
   type HelloControl,
   type OpenControl,
@@ -216,6 +217,15 @@ export function createRelay(options: RelayOptions = {}) {
           ...(!online && quit ? { quit: true } : {}),
           ...(hello.publicKey ? { publicKey: hello.publicKey } : {}),
         }));
+    },
+
+    /** §3's left column, for one endpoint. Decided here because the window that
+     * separates a blip from a closed lid is the same one sessions resume in —
+     * a caller should not have to learn it to say "asleep". */
+    stateOf(presence: EndpointPresence): EndpointState {
+      if (presence.online) return 'ready';
+      if (presence.quit) return 'quit';
+      return Date.now() - (presence.lastSeenAt ?? 0) < resumeWindowMs ? 'dropped' : 'asleep';
     },
 
     /** Route a client's open to its endpoint, or refuse synchronously. Returns
