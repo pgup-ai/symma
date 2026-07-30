@@ -28,6 +28,7 @@ function harness(
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
   let asked = 0;
+  const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
   // which is a different answer from one whose laptop is shut.
   const selected = over.endpoint === undefined ? READY : over.endpoint;
@@ -49,12 +50,13 @@ function harness(
         ...(over.turn === false ? {} : { turn: 'turn-1' }),
       });
     },
-    endpoint: () => {
+    endpoint: (conversation) => {
       asked += 1;
+      askedFor.push(conversation);
       return Promise.resolve(selected ?? undefined);
     },
   };
-  return { deps, posts, turns, runs, asked: () => asked };
+  return { deps, posts, turns, runs, askedFor, asked: () => asked };
 }
 
 describe('dm message', () => {
@@ -169,6 +171,35 @@ describe('dm message', () => {
     // opens in an empty temp dir, which is not what "your own machine" sounds
     // like to someone asking about their repo.
     assert.match(posts[0]!.text, /no access to your files/);
+  });
+
+  it('names the project the answer is about, and runs the turn there', async () => {
+    // §4 wants the scope in the DM root rather than guessed at: a member who
+    // cannot see which checkout answered cannot tell a stale answer from a
+    // wrong one. The id goes to the companion; the label is for them.
+    const { deps, posts, runs, askedFor } = harness({
+      endpoint: { ...READY, workspace: 'ws-abc123', workspaceLabel: 'symma' },
+    });
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+
+    assert.match(posts[0]!.text, /in `symma`/);
+    assert.doesNotMatch(posts[0]!.text, /no access to your files/);
+    assert.equal(runs[0]!.workspace, 'ws-abc123');
+    // The gateway cannot prefer this thread's project without being told which
+    // thread is asking.
+    assert.deepEqual(askedFor, ['conv-1']);
+  });
+
+  it('does not let a directory name close the span it is shown in', async () => {
+    // A label is `basename` of a real directory, and a backtick in one would end
+    // the code span early and spill the rest of the sentence into it.
+    const { deps, posts } = harness({
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'we`ird' },
+    });
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+
+    assert.match(posts[0]!.text, /in `weird`\./);
+    assert.equal(posts[0]!.text.split('`').length - 1, 2, 'one span, opened and closed');
   });
 
   it('tells a follow-up that it is starting fresh', async () => {

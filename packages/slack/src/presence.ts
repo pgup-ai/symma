@@ -29,7 +29,14 @@ export type RefusalReason = Exclude<EndpointState, 'ready'> | 'unpaired' | 'unus
 /** Whether this turn can run, and what to say when it cannot — one decision, so
  * a caller cannot read "no refusal" as "go" and find it has nothing to go with. */
 export type TurnDecision =
-  | { run: true; endpoint: string; agent: string; token: string }
+  | {
+      run: true;
+      endpoint: string;
+      agent: string;
+      token: string;
+      workspace?: string;
+      label?: string;
+    }
   | { run: false; why: string; because: RefusalReason };
 
 export function decideTurn(target: TurnTarget | undefined): TurnDecision {
@@ -44,7 +51,14 @@ export function decideTurn(target: TurnTarget | undefined): TurnDecision {
   const unusable = `${device} is not available right now.`;
   if (target.state === 'ready') {
     return target.agent && target.token
-      ? { run: true, endpoint: target.endpoint, agent: target.agent, token: target.token }
+      ? {
+          run: true,
+          endpoint: target.endpoint,
+          agent: target.agent,
+          token: target.token,
+          ...(target.workspace ? { workspace: target.workspace } : {}),
+          ...(target.workspaceLabel ? { label: target.workspaceLabel } : {}),
+        }
       : { run: false, because: 'unusable', why: unusable };
   }
   // The union is a compile-time claim about the wire, and a gateway one release

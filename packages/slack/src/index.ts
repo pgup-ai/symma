@@ -143,13 +143,14 @@ const depsFor = (user: string) => {
       lookup('/api/slack/dm', { dmChannel, rootThread }),
     turn: (spec: Record<string, unknown>) =>
       ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
-    endpoint: async () => {
+    endpoint: async (conversation: string) => {
       // Read at the boundary like the lookups above: an empty object is the
-      // gateway saying this member has paired nothing at all.
-      const { endpoint, device, state, agent, token } = await ask<Partial<TurnTarget>>(
-        '/api/slack/endpoint',
-        { user },
-      );
+      // gateway saying this member has paired nothing at all. The conversation
+      // goes with it so the gateway can prefer the project this thread already
+      // ran in (§4) rather than whatever the endpoint lists first.
+      const { endpoint, device, state, agent, token, workspace, workspaceLabel } = await ask<
+        Partial<TurnTarget>
+      >('/api/slack/endpoint', { user, conversation });
       // `device` is deliberately not required — it is empty until a companion
       // attaches and says what it is, and the copy already covers that. `agent`
       // and `token` arrive only when the machine can take the turn.
@@ -160,13 +161,22 @@ const depsFor = (user: string) => {
         state,
         ...(agent ? { agent } : {}),
         ...(token ? { token } : {}),
+        ...(workspace ? { workspace } : {}),
+        ...(workspaceLabel ? { workspaceLabel } : {}),
       };
     },
-    run: ({ conversation, endpoint, agent, token, prompt }: RunSpec) =>
+    run: ({ conversation, endpoint, agent, token, prompt, workspace }: RunSpec) =>
       runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
-        { gateway, token, endpoint, agent, runId: conversation },
+        {
+          gateway,
+          token,
+          endpoint,
+          agent,
+          runId: conversation,
+          ...(workspace ? { workspace } : {}),
+        },
         // The sentinel every agent spec reads as "whatever you default to".
         // §5 wants a per-agent default and an override; neither is chosen here.
         'default',

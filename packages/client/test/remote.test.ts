@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -19,6 +19,7 @@ process.stdin.setEncoding('utf8');
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 const REVIEW = JSON.stringify({
   summary: 'remote review ok',
+  cwd: process.cwd(),
   findings: [{ path: 'src/a.ts', line: 1, severity: 'P2', title: 'remote finding', body: 'b' }],
   addressedPriorComments: [],
 });
@@ -57,6 +58,8 @@ describe('remote acp prompt', () => {
     const companionHome = mkdtempSync(join(tmpdir(), 'symma-companion-home-'));
     const agentPath = join(dataDir, 'review-agent.mjs');
     writeFileSync(agentPath, REVIEW_AGENT);
+    // A root the companion will allowlist, so this test can ask for it by id.
+    const mine = mkdtempSync(join(tmpdir(), 'symma-remote-mine-'));
     const port = 24000 + Math.floor(Math.random() * 2000);
     const base = `http://127.0.0.1:${port}`;
     let gateway: ChildProcess | undefined;
@@ -104,6 +107,7 @@ describe('remote acp prompt', () => {
             SYMMA_COMPANION_TOKEN: 'endpoint-tok',
             SYMMA_COMPANION_ENDPOINT: 'box',
             SYMMA_COMPANION_AGENTS: `probe=${process.execPath} ${agentPath}`,
+            SYMMA_COMPANION_WORKSPACES: mine,
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },
@@ -138,6 +142,27 @@ describe('remote acp prompt', () => {
         noLog,
       );
       assert.match(text, /remote review ok/);
+      // No workspace asked for, so the agent got the empty temp directory the
+      // review path has always had. Parsed rather than matched: a path is not a
+      // regex, and `\` on win32 would make one that is not the path.
+      const ranIn = (payload: string): string => (JSON.parse(payload) as { cwd: string }).cwd;
+      assert.notEqual(ranIn(text), realpathSync(mine));
+
+      // Named by id, the same prompt runs in the member's own directory. This
+      // is the whole of what `workspace` buys, and the agent reporting its own
+      // cwd is the only thing that can show it.
+      const offered = (await (
+        await fetch(`${base}/api/endpoints`, { headers: { authorization: 'Bearer client-tok' } })
+      ).json()) as { endpoint: string; workspaces?: { id: string }[] }[];
+      const id = offered.find((e) => e.endpoint === 'box')!.workspaces![0]!.id;
+      const inMine = await runRemotePrompt(
+        { ...config, agent: 'probe', runId: 'run-in-mine', workspace: id },
+        'probe/default',
+        'PR CONTEXT',
+        'review',
+        noLog,
+      );
+      assert.equal(ranIn(inMine), realpathSync(mine));
 
       // The reply above already proves the round trip; what only this test
       // covers is that it was journaled under the client's run id, one session
@@ -157,6 +182,7 @@ describe('remote acp prompt', () => {
       gateway?.kill('SIGKILL');
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(companionHome, { recursive: true, force: true });
+      rmSync(mine, { recursive: true, force: true });
     }
   });
 });

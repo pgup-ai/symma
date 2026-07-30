@@ -46,8 +46,11 @@ is here, and no rule below depends on reading it.
 
 §8 "Package graph". All five exist; `@symma/slack` arrived with M3d and carries
 `/connect`, mentions, DM turns, §3's presence copy, and driving one prompt on
-the member's own machine. Each turn is its own ACP session — §4's resume is
-next, and a follow-up says so rather than passing an empty session off as one.
+the member's own machine — in one of §4's allowlisted directories when their
+companion offers any, and an empty temp one when it offers none. The choice is
+per conversation and named in the DM root. Each turn is still its own ACP
+session; §4's resume is next, and a follow-up says so rather than passing an
+empty session off as one.
 
 | package           | what it is                                                                                                                                                                         | depends on                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |

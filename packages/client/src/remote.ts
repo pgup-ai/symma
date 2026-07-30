@@ -42,6 +42,10 @@ export interface RemoteAcpConfig {
   agent: string;
   /** Groups this run's sessions in the gateway journal and viewer. */
   runId: string;
+  /** An id the endpoint advertised in `hello.workspaces[]`; the agent starts in
+   * that directory instead of an empty temp one. Never a path — resolving it is
+   * the companion's job, and its allowlist is the boundary (§4). */
+  workspace?: string;
   /** Checked out by the companion so the agent can explore the code it reviews. */
   repo?: string;
   ref?: string;
@@ -220,6 +224,7 @@ export async function runRemotePrompt(
       endpoint: config.endpoint,
       agent: config.agent,
       model,
+      ...(config.workspace ? { workspace: config.workspace } : {}),
       ...(config.repo ? { repo: config.repo } : {}),
       ...(config.ref ? { ref: config.ref } : {}),
       ...(config.base ? { base: config.base } : {}),
