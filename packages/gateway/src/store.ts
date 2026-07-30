@@ -84,9 +84,6 @@ export interface Store {
   /** Records one invocation. Undefined when this Slack event already made a turn
    * — which is how a redelivery finds its own work rather than repeating it. */
   recordTurn(conversation: string, slackEventId: string): Promise<string | undefined>;
-  /** Whether this conversation is this member's. The bot names an id it was
-   * given, and an id alone is not authorization. */
-  conversationOwnedBy(owner: Owner, conversation: string): Promise<boolean>;
   /** Advances the cursor, once the member has actually been shown that far. Kept
    * apart from `recordTurn` because a turn that fails to deliver must not leave
    * the thread marked read: the next mention would filter out what nobody saw,
@@ -138,13 +135,12 @@ export interface Store {
     model?: string;
   }): Promise<void>;
   markSeen(endpoint: string): Promise<void>;
-  /** One conversation by id, scoped to its owner — the id arrives from the bot,
+  /** One conversation by id, scoped to its owner. Undefined is both "no such
+   * conversation" and "not yours" on purpose: the bot names an id it was given,
    * and an id alone is not authorization. */
   conversationForId(owner: Owner, conversation: string): Promise<Conversation | undefined>;
   /** Records what this conversation ran on, so the next turn in the thread lands
-   * on the same project (§4) rather than wherever the endpoint happens to list
-   * first. Scoped to the owner: the id arrives from the bot, and an id alone is
-   * not authorization. */
+   * on the same project (§4) rather than wherever the endpoint lists first. */
   bindConversation(owner: Owner, conversation: string, workspaceId: string): Promise<void>;
   /** A client token for this member, good for `ttlMinutes`. The bot holds no
    * credential of its own (§6), so this is how it acts as whoever is asking —
@@ -176,7 +172,7 @@ export interface Store {
  * undefined — the shape the rest of this file uses for optional columns. */
 const seen = (ts: string | null): { seenThroughTs?: string } => (ts ? { seenThroughTs: ts } : {});
 
-/** Both conversation lookups differ only in the key they ask by, so they read
+/** The conversation lookups differ only in the key they ask by, so they read
  * the same row back and build it the same way. */
 interface Row {
   id: string;
@@ -355,14 +351,6 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         ]);
       }
       return turn?.id;
-    },
-    async conversationOwnedBy(owner, conversation) {
-      return Boolean(
-        await one(`SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2`, [
-          conversation,
-          owner,
-        ]),
-      );
     },
     async markConversationSeen(conversation, seenThroughTs) {
       // Never backwards: a redelivery or a slow turn must not rewind the thread
@@ -868,7 +856,6 @@ export function localStore(
     conversationForDm: needsDatabase,
     openConversation: needsDatabase,
     recordTurn: needsDatabase,
-    conversationOwnedBy: needsDatabase,
     markConversationSeen: needsDatabase,
     expireConversations: needsDatabase,
     mintPairingCode: needsDatabase,

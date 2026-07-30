@@ -861,13 +861,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         return sendJson(res, 400, { error: 'request' });
       // Scoped to the caller's own conversation: the id arrives from the bot,
       // which speaks for whichever member ran the command, not for all of them.
-      if (!(await store.conversationOwnedBy(owner, conversation)))
+      if (!(await store.conversationForId(owner, conversation)))
         return sendJson(res, 404, { error: 'not found' });
       await store.markConversationSeen(conversation, seenThroughTs);
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/endpoint') {
-      const { conversation } = body as { conversation?: unknown };
+      const { conversation: asked } = body as { conversation?: unknown };
+      // Absent when nothing is asking on a thread's behalf — a future `/status`
+      // wants presence without a project.
+      const conversation = str(asked) ? asked : undefined;
       const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
       const selected = selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf);
       // `{}` is "nothing paired", the shape the conversation lookups already use.
@@ -883,13 +886,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // — a member who unlists a root, or asks from a different laptop, gets an
       // answer rather than a refusal about a directory they no longer have.
       const offered = attached?.workspaces ?? [];
-      const remembered = str(conversation)
+      const remembered = conversation
         ? (await store.conversationForId(owner, conversation))?.workspaceId
         : undefined;
       const workspace = offered.find((w) => w.id === remembered) ?? offered[0];
-      // Written back so the thread keeps its project: §9's picker overrides this
-      // rather than replacing it.
-      if (workspace && str(conversation) && workspace.id !== remembered)
+      // Written back so the thread keeps its project. Only on a change, or every
+      // turn costs a write to say what the row already says.
+      if (workspace && conversation && workspace.id !== remembered)
         await store.bindConversation(owner, conversation, workspace.id);
 
       // Minted here rather than on every presence check: this route is asked
