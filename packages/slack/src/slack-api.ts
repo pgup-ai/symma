@@ -24,6 +24,11 @@ export interface SlackApi {
      * nothing else — where it may publish is the gateway's to state. */
     offerShare?: { conversation: string; destination: string },
   ) => Promise<{ channel: string; ts: string }>;
+  /** Rewrites a posted message without its actions, so a share cannot be
+   * pressed twice. Never throws: the publication has already landed by then,
+   * and reporting a failed update as a failed share would be a lie the member
+   * acts on. */
+  settle: (channel: string, ts: string, text: string) => Promise<void>;
   /** Publishes into the source thread. Returns why it could not rather than
    * throwing: §5 keeps the answer in the DM and names which of these happened,
    * and a publication that cannot land is not a lost answer. */
@@ -164,6 +169,18 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       });
       if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
       return { channel: sent.channel, ts: sent.ts };
+    },
+    async settle(channel, ts, text) {
+      try {
+        await client.chat.update({
+          channel,
+          ts,
+          text,
+          blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+        });
+      } catch {
+        /* the share landed; the button outliving it is the smaller problem */
+      }
     },
     async share(channel, thread, text) {
       try {

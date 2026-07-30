@@ -8,12 +8,14 @@ const CLICK: ShareRequest = {
   user: 'U-nel',
   channel: 'D-nel',
   messageTs: '300.0',
+  thread: '200.0',
   text: 'the deploy fails on a missing env var',
   conversation: 'conv-1',
 };
 
 function harness(over: { to?: { channel: string; thread: string }; why?: Unusable } = {}) {
   const shared: { channel: string; thread: string; text: string }[] = [];
+  const settled: { channel: string; ts: string; text: string }[] = [];
   const posts: { channel: string; text: string; threadTs?: string }[] = [];
   const deps: ShareDeps = {
     destination: () =>
@@ -22,17 +24,21 @@ function harness(over: { to?: { channel: string; thread: string }; why?: Unusabl
       shared.push({ channel, thread, text });
       return Promise.resolve(over.why ? { ok: false as const, why: over.why } : { ok: true });
     },
+    settle: (channel, ts, text) => {
+      settled.push({ channel, ts, text });
+      return Promise.resolve();
+    },
     post: (channel, text, threadTs) => {
       posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
       return Promise.resolve(undefined);
     },
   };
-  return { deps, shared, posts };
+  return { deps, shared, posts, settled };
 }
 
 describe('share back', () => {
   it('posts to the thread it came from, with the approver named', async () => {
-    const { deps, shared, posts } = harness();
+    const { deps, shared, posts, settled } = harness();
     assert.equal(await handleShare(CLICK, deps), 'shared');
 
     // §5: a channel post is attributable to whoever approved it, never to the
@@ -45,6 +51,14 @@ describe('share back', () => {
       },
     ]);
     assert.match(posts[0]!.text, /Shared to the thread/);
+    // The button goes with it. Pressing twice would put the same answer in a
+    // public thread twice, and nothing about the first press prevents a second.
+    assert.equal(settled[0]!.ts, '300.0');
+    assert.match(settled[0]!.text, /Shared to the thread/);
+    // Replies land in the conversation's root, not under the answer: Slack says
+    // not to reply to a reply, and the DM thread is what a follow-up is caught
+    // up from — an outcome outside it is one the next turn never sees.
+    assert.equal(posts[0]!.threadTs, '200.0');
   });
 
   it('keeps the answer and names what went wrong', async () => {
@@ -60,11 +74,13 @@ describe('share back', () => {
     ] as const;
 
     for (const { why, says } of cases) {
-      const { deps, posts } = harness({ why });
+      const { deps, posts, settled } = harness({ why });
       assert.equal(await handleShare(CLICK, deps), `kept: ${why}`);
+      // The button stays: the destination is what failed, so fixing it makes
+      // pressing again the right thing to do.
+      assert.deepEqual(settled, [], why);
       assert.match(posts[0]!.text, says, why);
-      // Back in the thread the member is looking at, not at the DM root.
-      assert.equal(posts[0]!.threadTs, '300.0');
+      assert.equal(posts[0]!.threadTs, '200.0');
       assert.match(posts[0]!.text, /Nothing was lost/, why);
     }
   });

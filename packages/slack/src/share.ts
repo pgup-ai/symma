@@ -10,10 +10,13 @@ import type { Unusable } from './slack-api.js';
 /** The click, narrowed to what this reads. */
 export interface ShareRequest {
   user: string;
-  /** The DM channel and message the button sits on — where the answer is, and
-   * where any refusal goes back to. */
+  /** The DM channel and the message the button sits on. */
   channel: string;
   messageTs: string;
+  /** The conversation's root, off the payload. Slack says not to reply to a
+   * reply's ts, and the DM thread is the transcript a follow-up is caught up
+   * from — an outcome outside it is one the next turn never sees. */
+  thread: string;
   /** The answer itself, off the message the button is attached to. */
   text: string;
   /** All the button carried — where it may go is the gateway's answer. */
@@ -30,6 +33,7 @@ export interface ShareDeps {
     text: string,
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
   post: (channel: string, text: string, threadTs?: string) => Promise<unknown>;
+  settle: (channel: string, ts: string, text: string) => Promise<void>;
 }
 
 export type ShareOutcome = 'shared' | 'no destination' | `kept: ${Unusable}`;
@@ -50,11 +54,7 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
     // Covers a conversation opened in the DM and one that is not theirs alike:
     // the button should not have been there either way, so this says what is
     // true rather than which of the two it was.
-    await deps.post(
-      request.channel,
-      'There is no thread to share this back to.',
-      request.messageTs,
-    );
+    await deps.post(request.channel, 'There is no thread to share this back to.', request.thread);
     return 'no destination';
   }
 
@@ -69,10 +69,19 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
     await deps.post(
       request.channel,
       `Kept this here — ${because[result.why]}. Nothing was lost.`,
-      request.messageTs,
+      request.thread,
     );
+    // The button stays: the destination is what failed, and fixing it makes
+    // pressing again the right thing to do.
     return `kept: ${result.why}`;
   }
-  await deps.post(request.channel, 'Shared to the thread.', request.messageTs);
+  // Gone on success, though. Pressing twice would put the same answer in a
+  // public thread twice, which is the one mistake here everyone can see.
+  await deps.settle(
+    request.channel,
+    request.messageTs,
+    `${request.text}\n\n_Shared to the thread._`,
+  );
+  await deps.post(request.channel, 'Shared to the thread.', request.thread);
   return 'shared';
 }

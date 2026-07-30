@@ -270,13 +270,16 @@ const connection = socketMode({
       const { user, channel, message, actions } = envelope.payload as {
         user?: { id?: unknown };
         channel?: { id?: unknown };
-        message?: { ts?: unknown; text?: unknown };
+        message?: { ts?: unknown; text?: unknown; thread_ts?: unknown };
         actions?: { action_id?: unknown; value?: unknown }[];
       };
       const conversation = actions?.find((a) => a.action_id === SHARE_ACTION)?.value;
       const who = user?.id;
       const where = channel?.id;
       const messageTs = message?.ts;
+      // The answer is posted into the conversation's root, so the payload's
+      // `thread_ts` is that root. A message that is not threaded is its own.
+      const thread = typeof message?.thread_ts === 'string' ? message.thread_ts : messageTs;
       // The answer comes off the message the button sits on, so what is shared
       // is exactly what the member was looking at when they pressed it.
       const text = message?.text;
@@ -285,14 +288,20 @@ const connection = socketMode({
         typeof who !== 'string' ||
         typeof where !== 'string' ||
         typeof messageTs !== 'string' ||
+        typeof thread !== 'string' ||
         typeof text !== 'string'
       ) {
         return;
       }
       await announcing(who, 'share', () =>
         handleShare(
-          { user: who, channel: where, messageTs, text, conversation },
-          { destination: depsFor(who).destination, share: api.share, post: api.post },
+          { user: who, channel: where, messageTs, thread, text, conversation },
+          {
+            destination: depsFor(who).destination,
+            share: api.share,
+            post: api.post,
+            settle: api.settle,
+          },
         ),
       );
       return;
