@@ -1717,7 +1717,15 @@ describe('tenancy', () => {
       // The thread is what a repeat mention finds, so it lands a turn in the
       // conversation the member is already looking at (§4, amended).
       const found = await store.conversationForSource(wynn.owner, 'C-incidents', '100.0');
-      assert.deepEqual(found, { id: first.id, dmChannel: 'D-wynn', rootThread: '200.0' });
+      // Whole shape, not just the id: the source captured at the mention is what
+      // §5 shares an answer back to, and it has to survive the lookup to be
+      // there when a member asks for it.
+      assert.deepEqual(found, {
+        id: first.id,
+        dmChannel: 'D-wynn',
+        rootThread: '200.0',
+        source: { channel: 'C-incidents', thread: '100.0' },
+      });
 
       // And a second open loses rather than overwriting: the winner's DM root is
       // the thread already on screen.
@@ -1760,6 +1768,7 @@ describe('tenancy', () => {
         dmChannel: 'D-wynn',
         rootThread: '200.0',
         seenThroughTs: '100.5',
+        source: { channel: 'C-incidents', thread: '100.0' },
       });
       assert.equal(await store.conversationForDm(wynn.owner, 'D-wynn', '999.0'), undefined);
 

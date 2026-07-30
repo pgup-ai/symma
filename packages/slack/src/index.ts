@@ -9,8 +9,9 @@ import type { TurnTarget } from '@symma/protocol';
 
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
+import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
-import { slackApi } from './slack-api.js';
+import { slackApi, SHARE_ACTION } from './slack-api.js';
 import { socketMode } from './socket-mode.js';
 
 const log = (message: string): void => {
@@ -184,6 +185,15 @@ const depsFor = (user: string) => {
         `slack-${conversation}`,
         log,
       ),
+    destination: async (conversation: string) => {
+      // `{}` is the gateway saying this conversation began in the DM, or is not
+      // this member's — neither is something the bot decides for itself.
+      const { channel, thread } = await ask<{ channel?: string; thread?: string }>(
+        '/api/slack/share',
+        { user, conversation },
+      );
+      return channel && thread ? { channel, thread } : undefined;
+    },
     seen: async (conversation: string, seenThroughTs: string) => {
       await ask('/api/slack/seen', { user, conversation, seenThroughTs });
     },
@@ -227,6 +237,7 @@ const connection = socketMode({
               endpoint: deps.endpoint,
               run: deps.run,
               threadReplies: deps.threadReplies,
+              destination: deps.destination,
               budgetBytes,
               log,
             },
@@ -252,6 +263,41 @@ const connection = socketMode({
       };
       await announcing(mention.user, `mention in ${mention.channel}`, () =>
         handleMention(mention, depsFor(mention.user)),
+      );
+      return;
+    }
+    if (envelope.type === 'interactive') {
+      const { user, channel, message, actions } = envelope.payload as {
+        user?: { id?: unknown };
+        channel?: { id?: unknown };
+        message?: { ts?: unknown; text?: unknown };
+        actions?: { action_id?: unknown; value?: unknown }[];
+      };
+      const action = actions?.find((a) => a.action_id === SHARE_ACTION);
+      if (
+        !action ||
+        typeof action.value !== 'string' ||
+        typeof user?.id !== 'string' ||
+        typeof channel?.id !== 'string' ||
+        typeof message?.ts !== 'string' ||
+        typeof message.text !== 'string'
+      ) {
+        return;
+      }
+      const who = user.id;
+      // The answer comes off the message the button is attached to, so what is
+      // shared is exactly what the member was looking at when they pressed it.
+      await announcing(who, 'share', () =>
+        handleShare(
+          {
+            user: who,
+            channel: channel.id as string,
+            messageTs: message.ts as string,
+            text: message.text as string,
+            conversation: action.value as string,
+          },
+          { destination: depsFor(who).destination, share: api.share, post: api.post },
+        ),
       );
       return;
     }

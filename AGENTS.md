@@ -51,7 +51,9 @@ companion offers any, and an empty temp one when it offers none. The choice is
 per conversation and named in the DM root. Each turn is still its own ACP
 session — nothing advertises `session/load` — so a follow-up is caught up from
 the DM thread under the same byte budget, and told that is a transcript rather
-than a resume (§4's third rung).
+than a resume (§4's third rung). An answer leaves the DM only when the member
+presses the button (§5): the gateway states where it may go, the shared post
+names who approved it, and a destination gone bad keeps the answer here.
 
 | package           | what it is                                                                                                                                                                         | depends on                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |

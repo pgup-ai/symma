@@ -88,7 +88,11 @@ export interface DmDeps {
     channel: string,
     text: string,
     threadTs?: string,
+    offerShare?: { conversation: string; destination: string },
   ) => Promise<{ channel: string; ts: string }>;
+  /** Where this conversation may publish (§5), or undefined for one that began
+   * in the DM and has nowhere to go back to. */
+  destination: (conversation: string) => Promise<{ channel: string; thread: string } | undefined>;
   log: (message: string) => void;
 }
 
@@ -221,11 +225,16 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return 'failed';
   }
 
+  // §5: the answer is a private draft, and the button is the only way it leaves
+  // the DM. A conversation that began here has nowhere to go back to, so it is
+  // offered nothing rather than a button that would refuse itself.
+  const to = await deps.destination(conversation.id);
   // Slack refuses an empty message, so a quiet run would be reported as failed.
   await deps.post(
     conversation.dmChannel,
     answer.trim() || 'That finished without producing an answer.',
     conversation.rootThread,
+    ...(to ? [{ conversation: conversation.id, destination: `<#${to.channel}>` }] : []),
   );
   return existing ? 'resumed' : 'opened';
 }
