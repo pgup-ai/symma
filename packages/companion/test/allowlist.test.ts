@@ -12,7 +12,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import type { EndpointPresence } from '@symma/protocol';
+import type { AckControl, EndpointPresence } from '@symma/protocol';
+
+import { waitFor } from './wait.js';
 
 /** Writes where it was started, then stays up so the session does. The cwd is
  * the whole assertion: nothing else can show which directory won. */
@@ -20,15 +22,6 @@ const AGENT = `import { writeFileSync } from 'node:fs';
 writeFileSync('ran-here.txt', process.cwd());
 process.stdin.resume();
 `;
-
-const waitFor = async <T>(probe: () => Promise<T | undefined>, what: string): Promise<T> => {
-  for (let i = 0; i < 100; i++) {
-    const value = await probe().catch(() => undefined);
-    if (value !== undefined) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
 
 let gateway: ChildProcess | undefined;
 let companion: ChildProcess | undefined;
@@ -51,10 +44,11 @@ async function open(body: Record<string, unknown>): Promise<void> {
   await res.body?.cancel();
 }
 
-/** The refusal for one open, read off its own client leg. */
-async function refusalFor(
+/** The `opened` or `refused` control for one open, read off its own client leg. */
+async function controlFor(
+  kind: 'opened' | 'refused',
   body: Record<string, unknown>,
-): Promise<{ reason: string; code?: string }> {
+): Promise<AckControl> {
   const stream = await fetch(
     `${base}/api/sessions/${String(body.sessionId)}/stream?token=client-tok`,
   );
@@ -79,15 +73,11 @@ async function refusalFor(
   try {
     await open(body);
     return await waitFor(
-      async () => {
-        const found = lines
-          .map((line) => JSON.parse(line) as { kind: string; reason?: string; code?: string })
-          .find((control) => control.kind === 'refused');
-        return found
-          ? { reason: found.reason ?? '', ...(found.code ? { code: found.code } : {}) }
-          : undefined;
-      },
-      `a refusal for ${String(body.sessionId)}`,
+      async () =>
+        lines
+          .map((line) => JSON.parse(line) as AckControl)
+          .find((control) => control.kind === kind),
+      `${kind} for ${String(body.sessionId)}`,
     );
   } finally {
     await reader.cancel().catch(() => undefined);
@@ -182,17 +172,20 @@ describe('workspace allowlist', () => {
 
     // An id nobody offered is refused rather than resolved — the allowlist is
     // the boundary, so there is nothing to fall back to.
-    const unknown = await refusalFor({ sessionId: 'sid-unknown', workspace: 'deadbeefdead' });
+    const unknown = await controlFor('refused', {
+      sessionId: 'sid-unknown',
+      workspace: 'deadbeefdead',
+    });
     assert.equal(unknown.code, 'no_such_workspace');
 
     // And a review checkout must not be cloned on top of someone's working
     // tree; the loser of that would be their uncommitted work.
-    const both = await refusalFor({
+    const both = await controlFor('refused', {
       sessionId: 'sid-both',
       workspace: presence.workspaces![0]!.id,
       repo: 'https://example.invalid/repo.git',
     });
-    assert.match(both.reason, /cannot both be given/);
+    assert.match(both.reason ?? '', /cannot both be given/);
   });
 
   // Last, because proving the shutdown path means ending the companion.
@@ -201,7 +194,15 @@ describe('workspace allowlist', () => {
       (await (await fetch(`${base}/api/endpoints`, { headers: auth })).json()) as EndpointPresence[]
     ).find((entry) => entry.endpoint === 'ws')!;
 
-    await open({ sessionId: 'sid-in-mine', workspace: presence.workspaces![0]!.id });
+    const opened = await controlFor('opened', {
+      sessionId: 'sid-in-mine',
+      workspace: presence.workspaces![0]!.id,
+    });
+    // The ack carries the checkout path for a repo the companion cloned. An
+    // allowlisted root is the member's own, so keeping ids off the wire is
+    // undone if the path goes back on it in the reply.
+    assert.equal(opened.workspace, undefined, 'no local path came back with the ack');
+
     // The agent wrote its own cwd, so this is the directory that actually won —
     // not a temp one that happens to look right. Compared through `realpathSync`
     // because macOS hands back `/var` and a child reports `/private/var`.
@@ -214,8 +215,10 @@ describe('workspace allowlist', () => {
     // The dangerous half. `discard` is an `rmSync(recursive, force)` reached
     // from seven places, and a shutdown runs it for every live session — so
     // this is the member's checkout being deleted if ownership is not tracked.
+    // Registered before the signal so the ordering needs no reasoning about.
+    const closed = new Promise((resolve) => companion?.once('close', resolve));
     companion?.kill('SIGTERM');
-    await new Promise((resolve) => companion?.on('close', resolve));
+    await closed;
     assert.equal(existsSync(mine), true, 'the root itself survived');
     assert.equal(readFileSync(join(mine, 'source.txt'), 'utf8'), 'the work they asked about');
   });

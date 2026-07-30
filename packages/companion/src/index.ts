@@ -162,7 +162,9 @@ for (const entry of (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
   const path = resolve(entry);
   // Skipped with a reason rather than fatal, the same way an absent agent is:
   // one stale line in a config must not stop the machine answering at all.
-  if (!existsSync(path) || !statSync(path).isDirectory()) {
+  // `throwIfNoEntry` keeps that true for a path that goes away underneath us,
+  // which an `existsSync` before the `stat` would only narrow, not close.
+  if (!statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
     log(`skipping workspace ${entry}: not a directory`);
     continue;
   }
@@ -714,7 +716,11 @@ async function openSession(control: OpenControl): Promise<void> {
   sendControl({
     kind: 'opened',
     sessionId: control.sessionId,
-    workspace,
+    // Only a checkout we made. An allowlisted root is the member's own path,
+    // and §4 keeps those off the wire — the caller already knows the id it
+    // named, and the agent's cwd is that directory, so the `.` the client
+    // falls back to resolves there anyway.
+    ...(chosen ? {} : { workspace }),
     ...(spec.requirePlanMode ? { requirePlanMode: true } : {}),
     ...(spec.modelConfigCandidates ? { modelCandidates: spec.modelConfigCandidates(model) } : {}),
   });

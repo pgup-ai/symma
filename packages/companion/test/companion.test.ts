@@ -17,6 +17,8 @@ import { describe, it } from 'node:test';
 
 import { readJournalLines } from '@symma/gateway';
 
+import { waitFor } from './wait.js';
+
 // Scripted ACP agent: answers initialize/new/prompt like a real CLI, so the
 // black-box path (client → gateway → companion → agent and back) is exercised
 // with zero credentials.
@@ -92,15 +94,6 @@ const bare = (home: string): NodeJS.ProcessEnv => {
   for (const key of Object.keys(env)) if (key.startsWith('SYMMA_COMPANION_')) delete env[key];
   return env;
 };
-
-async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Promise<T> {
-  for (let i = 0; i < 100; i += 1) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`timed out waiting for ${what}`);
-}
 
 describe('relay e2e', () => {
   it('relays a full session client → gateway → companion → agent and back', async () => {
