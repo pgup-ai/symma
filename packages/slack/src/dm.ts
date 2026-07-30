@@ -18,12 +18,10 @@ export interface DmMessage {
 }
 
 /**
- * Whether a `message` event is a member speaking in their own DM.
- *
- * The bot's own posts arrive on this subscription, and answering one is an
- * infinite loop — the worst failure available on this path, so it is a function
- * with a test rather than a condition inside a handler. A `subtype` is an edit,
- * a delete or a join: a different shape carrying nothing to answer.
+ * Whether a `message` event is a member speaking in their own DM. A function
+ * with a test rather than a condition in the handler, because the bot's own
+ * posts arrive on this subscription and answering one is an infinite loop.
+ * A `subtype` is an edit, a delete or a join: nothing to answer.
  */
 export function isMemberDm(event: Record<string, unknown>): boolean {
   return (
@@ -54,12 +52,10 @@ export interface DmDeps {
 }
 
 /**
- * The root is the thread if there is one, otherwise this message — which is how
- * a top-level DM becomes a conversation whose root the member can reply under.
- *
- * A reply in a thread we did not open is left alone. Opening a conversation
- * rooted mid-thread would answer in a place the member is not expecting one, and
- * the ts they replied under is not a root we ever posted.
+ * A top-level message is its own root, which is what the member's replies then
+ * thread under. A reply in a thread the bot did not open is left alone: rooting
+ * a conversation mid-thread would answer where nobody is expecting one, under a
+ * ts the bot never posted.
  */
 export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutcome> {
   const rootThread = message.threadTs ?? message.ts;

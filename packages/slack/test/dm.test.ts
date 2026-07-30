@@ -72,8 +72,13 @@ describe('dm message', () => {
       await handleDm({ user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1' }, deps),
       'opened',
     );
-    assert.equal(turns[0]!.rootThread, '250.0');
-    assert.equal(turns[0]!.sourceChannel, undefined, 'no source to claim');
+    // The whole spec, not one absent key: asserting `sourceChannel === undefined`
+    // on a field the handler never sets could not have failed.
+    assert.deepEqual(turns[0], {
+      dmChannel: 'D-nel',
+      rootThread: '250.0',
+      slackEventId: 'Ev-1',
+    });
   });
 
   it('leaves alone a thread it did not open', async () => {

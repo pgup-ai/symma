@@ -90,42 +90,41 @@ const mint = async (slackUser: string): Promise<MintResult> => {
 
 const api = slackApi(botToken);
 
-/** A mention carries the member's Slack id, which is the trusted assertion of
- * who is asking — the same one `/connect` pairs on. */
-const mentionDeps = (user: string) => ({
-  budgetBytes,
-  log,
-  threadReplies: api.threadReplies,
-  openDm: api.openDm,
-  post: api.post,
-  // Read at the boundary rather than cast: an empty object is the gateway saying
-  // this thread has no conversation yet, which is the ordinary first mention.
-  find: async (sourceChannel: string, sourceThread: string) => {
-    const found = await ask<Partial<ConversationRef>>('/api/slack/conversation', {
+/** Everything either path needs, bound to the member's Slack id — the trusted
+ * assertion of who is asking, and the same one `/connect` pairs on. */
+const depsFor = (user: string) => {
+  // Both lookups read the same shape back and differ only in the key they ask
+  // by. Read at the boundary rather than cast: an empty object is the gateway
+  // saying this thread has no conversation, which is the ordinary first mention
+  // and also a DM thread the bot did not open.
+  const lookup = async (
+    path: string,
+    by: Record<string, string>,
+  ): Promise<ConversationRef | undefined> => {
+    const { id, dmChannel, rootThread, seenThroughTs } = await ask<Partial<ConversationRef>>(path, {
       user,
-      sourceChannel,
-      sourceThread,
+      ...by,
     });
-    const { id, dmChannel, rootThread, seenThroughTs } = found;
     if (!id || !dmChannel || !rootThread) return undefined;
     return { id, dmChannel, rootThread, ...(seenThroughTs ? { seenThroughTs } : {}) };
-  },
-  turn: (spec: Record<string, unknown>) =>
-    ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
-  findDm: async (dmChannel: string, rootThread: string) => {
-    const found = await ask<Partial<ConversationRef>>('/api/slack/dm', {
-      user,
-      dmChannel,
-      rootThread,
-    });
-    const { id, dmChannel: dm, rootThread: root, seenThroughTs } = found;
-    if (!id || !dm || !root) return undefined;
-    return { id, dmChannel: dm, rootThread: root, ...(seenThroughTs ? { seenThroughTs } : {}) };
-  },
-  seen: async (conversation: string, seenThroughTs: string) => {
-    await ask('/api/slack/seen', { user, conversation, seenThroughTs });
-  },
-});
+  };
+  return {
+    budgetBytes,
+    log,
+    threadReplies: api.threadReplies,
+    openDm: api.openDm,
+    post: api.post,
+    find: (sourceChannel: string, sourceThread: string) =>
+      lookup('/api/slack/conversation', { sourceChannel, sourceThread }),
+    findDm: (dmChannel: string, rootThread: string) =>
+      lookup('/api/slack/dm', { dmChannel, rootThread }),
+    turn: (spec: Record<string, unknown>) =>
+      ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+    seen: async (conversation: string, seenThroughTs: string) => {
+      await ask('/api/slack/seen', { user, conversation, seenThroughTs });
+    },
+  };
+};
 
 const connection = socketMode({
   appToken,
@@ -147,7 +146,7 @@ const connection = socketMode({
         if (typeof eventId !== 'string' || !isMemberDm(dm)) return;
         const user = dm.user as string;
         const channel = dm.channel as string;
-        const deps = mentionDeps(user);
+        const deps = depsFor(user);
         const outcome = await handleDm(
           {
             user,
@@ -178,9 +177,7 @@ const connection = socketMode({
         eventId,
       };
       try {
-        log(
-          `mention in ${event.channel}: ${await handleMention(mention, mentionDeps(event.user))}`,
-        );
+        log(`mention in ${event.channel}: ${await handleMention(mention, depsFor(event.user))}`);
       } catch (error) {
         // The envelope was acked before this ran, so Slack will not redeliver and
         // a throw would leave the member waiting on nothing. Telling them costs
