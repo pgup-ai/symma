@@ -11,6 +11,7 @@ import type { TurnTarget } from '@symma/protocol';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
+import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
   /** The DM channel, always a `D` id — resolved by Slack, not by us. */
@@ -78,12 +79,62 @@ export interface DmDeps {
   /** Drives one prompt to its answer on the member's machine. Rejects rather
    * than returning a failure, so the transport's own errors arrive intact. */
   run: (spec: RunSpec) => Promise<string>;
+  /** The DM thread itself, which is the durable transcript a follow-up is
+   * caught up from. Undefined when the bot cannot read the channel. */
+  threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
+  /** The same ceiling a mention's context runs under (§4). */
+  budgetBytes: number;
   post: (
     channel: string,
     text: string,
     threadTs?: string,
   ) => Promise<{ channel: string; ts: string }>;
   log: (message: string) => void;
+}
+
+/** Said to the agent, not the member: one that believes it still holds the files
+ * it opened will answer about a session that is gone. */
+const REPLAY =
+  'Earlier in this conversation, most recent last. This is a transcript, not a ' +
+  'session you can still reach — files you opened and commands you ran are gone, ' +
+  'so re-read anything you need.';
+
+/**
+ * §4's third rung, which is the only one reachable: `runRemotePrompt` closes its
+ * session when the prompt returns, and nothing here advertises `session/load`,
+ * so every follow-up is the "agents that cannot reload" case. The DM thread is
+ * the transcript — the messages the member can scroll — under the byte ceiling
+ * a mention's context already runs under.
+ *
+ * The member's own message is dropped: Slack returns the whole thread including
+ * the one being handled, and the prompt carries it once on its own. A thread
+ * that cannot be read catches nothing up rather than failing the turn.
+ */
+async function catchUp(
+  message: DmMessage,
+  conversation: ConversationRef,
+  deps: DmDeps,
+): Promise<{ context: string; note: string } | undefined> {
+  // Fails open, per the auxiliary rule: this is context, not the answer.
+  // `threadReplies` throws on a thread past its page cap and on any Slack error
+  // that is not a plain "cannot see it" — and a conversation long enough to
+  // reach that cap is precisely the one worth catching up.
+  const replies = await deps
+    .threadReplies(conversation.dmChannel, conversation.rootThread)
+    .catch((error: unknown) => {
+      deps.log(`catch-up skipped: ${String(error)}`);
+      return undefined;
+    });
+  const earlier = (replies ?? []).filter((reply) => reply.ts !== message.ts);
+  const snapshot = threadSnapshot(earlier, { budgetBytes: deps.budgetBytes });
+  if (!snapshot.text) return undefined;
+  return {
+    context: `${REPLAY}\n\n${snapshot.text}`,
+    note:
+      snapshot.omitted > 0
+        ? `Catching it up from this thread, minus ${String(snapshot.omitted)} earlier messages that did not fit.`
+        : 'Catching it up from this thread — it has the messages, not what it ran.',
+  };
 }
 
 /**
@@ -130,6 +181,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
+  const caught = existing ? await catchUp(message, conversation, deps) : undefined;
+
   // A run has twenty minutes to answer, so silence that long reads as broken.
   // §4 wants the scope in the DM root rather than guessed at, so the answer
   // says which project it is about — or that it can see no files at all, which
@@ -142,9 +195,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     : 'On it. It has no access to your files, so keep the question self-contained.';
   await deps.post(
     conversation.dmChannel,
-    existing
-      ? `${scope} Each turn is its own session, so it will not remember what came before.`
-      : scope,
+    caught ? `${scope} ${caught.note}` : scope,
     conversation.rootThread,
   );
 
@@ -155,7 +206,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       endpoint: decision.endpoint,
       agent: decision.agent,
       token: decision.token,
-      prompt: message.text,
+      prompt: caught ? `${caught.context}\n\n${message.text}` : message.text,
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
     });
   } catch (error) {

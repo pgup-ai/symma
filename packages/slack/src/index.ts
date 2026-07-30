@@ -226,6 +226,8 @@ const connection = socketMode({
               post: deps.post,
               endpoint: deps.endpoint,
               run: deps.run,
+              threadReplies: deps.threadReplies,
+              budgetBytes,
               log,
             },
           ),
