@@ -210,9 +210,6 @@ describe('dm message', () => {
   });
 
   it('catches a follow-up up from the thread, and says what that is worth', async () => {
-    // §4's third rung: the session that answered last is gone and nothing here
-    // advertises `session/load`, so the messages are replayed and the member is
-    // told that is what happened — not that it resumed.
     // Slack returns the whole thread, so the message being handled is in it too
     // — the same ts the handler was called with.
     const history: ThreadMessage[] = [
@@ -227,16 +224,14 @@ describe('dm message', () => {
     );
 
     assert.match(posts[0]!.text, /Catching it up from this thread/);
-    // The transcript reaches the agent ahead of the question, and says outright
-    // that it is a transcript — an agent that thinks it still holds the files it
-    // opened will answer about state it does not have.
+    // Ahead of the question, and marked as a transcript rather than state.
     assert.match(runs[0]!.prompt, /why is the deploy failing\?/);
     assert.match(runs[0]!.prompt, /transcript, not/);
     assert.ok(
       runs[0]!.prompt.endsWith('and now?'),
       'the question is last, after what came before it',
     );
-    // And the member's own new message is not replayed back at the agent.
+    // Once, not twice: the thread above contains it and so does the prompt.
     assert.equal(runs[0]!.prompt.match(/and now\?/g)?.length, 1);
   });
 

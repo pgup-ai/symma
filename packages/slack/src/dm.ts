@@ -92,33 +92,36 @@ export interface DmDeps {
   log: (message: string) => void;
 }
 
+/** Said to the agent, not the member: one that believes it still holds the files
+ * it opened will answer about a session that is gone. */
+const REPLAY =
+  'Earlier in this conversation, most recent last. This is a transcript, not a ' +
+  'session you can still reach — files you opened and commands you ran are gone, ' +
+  'so re-read anything you need.';
+
 /**
- * What a replacement session is told about the turns before it, and what the
- * member is told about that. §4 will not have an empty session passed off as a
- * resume: the messages survive, the tool state does not, and both are said.
+ * §4's third rung, which is the only one reachable: `runRemotePrompt` closes its
+ * session when the prompt returns, and nothing here advertises `session/load`,
+ * so every follow-up is the "agents that cannot reload" case. The DM thread is
+ * the transcript — the messages the member can scroll — under the byte ceiling
+ * a mention's context already runs under.
  *
- * The member's own message is dropped — Slack already has it, and the prompt
- * carries it once on its own. An unreadable thread catches nothing up rather
- * than failing the turn: an answer without history beats no answer.
+ * The member's own message is dropped: Slack returns the whole thread including
+ * the one being handled, and the prompt carries it once on its own. A thread
+ * that cannot be read catches nothing up rather than failing the turn.
  */
 async function catchUp(
   message: DmMessage,
   conversation: ConversationRef,
   deps: DmDeps,
-): Promise<{ context: string; said: string } | undefined> {
+): Promise<{ context: string; note: string } | undefined> {
   const replies = await deps.threadReplies(conversation.dmChannel, conversation.rootThread);
   const earlier = (replies ?? []).filter((reply) => reply.ts !== message.ts);
   const snapshot = threadSnapshot(earlier, { budgetBytes: deps.budgetBytes });
   if (!snapshot.text) return undefined;
   return {
-    context: [
-      'Earlier in this conversation, most recent last. This is a transcript, not',
-      'a session you can still reach — files you opened and commands you ran are',
-      'gone, so re-read anything you need.',
-      '',
-      snapshot.text,
-    ].join('\n'),
-    said:
+    context: `${REPLAY}\n\n${snapshot.text}`,
+    note:
       snapshot.omitted > 0
         ? `Catching it up from this thread, minus ${String(snapshot.omitted)} earlier messages that did not fit.`
         : 'Catching it up from this thread — it has the messages, not what it ran.',
@@ -169,11 +172,6 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
-  // §4's third rung. The session that answered last is gone — `runRemotePrompt`
-  // closes it — and no agent here advertises `session/load`, so a follow-up is
-  // caught up from the durable transcript instead. That transcript is the DM
-  // thread: the same messages the member can scroll, under the same byte
-  // ceiling a mention's context runs under.
   const caught = existing ? await catchUp(message, conversation, deps) : undefined;
 
   // A run has twenty minutes to answer, so silence that long reads as broken.
@@ -188,7 +186,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     : 'On it. It has no access to your files, so keep the question self-contained.';
   await deps.post(
     conversation.dmChannel,
-    [scope, caught?.said].filter(Boolean).join(' '),
+    caught ? `${scope} ${caught.note}` : scope,
     conversation.rootThread,
   );
 
