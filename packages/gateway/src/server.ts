@@ -807,12 +807,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     if (url.pathname === '/api/slack/turn') {
       const source = threadOf(body);
-      const { dmChannel, rootThread, slackEventId, endpoint, agent } = body as {
+      const { dmChannel, rootThread, slackEventId } = body as {
         dmChannel?: unknown;
         rootThread?: unknown;
         slackEventId?: unknown;
-        endpoint?: unknown;
-        agent?: unknown;
       };
       if (!source || !str(dmChannel) || !str(rootThread) || !str(slackEventId))
         return sendJson(res, 400, { error: 'request' });
@@ -826,8 +824,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           rootThread,
           sourceChannel: source[0],
           sourceThread: source[1],
-          ...(str(endpoint) ? { endpoint } : {}),
-          ...(str(agent) ? { agent } : {}),
         })) ??
         (await store.conversationForSource(owner, ...source));
       if (!conversation) return sendJson(res, 409, { error: 'conflict' });

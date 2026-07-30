@@ -30,6 +30,7 @@ function harness(over: {
     log: () => {},
     find: () => Promise.resolve(over.existing),
     threadReplies: () => Promise.resolve('replies' in over ? over.replies : THREAD),
+    openDm: () => Promise.resolve('D-nel'),
     post: (channel, text, threadTs) => {
       posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
       return Promise.resolve({ channel: 'D-nel', ts: '200.0' });
@@ -61,8 +62,8 @@ describe('app_mention', () => {
     // The channel supplied context, not consent (§5). Everything goes to the
     // member — addressed by user id, which Slack resolves to their DM.
     assert.equal(posts.length, 1);
-    assert.equal(posts[0]!.channel, 'U-nel');
-    assert.doesNotMatch(posts[0]!.channel, /^C-/, 'nothing is posted to a channel');
+    assert.equal(posts[0]!.channel, 'D-nel', 'the resolved DM, not a user id');
+    assert.doesNotMatch(posts[0]!.channel, /^[CU]-/, 'never a channel, never a raw user id');
     assert.match(posts[0]!.text, /the deploy is failing/, 'the thread came with it');
     assert.match(posts[0]!.text, /nothing goes back to the channel unless you say so/);
 
@@ -127,7 +128,7 @@ describe('app_mention', () => {
     // partial snapshot would look like a complete answer.
     const { deps, posts, turns } = harness({ replies: undefined });
     assert.equal(await handleMention(MENTION, deps), 'unreadable channel');
-    assert.equal(posts[0]!.channel, 'U-nel');
+    assert.equal(posts[0]!.channel, 'D-nel');
     assert.equal(
       posts[0]!.threadTs,
       undefined,

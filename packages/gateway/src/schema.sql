@@ -152,8 +152,15 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
 -- ADD COLUMN IF NOT EXISTS is idempotent, which is what keeps this file
 -- re-appliable and the migration runner still unbuilt.
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS seen_through_ts text;
-ALTER TABLE conversations
-  ADD COLUMN IF NOT EXISTS last_activity_at timestamptz NOT NULL DEFAULT now();
+-- Added nullable and backfilled, because `DEFAULT now()` would stamp every
+-- existing row with the moment of the migration and hand each of them a fresh
+-- 30 days — retention holding what it promised to forget. `created_at` is the
+-- honest floor: it errs toward forgetting sooner. Each statement is a no-op on
+-- second run, which is what keeps this file re-appliable.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_activity_at timestamptz;
+UPDATE conversations SET last_activity_at = created_at WHERE last_activity_at IS NULL;
+ALTER TABLE conversations ALTER COLUMN last_activity_at SET DEFAULT now();
+ALTER TABLE conversations ALTER COLUMN last_activity_at SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);
 CREATE INDEX IF NOT EXISTS endpoints_user_idx ON endpoints (user_id);

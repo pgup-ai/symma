@@ -45,8 +45,11 @@ export interface SlackApi {
   /** Oldest first. Undefined when the bot cannot see the channel at all, which
    * §4 wants said out loud rather than answered around. */
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
-  /** Returns the posted message's ts. `channel` may be a user id, which Slack
-   * resolves to the DM — so opening one needs no separate call. */
+  /** The member's DM channel. Slack's docs disagree about whether a user id can
+   * stand in as a channel — one page says it opens the DM, another says the
+   * message lands in the Slackbot conversation instead — so this asks. */
+  openDm: (user: string) => Promise<string>;
+  /** Returns the posted message's ts. `channel` is a real channel id. */
   post: (
     channel: string,
     text: string,
@@ -104,6 +107,13 @@ export function slackApi(token: string): SlackApi {
         if (error instanceof SlackError && UNREADABLE.has(error.code)) return undefined;
         throw error;
       }
+    },
+    async openDm(user) {
+      const { channel } = await call<{ channel?: { id?: string } }>(token, 'conversations.open', {
+        users: user,
+      });
+      if (!channel?.id) throw new SlackError('no channel', 'conversations.open');
+      return channel.id;
     },
     async post(channel, text, threadTs) {
       const sent = await call<{ channel: string; ts: string }>(token, 'chat.postMessage', {

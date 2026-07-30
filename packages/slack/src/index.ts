@@ -96,6 +96,7 @@ const mentionDeps = (user: string) => ({
   budgetBytes,
   log,
   threadReplies: api.threadReplies,
+  openDm: api.openDm,
   post: api.post,
   // Read at the boundary rather than cast: an empty object is the gateway saying
   // this thread has no conversation yet, which is the ordinary first mention.

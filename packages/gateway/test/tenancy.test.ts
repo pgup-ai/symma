@@ -1563,6 +1563,13 @@ describe('tenancy', () => {
         )
       ).rows.map((r: { column_name: string }) => r.column_name);
     try {
+      // A conversation from that release, opened long ago.
+      const old = await provision(url, { team: 'old', slackUser: 'old', endpoint: 'old-mac' });
+      await pool.query(
+        `INSERT INTO conversations (id, user_id, dm_channel_id, root_thread_ts, created_at)
+         VALUES ('conv-old', $1, 'D-old', '1.0', now() - interval '90 days')`,
+        [old.owner],
+      );
       // CASCADE takes the activity index with the column, which the re-apply has
       // to rebuild too.
       await pool.query(
@@ -1582,6 +1589,16 @@ describe('tenancy', () => {
         1,
         'and the index the drop cascaded away',
       );
+
+      // Backfilled from `created_at`, not stamped with the migration moment: the
+      // latter would hand every existing conversation a fresh 30 days and hold
+      // what retention promised to forget.
+      const store = await openStore(url, schema);
+      try {
+        assert.equal(await store.expireConversations(30), 1, 'a 90-day-old row is stale');
+      } finally {
+        await store.close();
+      }
 
       // Re-appliable, which is the property that lets this file stand in for a
       // migration runner at all.

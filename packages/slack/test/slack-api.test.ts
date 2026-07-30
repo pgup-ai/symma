@@ -89,9 +89,15 @@ describe('slack api', () => {
     );
   });
 
-  it('posts to a user id, which Slack resolves to their DM', async () => {
+  it('resolves a member to their DM channel before posting', async () => {
+    // Slack's docs disagree about whether a user id can stand in as a channel —
+    // one page says it opens the DM, another that the message lands in the
+    // Slackbot conversation. Asking is correct under either.
+    answers({ ok: true, channel: { id: 'D-nel' } });
+    assert.equal(await slackApi('xoxb-test').openDm('U-nel'), 'D-nel');
+
     answers({ ok: true, channel: 'D-nel', ts: '200.0' });
-    assert.deepEqual(await slackApi('xoxb-test').post('U-nel', 'hello'), {
+    assert.deepEqual(await slackApi('xoxb-test').post('D-nel', 'hello'), {
       channel: 'D-nel',
       ts: '200.0',
     });

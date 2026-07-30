@@ -52,9 +52,9 @@ replies and says how many it left out.
 
 ## Scope
 
-One command, deliberately. A chat surface that grows model, provider, directory
-and shell controls is support and security surface this workflow has not earned
-yet.
+One slash command, deliberately. A chat surface that grows model, provider,
+directory and shell controls is support and security surface this workflow has
+not earned yet — mentions are the interface, not commands.
 
 A mention supplies context and, later, a destination — never an answer. Work
 happens in the member's DM, and nothing returns to the channel without an

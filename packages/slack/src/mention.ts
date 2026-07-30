@@ -26,6 +26,7 @@ export interface MentionDeps {
    * deliver must not leave the thread marked read. */
   seen: (conversation: string, seenThroughTs: string) => Promise<void>;
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
+  openDm: (user: string) => Promise<string>;
   post: (
     channel: string,
     text: string,
@@ -75,7 +76,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     // its own channel and root — rather than pairing a user id with a thread ts
     // that belongs to a channel we did not name.
     await deps.post(
-      existing?.dmChannel ?? mention.user,
+      existing?.dmChannel ?? (await deps.openDm(mention.user)),
       'I can add you to this once I can read that channel — invite me to it, then mention me again.',
       existing?.rootThread,
     );
@@ -109,7 +110,8 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     return 'continued';
   }
 
-  const root = await deps.post(mention.user, opening(snapshot.text, snapshot.omitted));
+  const dm = await deps.openDm(mention.user);
+  const root = await deps.post(dm, opening(snapshot.text, snapshot.omitted));
   const { conversation, turn } = await deps.turn({
     sourceChannel: mention.channel,
     sourceThread: mention.threadTs,
