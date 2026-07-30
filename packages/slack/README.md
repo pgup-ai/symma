@@ -1,7 +1,8 @@
 # @symma/slack
 
-The bot. Holds one outbound WebSocket to Slack, answers `/connect`, and turns a
-mention into a private conversation.
+The bot. Holds one outbound WebSocket to Slack, answers `/connect`, turns a
+mention into a private conversation, and picks up replies in that conversation's
+DM thread.
 
 It spawns nothing and holds no agent credentials — it asks the gateway to mint a
 pairing code for whoever ran the command, and the member runs `symma pair` on the
@@ -12,8 +13,8 @@ machine they want to reach.
 **1. Create the app.** api.slack.com/apps → _Create New App_ → _From a manifest_,
 and paste [`app-manifest.json`](app-manifest.json). It asks for `commands` to run
 the slash command, `app_mentions:read` to hear a mention, `channels:history` and
-`groups:history` to read the thread it came from, and `chat:write` with `im:write`
-to answer in the member's DM. **Re-paste it after a change and reinstall**, or the
+`groups:history` to read the thread it came from, `im:history` to hear a reply in
+the DM, and `chat:write` with `im:write` to answer there. **Re-paste it after a change and reinstall**, or the
 new scopes are not granted.
 
 **2. Make an app-level token.** _Basic Information_ → _App-Level Tokens_ →

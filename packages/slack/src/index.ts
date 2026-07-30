@@ -5,6 +5,7 @@
  * has not earned any of them yet.
  */
 import { connectMessage, runConnect, type MintResult } from './connect.js';
+import { handleDm, isMemberDm } from './dm.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import { slackApi } from './slack-api.js';
 import { socketMode } from './socket-mode.js';
@@ -111,6 +112,16 @@ const mentionDeps = (user: string) => ({
   },
   turn: (spec: Record<string, unknown>) =>
     ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+  findDm: async (dmChannel: string, rootThread: string) => {
+    const found = await ask<Partial<ConversationRef>>('/api/slack/dm', {
+      user,
+      dmChannel,
+      rootThread,
+    });
+    const { id, dmChannel: dm, rootThread: root, seenThroughTs } = found;
+    if (!id || !dm || !root) return undefined;
+    return { id, dmChannel: dm, rootThread: root, ...(seenThroughTs ? { seenThroughTs } : {}) };
+  },
   seen: async (conversation: string, seenThroughTs: string) => {
     await ask('/api/slack/seen', { user, conversation, seenThroughTs });
   },
@@ -131,6 +142,25 @@ const connection = socketMode({
           thread_ts?: unknown;
         };
       };
+      if (event?.type === 'message') {
+        const dm = event as Record<string, unknown>;
+        if (typeof eventId !== 'string' || !isMemberDm(dm)) return;
+        const user = dm.user as string;
+        const channel = dm.channel as string;
+        const deps = mentionDeps(user);
+        const outcome = await handleDm(
+          {
+            user,
+            channel,
+            ts: dm.ts as string,
+            ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
+            eventId,
+          },
+          { find: deps.findDm, turn: deps.turn, post: deps.post },
+        );
+        log(`dm in ${channel}: ${outcome}`);
+        return;
+      }
       if (event?.type !== 'app_mention') return;
       if (
         typeof eventId !== 'string' ||

@@ -25,6 +25,7 @@
         "chat:write",
         "commands",
         "groups:history",
+        "im:history",
         "im:write"
       ]
     }
@@ -34,7 +35,7 @@
     "org_deploy_enabled": false,
     "token_rotation_enabled": false,
     "event_subscriptions": {
-      "bot_events": ["app_mention"]
+      "bot_events": ["app_mention", "message.im"]
     }
   }
 }

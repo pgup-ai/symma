@@ -48,6 +48,13 @@ export interface Store {
     sourceChannel: string,
     sourceThread: string,
   ): Promise<Conversation | undefined>;
+  /** The conversation a DM thread root names (§4). A reply resumes what that
+   * root already is, rather than whatever the member most recently touched. */
+  conversationForDm(
+    owner: Owner,
+    dmChannel: string,
+    rootThread: string,
+  ): Promise<Conversation | undefined>;
   /** Opens one. Undefined when a concurrent mention opened it first, which the
    * caller answers by adopting that one — the DM root it already posted is the
    * only cost, and it is a message in the member's own DM. */
@@ -242,17 +249,27 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return row && { id: row.id, dmChannel: row.dm, rootThread: row.root, ...seen(row.seen) };
     },
+    async conversationForDm(owner, dmChannel, rootThread) {
+      const row = await one<{ id: string; dm: string; root: string; seen: string | null }>(
+        `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen
+           FROM conversations
+          WHERE user_id = $1 AND dm_channel_id = $2 AND root_thread_ts = $3`,
+        [owner, dmChannel, rootThread],
+      );
+      return row && { id: row.id, dmChannel: row.dm, rootThread: row.root, ...seen(row.seen) };
+    },
     async openConversation(owner, spec) {
       const id = randomUUID();
       // DO NOTHING rather than an upsert: the loser of a race must not overwrite
       // the winner's DM root with its own, which would strand the thread the
-      // member is already looking at.
+      // member is already looking at. Untargeted, because which constraint
+      // catches the race depends on where the conversation came from — a mention
+      // collides on the source thread, a DM on its own root.
       const landed = await one<{ id: string }>(
         `INSERT INTO conversations (id, user_id, dm_channel_id, root_thread_ts,
                                     source_channel_id, source_thread_ts, endpoint_id, agent)
          VALUES ($1, $2, $3, $4, $5, $6, $7, coalesce($8, ''))
-         ON CONFLICT (user_id, source_channel_id, source_thread_ts)
-           WHERE source_channel_id IS NOT NULL DO NOTHING
+         ON CONFLICT DO NOTHING
          RETURNING id`,
         [
           id,
@@ -744,6 +761,7 @@ export function localStore(
     // One member, holding a token they configured: nobody to introduce.
     ensureMember: needsDatabase,
     conversationForSource: needsDatabase,
+    conversationForDm: needsDatabase,
     openConversation: needsDatabase,
     recordTurn: needsDatabase,
     conversationOwnedBy: needsDatabase,
