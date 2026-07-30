@@ -24,39 +24,30 @@ function required(name: string): string {
   return value;
 }
 
-/** Asks the gateway, which owns the member lookup and the code. The bot never
- * reaches the database: `(team, user) → owner` is the check §6 marks as the
- * entire security model, and it belongs on the side that can enforce it. */
-function mintThrough(
-  gateway: string,
-  token: string,
-  team: string,
-): (slackUser: string) => Promise<MintResult> {
-  return async (slackUser) => {
-    const res = await fetch(`${gateway}/api/slack/pair`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ team, user: slackUser }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (res.status === 403) return { ok: false, why: 'not-a-member' };
-    if (!res.ok) throw new Error(`gateway said ${res.status}`);
-    return { ok: true, ...((await res.json()) as { code: string; expiresInMinutes: number }) };
-  };
-}
-
-/** Everything the bot asks the gateway goes through one door, authenticated with
- * the shared secret — it never reaches the database (§6). */
-function gatewayCall(gateway: string, token: string, team: string) {
-  return async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
-    const res = await fetch(`${gateway}${path}`, {
+/**
+ * Every call the bot makes to the gateway: one door, the shared secret, and the
+ * team it speaks for. The bot never reaches the database — `(team, user) → owner`
+ * is the check §6 calls the whole security model, and it belongs on the side that
+ * can enforce it.
+ *
+ * `send` hands back the response because pairing reads a status: a 403 there is
+ * an answer about the member, not an outage. `ask` covers everything else.
+ */
+function gatewayClient(base: string, token: string, team: string) {
+  const send = (path: string, body: Record<string, unknown>): Promise<Response> =>
+    fetch(`${base}${path}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ team, ...body }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) throw new Error(`${path}: ${res.status}`);
-    return (await res.json()) as T;
+  return {
+    send,
+    ask: async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
+      const res = await send(path, body);
+      if (!res.ok) throw new Error(`${path}: ${res.status}`);
+      return (await res.json()) as T;
+    },
   };
 }
 
@@ -86,8 +77,16 @@ const botToken = required('SYMMA_SLACK_BOT_TOKEN');
 // and an honest account of what it left out.
 const budgetBytes = Number(process.env.SYMMA_SLACK_BUDGET_BYTES) || 24_000;
 
-const mint = mintThrough(gateway, gatewayToken, team);
-const ask = gatewayCall(gateway, gatewayToken, team);
+const { send, ask } = gatewayClient(gateway, gatewayToken, team);
+
+const mint = async (slackUser: string): Promise<MintResult> => {
+  const res = await send('/api/slack/pair', { user: slackUser });
+  // A real answer about this member, not an outage: their account is not active.
+  if (res.status === 403) return { ok: false, why: 'not-a-member' };
+  if (!res.ok) throw new Error(`/api/slack/pair: ${res.status}`);
+  return { ok: true, ...((await res.json()) as { code: string; expiresInMinutes: number }) };
+};
+
 const api = slackApi(botToken);
 
 /** A mention carries the member's Slack id, which is the trusted assertion of
