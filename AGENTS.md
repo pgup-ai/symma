@@ -45,20 +45,23 @@ is here, and no rule below depends on reading it.
 ## Packages
 
 §8 "Package graph". All five exist; `@symma/slack` arrived with M3d and carries
-`/connect`, mentions, DM turns and §3's presence copy so far — no agent runs
-from it yet, so a turn is recorded and answered with why, not with an answer.
+`/connect`, mentions, DM turns, §3's presence copy, and driving one prompt on
+the member's own machine. Each turn is its own ACP session — §4's resume is
+next, and a follow-up says so rather than passing an empty session off as one.
 
-| package           | what it is                                                                                                                                                                         | depends on          |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `@symma/protocol` | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                   |
-| `@symma/gateway`  | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol            |
-| `symma`           | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, pairing, login service                                                                | protocol            |
-| `@symma/client`   | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol            |
-| `@symma/slack`    | the bot — Socket Mode, `/connect`, mentions, DM turns, presence copy; no agent credentials, spawns nothing                                                                         | protocol, Slack SDK |
+| package           | what it is                                                                                                                                                                         | depends on                  |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `@symma/protocol` | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                           |
+| `@symma/gateway`  | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol                    |
+| `symma`           | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, pairing, login service                                                                | protocol                    |
+| `@symma/client`   | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol                    |
+| `@symma/slack`    | the bot — Socket Mode, `/connect`, mentions, DM turns, presence copy; no agent credentials, spawns nothing                                                                         | client, protocol, Slack SDK |
 
-`@symma/client` is what jbot-review consumes at runtime. It exists so the
-reviewer never imports gateway internals to dial a gateway — the inversion this
-extraction fixes, prevented from recurring.
+`@symma/client` is what jbot-review consumes at runtime, and now what the bot
+does too. It exists so neither imports gateway internals to dial a gateway — the
+inversion this extraction fixes, prevented from recurring. The bot holding no
+credential of its own is why it is handed a short-lived, member-scoped one per
+turn rather than a standing key.
 
 ## Invariants — do not break these
 

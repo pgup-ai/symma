@@ -1155,6 +1155,29 @@ describe('tenancy', () => {
       // And it is named whatever it calls itself while running, rather than
       // whatever it was called on the day it was paired.
       assert.equal(live.device, 'zoe-laptop');
+      // The agent comes with it: the bot never learns what a companion offers
+      // except by being told, and an unoffered name is refused anyway.
+      assert.equal(live.agent, 'kilo');
+
+      // The credential is the point of the route. The bot holds none of its
+      // own (§6), so this is the whole of how it acts as Zoe — and the earlier
+      // assertions above are `deepEqual`, which is what proves a refusal mints
+      // nothing at all.
+      const asZoe = (): Promise<Response> =>
+        fetch(`${base}/api/endpoints`, {
+          headers: { authorization: `Bearer ${String(live.token)}` },
+        });
+      const listed = (await (await asZoe()).json()) as { endpoint: string }[];
+      assert.ok(
+        listed.some((e) => e.endpoint === 'zoe-laptop'),
+        'the minted token reaches her own endpoints',
+      );
+
+      // And stops the moment she is not a member. Without the join it would
+      // keep working until it expired, which is half an hour of someone who
+      // has been removed still reaching their laptop through the bot.
+      await pool.query(`UPDATE users SET deactivated_at = now() WHERE id = $1`, [zoe.owner]);
+      assert.equal((await asZoe()).status, 401, 'deactivation is immediate, not on expiry');
 
       // A member the bot has never seen is created by the asking, and has none.
       assert.deepEqual(await ask('newcomer'), {});

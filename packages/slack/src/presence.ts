@@ -5,7 +5,7 @@
  * and it sends people to whoever administers symma when the answer was to open
  * their own lid.
  */
-import type { EndpointState, SelectedEndpoint } from '@symma/protocol';
+import type { EndpointState, TurnTarget } from '@symma/protocol';
 
 /** Named mid-sentence throughout: the device is empty until a companion
  * attaches and says what it is, so it cannot be trusted to open one. */
@@ -19,16 +19,38 @@ const said: Record<Exclude<EndpointState, 'ready'>, (device: string) => string> 
   unstarted: (device) => `Nothing has ever connected from ${device}. Run \`symma\` on it first.`,
 };
 
-/** Why this turn cannot run, in the member's words. Undefined when it can. */
-export function refusal(selected: SelectedEndpoint | undefined): string | undefined {
-  if (!selected) {
-    return 'You have not paired a machine yet. Run `/connect` and I will send you a code.';
+/** What a log records when a turn did not run. `unusable` is the machine being
+ * there and the turn still not going — nothing advertised to run, or no token. */
+export type RefusalReason = Exclude<EndpointState, 'ready'> | 'unpaired' | 'unusable';
+
+/**
+ * Whether this turn can run, and what to say when it cannot.
+ *
+ * One decision rather than a question and a separate lookup, so a caller cannot
+ * read "no refusal" as "go" and then find it has nothing to go with.
+ */
+export type TurnDecision =
+  | { run: true; endpoint: string; agent: string; token: string }
+  | { run: false; why: string; because: RefusalReason };
+
+export function decideTurn(target: TurnTarget | undefined): TurnDecision {
+  if (!target) {
+    return {
+      run: false,
+      because: 'unpaired',
+      why: 'You have not paired a machine yet. Run `/connect` and I will send you a code.',
+    };
   }
-  if (selected.state === 'ready') return undefined;
-  const device = selected.device || 'your machine';
+  const device = target.device || 'your machine';
+  const unusable = `${device} is not available right now.`;
+  if (target.state === 'ready') {
+    return target.agent && target.token
+      ? { run: true, endpoint: target.endpoint, agent: target.agent, token: target.token }
+      : { run: false, because: 'unusable', why: unusable };
+  }
   // The union is a compile-time claim about the wire, and a gateway one release
   // ahead is exactly when it stops holding. Refusing is the safe read of a word
   // this build has never heard: nothing here can tell that it is safe to run.
-  const line: ((device: string) => string) | undefined = said[selected.state];
-  return line ? line(device) : `${device} is not available right now.`;
+  const line: ((device: string) => string) | undefined = said[target.state];
+  return { run: false, because: target.state, why: line ? line(device) : unusable };
 }

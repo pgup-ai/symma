@@ -44,6 +44,11 @@ import { VIEWER_HTML } from './viewer.js';
 // SSE comment ping; keeps idle viewer connections alive through proxies.
 const HEARTBEAT_MS = 25_000;
 
+// Comfortably past `@symma/client`'s 20-minute prompt deadline, because the
+// token is held for the whole run and a mid-run expiry would fail the ingest
+// rather than the prompt. Short only relative to the standing kind.
+const TURN_TOKEN_TTL_MINUTES = 30;
+
 const port =
   Number(process.env.SYMMA_GATEWAY_PORT) > 0 ? Number(process.env.SYMMA_GATEWAY_PORT) : 8790;
 const dataDir = process.env.SYMMA_GATEWAY_DATA?.trim() || 'gateway-data';
@@ -864,12 +869,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     if (url.pathname === '/api/slack/endpoint') {
       const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
+      const selected = selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf);
       // `{}` is "nothing paired", the shape the conversation lookups already use.
-      return sendJson(
-        res,
-        200,
-        selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf) ?? {},
-      );
+      if (!selected) return sendJson(res, 200, {});
+      // The agent the endpoint offers first. §5's picker replaces this with the
+      // member's own choice; until then it is whatever their companion found.
+      const agent = live.get(selected.endpoint)?.agents[0]?.agent;
+      if (selected.state !== 'ready' || !agent) return sendJson(res, 200, selected);
+      // Minted here rather than on every presence check: this route is asked
+      // once per turn that is going to run, so a refusal costs no credential.
+      const token = await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES);
+      return sendJson(res, 200, { ...selected, agent, token });
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —

@@ -2,14 +2,15 @@
  * A message in the DM. Replying in a thread resumes the conversation that thread
  * is; a top-level message opens one with no source (§4).
  *
- * No agent runs yet — this records the turn, and either says so or says why the
- * machine it would run on cannot take it (§3). Driving the prompt is the next
- * slice, and a turn that exists is what it will pick up.
+ * The turn is recorded, then run on the member's own machine — or refused in
+ * §3's words when that machine cannot take it. Each turn is its own ACP session
+ * for now: §4's resume lands next, and a follow-up says plainly that it is
+ * starting fresh rather than passing an empty session off as a resume.
  */
-import type { EndpointState, SelectedEndpoint } from '@symma/protocol';
+import type { TurnTarget } from '@symma/protocol';
 
 import type { ConversationRef } from './mention.js';
-import { refusal } from './presence.js';
+import { decideTurn, type RefusalReason } from './presence.js';
 
 export interface DmMessage {
   /** The DM channel, always a `D` id — resolved by Slack, not by us. */
@@ -18,6 +19,10 @@ export interface DmMessage {
   /** Absent on a top-level message, which is then its own root. */
   threadTs?: string;
   eventId: string;
+  /** What they actually asked. Slack's own text, unresolved: mention and channel
+   * ids stay as they arrived, since expanding them costs a lookup per id and the
+   * agent is being asked about code, not about who `<@U123>` is. */
+  text: string;
 }
 
 /**
@@ -38,29 +43,45 @@ export function isMemberDm(event: Record<string, unknown>): boolean {
   );
 }
 
-/** `refused` names which of §3's states stopped it, so a support question is
- * answered by the log line rather than by asking the member what they saw. */
+/** `refused` names why, so a support question is answered by the log line rather
+ * than by asking the member what they saw. `failed` is a run that started. */
 export type DmOutcome =
   | 'resumed'
   | 'opened'
   | 'already handled'
-  | `refused: ${Exclude<EndpointState, 'ready'> | 'unpaired'}`;
+  | 'nothing to ask'
+  | 'failed'
+  | `refused: ${RefusalReason}`;
+
+/** One prompt on one machine. No workspace or model: §4's picker and §5's model
+ * override are both still the agent's own defaults. */
+export interface RunSpec {
+  conversation: string;
+  endpoint: string;
+  agent: string;
+  token: string;
+  prompt: string;
+}
 
 export interface DmDeps {
   find: (dmChannel: string, rootThread: string) => Promise<ConversationRef | undefined>;
-  /** The machine this member's agent would run on, whatever state it is in.
-   * Undefined when they have paired none. */
-  endpoint: () => Promise<SelectedEndpoint | undefined>;
+  /** The machine this member's agent would run on, whatever state it is in, and
+   * what it takes to drive it. Undefined when they have paired none. */
+  endpoint: () => Promise<TurnTarget | undefined>;
   turn: (spec: {
     dmChannel: string;
     rootThread: string;
     slackEventId: string;
   }) => Promise<{ conversation: ConversationRef; turn?: string }>;
+  /** Drives one prompt to its answer on the member's machine. Rejects rather
+   * than returning a failure, so the transport's own errors arrive intact. */
+  run: (spec: RunSpec) => Promise<string>;
   post: (
     channel: string,
     text: string,
     threadTs?: string,
   ) => Promise<{ channel: string; ts: string }>;
+  log: (message: string) => void;
 }
 
 /**
@@ -88,15 +109,65 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // silence rather than a second acknowledgement.
   if (!turn) return 'already handled';
 
-  // Asked after the dedupe gate, so a redelivery costs the gateway nothing.
-  const selected = await deps.endpoint();
-  const state = selected?.state ?? 'unpaired';
+  // A file with no caption is an ordinary Slack message and an empty prompt.
+  // Caught before the ask below, so it neither mints a token nor spends twenty
+  // minutes of someone's laptop finding out there was no question.
+  if (!message.text.trim()) {
+    await deps.post(
+      conversation.dmChannel,
+      'Send me a question with that and I will pass it to your agent.',
+      conversation.rootThread,
+    );
+    return 'nothing to ask';
+  }
+
+  // Asked after the dedupe gate, so a redelivery costs the gateway nothing —
+  // and, since asking mints a token, costs it no credential either.
+  const decision = decideTurn(await deps.endpoint());
+  if (!decision.run) {
+    await deps.post(conversation.dmChannel, decision.why, conversation.rootThread);
+    return `refused: ${decision.because}`;
+  }
+
+  // The envelope was acked long ago and a run has twenty minutes to answer.
+  // Silence for that long reads as broken, and a follow-up is told outright
+  // that it starts fresh — §4 would rather say so than pass an empty session
+  // off as a resume.
   await deps.post(
     conversation.dmChannel,
-    refusal(selected) ??
-      'Got it. Your agent is not wired up to answer yet — that lands in the next change.',
+    existing
+      ? 'On it. Each turn runs in its own session for now, so it will not remember earlier messages in this thread.'
+      : 'On it.',
     conversation.rootThread,
   );
-  if (state !== 'ready') return `refused: ${state}`;
+
+  let answer: string;
+  try {
+    answer = await deps.run({
+      conversation: conversation.id,
+      endpoint: decision.endpoint,
+      agent: decision.agent,
+      token: decision.token,
+      prompt: message.text,
+    });
+  } catch (error) {
+    // Posted into the thread they are watching rather than left to the socket's
+    // catch, which answers at the DM root where this reply is not.
+    deps.log(`run failed: ${String(error)}`);
+    await deps.post(
+      conversation.dmChannel,
+      'That run did not finish. Send it again and I will retry.',
+      conversation.rootThread,
+    );
+    return 'failed';
+  }
+
+  // Slack refuses an empty message, so a run that finished quietly would throw
+  // here and be reported as a failure it was not.
+  await deps.post(
+    conversation.dmChannel,
+    answer.trim() || 'That finished without producing an answer.',
+    conversation.rootThread,
+  );
   return existing ? 'resumed' : 'opened';
 }
