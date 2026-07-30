@@ -42,9 +42,8 @@ export interface EndpointPresence {
   quit?: boolean;
   /** Verify this endpoint's envelopes against it; absent means it signs none. */
   publicKey?: string;
-  /** What it will run in, as advertised. Absent means nothing is offered and a
-   * session gets the empty temp directory — the companion advertises and the
-   * caller selects (§4), so this is the only place the choices come from. */
+  /** What it will run in, as advertised. The companion advertises and the
+   * caller selects (§4), so this is where the choices come from. */
   workspaces?: EndpointWorkspace[];
 }
 
@@ -85,8 +84,7 @@ export interface TurnTarget extends SelectedEndpoint {
  */
 export interface EndpointWorkspace {
   id: string;
-  /** For whoever is choosing between them. The machine is theirs; the id is
-   * not meant to be read, and the path is not theirs to be told over a wire. */
+  /** For whoever is choosing between them — the id is not meant to be read. */
   label: string;
 }
 
@@ -97,8 +95,7 @@ export interface HelloControl {
   agents: EndpointAgent[];
   maxSessions: number;
   /** Roots this companion will run in. Absent from every companion published
-   * before the field existed, which reads as "none" — the same empty temp
-   * directory they give today. */
+   * before the field existed, which reads as "none". */
   workspaces?: EndpointWorkspace[];
   /** Wire generation this companion speaks. Absent from every companion
    * published before the field existed, which is precisely generation 0. */
@@ -244,10 +241,10 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         endpoint: raw.endpoint,
         agent: raw.agent,
         ...(str(raw.model) ? { model: raw.model } : {}),
-        // Carried through unchecked on purpose: an id is only ever a key into
-        // the companion's allowlist, never resolved into a path, so a name it
-        // does not know is refused there rather than validated into silence
-        // here — which would open in a temp dir the caller never asked for.
+        // Unchecked on purpose: an id is only ever a key into the companion's
+        // allowlist, never resolved into a path, so a name it does not know is
+        // refused there rather than dropped here into a temp directory the
+        // caller never asked for.
         ...(str(raw.workspace) ? { workspace: raw.workspace } : {}),
         ...(str(raw.repo) ? { repo: raw.repo } : {}),
         ...(str(raw.ref) ? { ref: raw.ref } : {}),

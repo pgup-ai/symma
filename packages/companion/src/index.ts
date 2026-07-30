@@ -151,17 +151,15 @@ const agentNames = (
 /**
  * §4's allowlist: the roots this machine's owner will let an agent run in,
  * configured here and nowhere else. Keyed by the opaque id that crosses the
- * wire, so a path never has to — an unknown id is refused rather than resolved.
- *
- * The id is derived from the resolved path so it survives a restart: a
- * conversation that pinned one yesterday still names the same directory today.
+ * wire, derived from the resolved path so it survives a restart — a
+ * conversation that pinned one yesterday still names that directory today.
  */
 const workspaces = new Map<string, { id: string; label: string; path: string }>();
 for (const entry of (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
   .split(',')
   .map((raw) => raw.trim())
   .filter(Boolean)) {
-  const path = resolve(entry.startsWith('~/') ? join(homedir(), entry.slice(2)) : entry);
+  const path = resolve(entry);
   // Skipped with a reason rather than fatal, the same way an absent agent is:
   // one stale line in a config must not stop the machine answering at all.
   if (!existsSync(path) || !statSync(path).isDirectory()) {
@@ -497,8 +495,8 @@ function hello(): HelloControl {
     agents: [...agents.keys()].map((agent) => ({ agent })),
     maxSessions,
     version: PROTOCOL_VERSION,
-    // Ids and labels only. Advertising nothing is the ordinary case and reads
-    // as the empty temp directory every session has had until now.
+    // Advertising nothing is the ordinary case, and the one every session has
+    // had until now.
     ...(workspaces.size > 0
       ? { workspaces: [...workspaces.values()].map(({ id, label }) => ({ id, label })) }
       : {}),
@@ -513,11 +511,10 @@ function hello(): HelloControl {
 }
 
 /**
- * Every directory this process made for a session, and the whole reason
- * `discard` is safe. Once an allowlisted workspace can be a session's cwd, the
- * `rmSync` below would otherwise delete the source the member asked about — and
- * it is reached from seven places, so a flag at each of them is one forgotten
- * argument away from doing it. Membership here is the argument.
+ * Every directory this process made for a session, and the only thing `discard`
+ * will remove. Once an allowlisted root can be a session's cwd, that `rmSync`
+ * would delete the source the member asked about — and it is reached from seven
+ * places, so a flag at each is one forgotten argument away from doing it.
  */
 const madeHere = new Set<string>();
 
@@ -535,8 +532,8 @@ function discard(workspace: string, cleanup?: () => void): void {
   } catch {
     /* best effort */
   }
-  // Cleanup runs either way — it reclaims the agent's temp home, not this
-  // directory — but only a directory we created is ours to remove.
+  // Above this on purpose: cleanup reclaims the agent's temp home, which exists
+  // whether or not the directory below is ours.
   if (!madeHere.delete(workspace)) return;
   try {
     rmSync(workspace, { recursive: true, force: true });
