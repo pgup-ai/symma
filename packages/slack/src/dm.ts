@@ -52,8 +52,8 @@ export type DmOutcome =
   | 'failed'
   | `refused: ${RefusalReason}`;
 
-/** One prompt on one machine. No workspace or model: §4's picker and §5's model
- * override are both still the agent's own defaults. */
+/** One prompt on one machine, in one of the directories it offers. No model:
+ * §5's override is still whatever the agent defaults to. */
 export interface RunSpec {
   conversation: string;
   endpoint: string;
