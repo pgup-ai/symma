@@ -45,19 +45,32 @@ export interface EndpointPresence {
 }
 
 /**
- * What is known of one endpoint, as a single word (§3). `dropped` is a detach
- * recent enough to be coming back on its own, `asleep` is one that is not, and
- * `unstarted` is paired but never once attached. The words a member reads are
- * the caller's to pick — this is only the fact, which is why the two sit on
- * opposite sides of the wire.
+ * What is known of one endpoint, as a single word (§3). `busy` is attached with
+ * every session slot taken; `dropped` is a detach recent enough to be coming
+ * back on its own, `asleep` is one that is not, and `unstarted` is paired but
+ * never once attached. The words a member reads are the caller's to pick — this
+ * is only the fact, which is why the two sit on opposite sides of the wire.
  */
-export type EndpointState = 'ready' | 'dropped' | 'quit' | 'asleep' | 'unstarted';
+export type EndpointState = 'ready' | 'busy' | 'dropped' | 'quit' | 'asleep' | 'unstarted';
 
 /** One endpoint and its state: what a turn should be routed to. */
 export interface SelectedEndpoint {
   endpoint: string;
   device: string;
   state: EndpointState;
+}
+
+/**
+ * What a caller needs to run one turn on the selected endpoint. Both extras are
+ * absent unless the machine can take it: there is nothing to hand over for a
+ * laptop that is shut, and a refusal should not cost a credential.
+ */
+export interface TurnTarget extends SelectedEndpoint {
+  /** One the endpoint advertised — an unoffered name is refused (§5). */
+  agent?: string;
+  /** Short-lived and scoped to the member, so the caller can act as them for
+   * the length of one turn and no longer. */
+  token?: string;
 }
 
 export interface HelloControl {

@@ -44,6 +44,10 @@ import { VIEWER_HTML } from './viewer.js';
 // SSE comment ping; keeps idle viewer connections alive through proxies.
 const HEARTBEAT_MS = 25_000;
 
+// Past `@symma/client`'s 20-minute prompt deadline: the token is held for the
+// whole run, and expiring mid-run would fail the ingest rather than the prompt.
+const TURN_TOKEN_TTL_MINUTES = 30;
+
 const port =
   Number(process.env.SYMMA_GATEWAY_PORT) > 0 ? Number(process.env.SYMMA_GATEWAY_PORT) : 8790;
 const dataDir = process.env.SYMMA_GATEWAY_DATA?.trim() || 'gateway-data';
@@ -864,12 +868,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     if (url.pathname === '/api/slack/endpoint') {
       const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
+      const selected = selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf);
       // `{}` is "nothing paired", the shape the conversation lookups already use.
-      return sendJson(
-        res,
-        200,
-        selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf) ?? {},
-      );
+      if (!selected) return sendJson(res, 200, {});
+      // The agent the endpoint offers first. §5's picker replaces this with the
+      // member's own choice; until then it is whatever their companion found.
+      const agent = live.get(selected.endpoint)?.agents[0]?.agent;
+      if (selected.state !== 'ready' || !agent) return sendJson(res, 200, selected);
+      // Minted here rather than on every presence check: this route is asked
+      // once per turn that is going to run, so a refusal costs no credential.
+      const token = await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES);
+      return sendJson(res, 200, { ...selected, agent, token });
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —
@@ -1143,22 +1152,30 @@ function dropRevokedLegs(): void {
 }
 setInterval(dropRevokedLegs, REVOCATION_SWEEP_MS).unref();
 
-if (retentionDays > 0) {
+// Two policies, not one. Retention is a promise about the member's data and
+// `RETENTION_DAYS=0` turns it off on purpose; an expired token is a dead
+// credential, which nobody sets out to keep. They shared a switch until the
+// second one existed to notice.
+if (retentionDays > 0 || databaseUrl) {
   // A sweep that fails is a promise unkept, not a reason to stop serving — same
   // fail-open contract as the journal, and identical at boot and on the
   // interval so a transient failure does not decide whether we start.
   const sweep = (): void => {
     void (async () => {
-      const doomed = await store.expireSessions(retentionDays, relay.liveSessions());
-      forgetSessions(doomed);
-      if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
-      // Conversations forget on their own clock — last use, not age — and take
-      // their turns and session links with them. Nothing to unlink: frames belong
-      // to sessions, which the sweep above already answered for.
-      const gone = await store.expireConversations(retentionDays);
-      if (gone > 0) log(`retention: expired ${gone} conversations`);
+      if (retentionDays > 0) {
+        const doomed = await store.expireSessions(retentionDays, relay.liveSessions());
+        forgetSessions(doomed);
+        if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+        // Conversations forget on their own clock — last use, not age — and take
+        // their turns and session links with them. Nothing to unlink: frames belong
+        // to sessions, which the sweep above already answered for.
+        const gone = await store.expireConversations(retentionDays);
+        if (gone > 0) log(`retention: expired ${gone} conversations`);
+      }
+      const stale = await store.expireTokens();
+      if (stale > 0) log(`dropped ${stale} expired tokens`);
     })().catch((error: unknown) =>
-      log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
+      log(`sweep failed: ${error instanceof Error ? error.message : String(error)}`),
     );
   };
   // Both modes, at boot as well as on the interval: retention is a product

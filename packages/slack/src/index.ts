@@ -4,10 +4,11 @@
  * and shell controls are all support and security surface, and this workflow
  * has not earned any of them yet.
  */
-import type { SelectedEndpoint } from '@symma/protocol';
+import { runRemotePrompt } from '@symma/client';
+import type { TurnTarget } from '@symma/protocol';
 
 import { connectMessage, runConnect, type MintResult } from './connect.js';
-import { handleDm, isMemberDm } from './dm.js';
+import { handleDm, isMemberDm, type RunSpec } from './dm.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import { slackApi } from './slack-api.js';
 import { socketMode } from './socket-mode.js';
@@ -145,14 +146,34 @@ const depsFor = (user: string) => {
     endpoint: async () => {
       // Read at the boundary like the lookups above: an empty object is the
       // gateway saying this member has paired nothing at all.
-      const { endpoint, device, state } = await ask<Partial<SelectedEndpoint>>(
+      const { endpoint, device, state, agent, token } = await ask<Partial<TurnTarget>>(
         '/api/slack/endpoint',
         { user },
       );
       // `device` is deliberately not required — it is empty until a companion
-      // attaches and says what it is, and the copy already covers that.
-      return endpoint && state ? { endpoint, device: device ?? '', state } : undefined;
+      // attaches and says what it is, and the copy already covers that. `agent`
+      // and `token` arrive only when the machine can take the turn.
+      if (!endpoint || !state) return undefined;
+      return {
+        endpoint,
+        device: device ?? '',
+        state,
+        ...(agent ? { agent } : {}),
+        ...(token ? { token } : {}),
+      };
     },
+    run: ({ conversation, endpoint, agent, token, prompt }: RunSpec) =>
+      runRemotePrompt(
+        // One run per conversation, so the journal and viewer group a member's
+        // thread rather than scattering it a session at a time.
+        { gateway, token, endpoint, agent, runId: conversation },
+        // The sentinel every agent spec reads as "whatever you default to".
+        // §5 wants a per-agent default and an override; neither is chosen here.
+        'default',
+        prompt,
+        `slack-${conversation}`,
+        log,
+      ),
     seen: async (conversation: string, seenThroughTs: string) => {
       await ask('/api/slack/seen', { user, conversation, seenThroughTs });
     },
@@ -187,8 +208,16 @@ const connection = socketMode({
               ts: dm.ts as string,
               ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
               eventId,
+              text: typeof dm.text === 'string' ? dm.text : '',
             },
-            { find: deps.findDm, turn: deps.turn, post: deps.post, endpoint: deps.endpoint },
+            {
+              find: deps.findDm,
+              turn: deps.turn,
+              post: deps.post,
+              endpoint: deps.endpoint,
+              run: deps.run,
+              log,
+            },
           ),
         );
         return;

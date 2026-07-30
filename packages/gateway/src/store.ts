@@ -93,6 +93,10 @@ export interface Store {
    * replying in is not stale. Turns and session links cascade; frames belong to
    * sessions, which `expireSessions` already answers for. */
   expireConversations(olderThanDays: number): Promise<number>;
+  /** Drops tokens that are already past their expiry. They cannot authenticate,
+   * so keeping them only grows the table — and a Slack turn mints one every
+   * time a member asks something. */
+  expireTokens(): Promise<number>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
    * supersedes this owner's outstanding code. Undefined if they are no longer an
    * active member, which the caller must answer rather than hand back a code
@@ -131,6 +135,10 @@ export interface Store {
     model?: string;
   }): Promise<void>;
   markSeen(endpoint: string): Promise<void>;
+  /** A client token for this member, good for `ttlMinutes`. The bot holds no
+   * credential of its own (§6), so this is how it acts as whoever is asking —
+   * for one turn, rather than by being handed a standing key to them. */
+  mintClientToken(owner: Owner, ttlMinutes: number): Promise<string>;
   /** Every endpoint this owner has paired, attached or not. The relay knows only
    * the ones that attached since it started, so without this a gateway restart
    * would tell a paired member they had never paired. */
@@ -207,9 +215,15 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
   return {
     async ownerForClientToken(token) {
       const row = await one<{ subject_id: string }>(
-        `SELECT subject_id FROM tokens
-          WHERE hash = $1 AND subject_kind = 'client' AND revoked_at IS NULL
-            AND (expires_at IS NULL OR expires_at > now())`,
+        // Joined through to the member for the reason `endpointForToken` gives:
+        // deactivation stops the token by construction, rather than by every
+        // path that sets `deactivated_at` remembering to revoke it. It matters
+        // more now that a Slack turn mints one of these per member.
+        `SELECT t.subject_id FROM tokens t
+           JOIN users u ON u.id = t.subject_id
+          WHERE t.hash = $1 AND t.subject_kind = 'client' AND t.revoked_at IS NULL
+            AND u.deactivated_at IS NULL
+            AND (t.expires_at IS NULL OR t.expires_at > now())`,
         [hashToken(token)],
       );
       return row?.subject_id;
@@ -480,6 +494,21 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         device,
         lastSeenAt: seen?.getTime() ?? null,
       }));
+    },
+    async expireTokens() {
+      const { rowCount } = await pool.query(
+        `DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < now()`,
+      );
+      return rowCount ?? 0;
+    },
+    async mintClientToken(owner, ttlMinutes) {
+      const token = randomUUID();
+      await pool.query(
+        `INSERT INTO tokens (id, subject_kind, subject_id, hash, expires_at)
+         VALUES ($1, 'client', $2, $3, now() + make_interval(mins => $4))`,
+        [randomUUID(), owner, hashToken(token), ttlMinutes],
+      );
+      return token;
     },
     async markSeen(endpoint) {
       await pool.query(`UPDATE endpoints SET last_seen_at = now() WHERE id = $1`, [endpoint]);
@@ -763,6 +792,8 @@ export function localStore(
     deleteSessionRow: () => Promise.resolve([]),
     markSeen: () => Promise.resolve(),
     endpointsFor: needsDatabase,
+    mintClientToken: needsDatabase,
+    expireTokens: needsDatabase,
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
       // One tenant, so a run and session id are the whole key here.

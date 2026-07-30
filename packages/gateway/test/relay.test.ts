@@ -51,6 +51,10 @@ describe('relay', () => {
     });
 
     assert.equal(relay.stateOf(seen({ online: true })), 'ready');
+    // Attached with every slot taken. The open would come back `at_capacity`
+    // either way; this is the difference between telling a member to wait and
+    // telling them it broke.
+    assert.equal(relay.stateOf(seen({ online: true, activeSessions: 2, maxSessions: 2 })), 'busy');
     // A goodbye outranks the clock: a machine they quit is not coming back on
     // its own, however recently it was here.
     assert.equal(relay.stateOf(seen({ quit: true, lastSeenAt: Date.now() })), 'quit');

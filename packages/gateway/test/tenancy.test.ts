@@ -1155,12 +1155,112 @@ describe('tenancy', () => {
       // And it is named whatever it calls itself while running, rather than
       // whatever it was called on the day it was paired.
       assert.equal(live.device, 'zoe-laptop');
+      // The agent comes with it: the bot never learns what a companion offers
+      // except by being told, and an unoffered name is refused anyway.
+      assert.equal(live.agent, 'kilo');
+
+      // The credential is the point of the route. The bot holds none of its
+      // own (§6), so this is the whole of how it acts as Zoe — and the earlier
+      // assertions above are `deepEqual`, which is what proves a refusal mints
+      // nothing at all.
+      const asZoe = (): Promise<Response> =>
+        fetch(`${base}/api/endpoints`, {
+          headers: { authorization: `Bearer ${String(live.token)}` },
+        });
+      const listed = (await (await asZoe()).json()) as { endpoint: string }[];
+      assert.ok(
+        listed.some((e) => e.endpoint === 'zoe-laptop'),
+        'the minted token reaches her own endpoints',
+      );
+
+      // And stops the moment she is not a member. Without the join it would
+      // keep working until it expired, which is half an hour of someone who
+      // has been removed still reaching their laptop through the bot.
+      await pool.query(`UPDATE users SET deactivated_at = now() WHERE id = $1`, [zoe.owner]);
+      assert.equal((await asZoe()).status, 401, 'deactivation is immediate, not on expiry');
 
       // A member the bot has never seen is created by the asking, and has none.
       assert.deepEqual(await ask('newcomer'), {});
     } finally {
       detach?.();
       await pool.end();
+    }
+  });
+
+  it('drops tokens once they expire, and keeps the ones that have not', async () => {
+    const url = pg.getConnectionUri();
+    const ann = await provision(url, { team: 'tokens', slackUser: 'ann', endpoint: 'ann-laptop' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    const rows = async (): Promise<number> =>
+      (
+        await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM tokens WHERE subject_id = $1`,
+          [ann.owner],
+        )
+      ).rows[0]!.n;
+    try {
+      // A Slack turn mints one of these per question and nothing else ever
+      // deletes them, so `expires_at` was stopping them authenticating but not
+      // accumulating.
+      const dead = await store.mintClientToken(ann.owner, -1);
+      const alive = await store.mintClientToken(ann.owner, 30);
+      const before = await rows();
+
+      await store.expireTokens();
+      assert.equal(await rows(), before - 1, 'the expired row is gone, not just refused');
+      assert.equal(await store.ownerForClientToken(dead), undefined);
+      assert.equal(await store.ownerForClientToken(alive), ann.owner);
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('sweeps dead tokens even with retention switched off', async () => {
+    // `RETENTION_DAYS=0` is a decision about the member's data. An expired token
+    // is a dead credential nobody set out to keep, and the sweep that drops them
+    // used to live inside that switch — so turning retention off kept them all.
+    const url = pg.getConnectionUri();
+    const zed = await provision(url, { team: 'nokeep', slackUser: 'zed', endpoint: 'zed-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    const dir = mkdtempSync(join(tmpdir(), 'symma-nokeep-'));
+    let child: ChildProcess | undefined;
+    try {
+      await store.mintClientToken(zed.owner, -1);
+      child = spawn(
+        process.execPath,
+        ['--conditions=symma-source', '--import', 'tsx', 'packages/gateway/src/server.ts'],
+        {
+          env: {
+            ...process.env,
+            SYMMA_GATEWAY_PORT: String(28000 + Math.floor(Math.random() * 1000)),
+            SYMMA_GATEWAY_DATA: dir,
+            SYMMA_GATEWAY_HOST: '127.0.0.1',
+            SYMMA_GATEWAY_DATABASE_URL: url,
+            SYMMA_GATEWAY_RETENTION_DAYS: '0',
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      child.stdout?.resume();
+      child.stderr?.resume();
+
+      // The sweep runs at boot as well as on the interval, so booting is the
+      // whole test — nothing here ever has to speak HTTP to it.
+      await waitFor(async () => {
+        const { rowCount } = await pool.query(
+          `SELECT 1 FROM tokens WHERE subject_id = $1 AND expires_at < now()`,
+          [zed.owner],
+        );
+        return rowCount === 0 ? true : undefined;
+      }, 'a gateway with retention off still drops the expired token');
+    } finally {
+      child?.kill('SIGKILL');
+      rmSync(dir, { recursive: true, force: true });
+      await pool.end();
+      await store.close();
     }
   });
 

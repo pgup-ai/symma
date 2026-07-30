@@ -223,7 +223,12 @@ export function createRelay(options: RelayOptions = {}) {
      * separates a blip from a closed lid is the same one sessions resume in —
      * a caller should not have to learn it to say "asleep". */
     stateOf(presence: EndpointPresence): EndpointState {
-      if (presence.online) return 'ready';
+      // Attached and full is not the same as attached. The open would come back
+      // `at_capacity` either way; saying so first is the difference between a
+      // member being told to wait and being told it broke.
+      if (presence.online) {
+        return presence.activeSessions >= presence.maxSessions ? 'busy' : 'ready';
+      }
       if (presence.quit) return 'quit';
       return Date.now() - (presence.lastSeenAt ?? 0) < resumeWindowMs ? 'dropped' : 'asleep';
     },

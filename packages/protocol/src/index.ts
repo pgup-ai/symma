@@ -101,6 +101,7 @@ export {
   type RelayControl,
   type SelectedEndpoint,
   type SendLine,
+  type TurnTarget,
 } from './relay-control.js';
 
 export { onFatalSignal } from './signal-cleanup.js';
