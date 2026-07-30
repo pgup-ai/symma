@@ -90,6 +90,26 @@ const mint = async (slackUser: string): Promise<MintResult> => {
 
 const api = slackApi(botToken);
 
+/**
+ * Runs a handler and makes sure the member hears about it either way.
+ *
+ * The envelope is acked before the handler runs, so Slack will not redeliver and
+ * a throw would leave them waiting on nothing. Shared rather than repeated: the
+ * mention path grew this after a review and the DM path was written without it,
+ * which is one copy going stale immediately.
+ */
+async function announcing(user: string, what: string, run: () => Promise<string>): Promise<void> {
+  try {
+    log(`${what}: ${await run()}`);
+  } catch (error) {
+    log(`${what} failed: ${String(error)}`);
+    await api
+      .openDm(user)
+      .then((dm) => api.post(dm, 'That did not get through — say it again and I will retry.'))
+      .catch(() => log('could not tell them it failed either'));
+  }
+}
+
 /** Everything either path needs, bound to the member's Slack id — the trusted
  * assertion of who is asking, and the same one `/connect` pairs on. */
 const depsFor = (user: string) => {
@@ -147,17 +167,18 @@ const connection = socketMode({
         const user = dm.user as string;
         const channel = dm.channel as string;
         const deps = depsFor(user);
-        const outcome = await handleDm(
-          {
-            user,
-            channel,
-            ts: dm.ts as string,
-            ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
-            eventId,
-          },
-          { find: deps.findDm, turn: deps.turn, post: deps.post },
+        await announcing(user, `dm in ${channel}`, () =>
+          handleDm(
+            {
+              user,
+              channel,
+              ts: dm.ts as string,
+              ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
+              eventId,
+            },
+            { find: deps.findDm, turn: deps.turn, post: deps.post },
+          ),
         );
-        log(`dm in ${channel}: ${outcome}`);
         return;
       }
       if (event?.type !== 'app_mention') return;
@@ -176,21 +197,9 @@ const connection = socketMode({
         threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
         eventId,
       };
-      try {
-        log(`mention in ${event.channel}: ${await handleMention(mention, depsFor(event.user))}`);
-      } catch (error) {
-        // The envelope was acked before this ran, so Slack will not redeliver and
-        // a throw would leave the member waiting on nothing. Telling them costs
-        // one message and is the only definite outcome available; a durable queue
-        // is the fuller answer and is not built.
-        log(`mention in ${event.channel} failed: ${String(error)}`);
-        await api
-          .openDm(event.user)
-          .then((dm) =>
-            api.post(dm, 'That did not get through — mention me again and I will retry.'),
-          )
-          .catch(() => log('could not tell them it failed either'));
-      }
+      await announcing(mention.user, `mention in ${mention.channel}`, () =>
+        handleMention(mention, depsFor(mention.user)),
+      );
       return;
     }
     if (envelope.type !== 'slash_commands') return;

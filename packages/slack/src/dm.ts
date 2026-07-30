@@ -35,7 +35,7 @@ export function isMemberDm(event: Record<string, unknown>): boolean {
   );
 }
 
-export type DmOutcome = 'resumed' | 'opened' | 'already handled' | 'not ours';
+export type DmOutcome = 'resumed' | 'opened' | 'already handled';
 
 export interface DmDeps {
   find: (dmChannel: string, rootThread: string) => Promise<ConversationRef | undefined>;
@@ -52,15 +52,20 @@ export interface DmDeps {
 }
 
 /**
- * A top-level message is its own root, which is what the member's replies then
- * thread under. A reply in a thread the bot did not open is left alone: rooting
- * a conversation mid-thread would answer where nobody is expecting one, under a
- * ts the bot never posted.
+ * A message becomes a turn in the conversation its root names, and opens one
+ * where that root has none — whether the root is this message or the thread it
+ * sits in.
+ *
+ * An earlier version ignored a threaded reply whose root it did not recognise,
+ * on the grounds that the bot never posted that ts. That reasoning did not hold:
+ * a top-level DM is already rooted at a ts the bot never posted, so the two
+ * branches disagreed. It also dropped a real message — replies are delivered
+ * concurrently, so one sent straight after its root can arrive while the root is
+ * still being opened, and being ignored is the one answer a member cannot see.
  */
 export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutcome> {
   const rootThread = message.threadTs ?? message.ts;
   const existing = await deps.find(message.channel, rootThread);
-  if (!existing && message.threadTs) return 'not ours';
 
   const { conversation, turn } = await deps.turn({
     dmChannel: message.channel,

@@ -81,19 +81,22 @@ describe('dm message', () => {
     });
   });
 
-  it('leaves alone a thread it did not open', async () => {
-    // Rooting a conversation mid-thread would answer somewhere the member is not
-    // expecting one, under a ts the bot never posted.
+  it('answers a reply whose root it has not seen yet', async () => {
+    // Slack delivers concurrently, so a reply sent straight after its root can
+    // arrive while that root is still being opened. Ignoring it would drop a real
+    // message, and being ignored is the one answer a member cannot see.
     const { deps, posts, turns } = harness();
     assert.equal(
       await handleDm(
         { user: 'U-nel', channel: 'D-nel', ts: '250.0', threadTs: '111.0', eventId: 'Ev-1' },
         deps,
       ),
-      'not ours',
+      'opened',
     );
-    assert.deepEqual(posts, []);
-    assert.deepEqual(turns, [], 'and records nothing for a thread that is not ours');
+    // Rooted at the thread, so it joins whatever that root becomes rather than
+    // starting a second conversation beside it.
+    assert.equal(turns[0]!.rootThread, '111.0');
+    assert.equal(posts.length, 1);
   });
 
   it('says nothing twice when Slack redelivers', async () => {
