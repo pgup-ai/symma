@@ -42,6 +42,10 @@ export interface EndpointPresence {
   quit?: boolean;
   /** Verify this endpoint's envelopes against it; absent means it signs none. */
   publicKey?: string;
+  /** What it will run in, as advertised. Absent means nothing is offered and a
+   * session gets the empty temp directory — the companion advertises and the
+   * caller selects (§4), so this is the only place the choices come from. */
+  workspaces?: EndpointWorkspace[];
 }
 
 /**
@@ -73,12 +77,29 @@ export interface TurnTarget extends SelectedEndpoint {
   token?: string;
 }
 
+/**
+ * A directory the companion's owner is willing to let an agent run in, named by
+ * an opaque id (§4). The path never crosses the wire: the allowlist *is* the
+ * local-filesystem boundary, and a remotely-supplied path would be a straight
+ * escape out of the temp dir the review path relies on.
+ */
+export interface EndpointWorkspace {
+  id: string;
+  /** For whoever is choosing between them. The machine is theirs; the id is
+   * not meant to be read, and the path is not theirs to be told over a wire. */
+  label: string;
+}
+
 export interface HelloControl {
   kind: 'hello';
   endpoint: string;
   device: string;
   agents: EndpointAgent[];
   maxSessions: number;
+  /** Roots this companion will run in. Absent from every companion published
+   * before the field existed, which reads as "none" — the same empty temp
+   * directory they give today. */
+  workspaces?: EndpointWorkspace[];
   /** Wire generation this companion speaks. Absent from every companion
    * published before the field existed, which is precisely generation 0. */
   version?: number;
@@ -96,6 +117,10 @@ export interface OpenControl {
   endpoint: string;
   agent: string;
   model?: string;
+  /** One the endpoint advertised. Absent is the no-workspace mode §4 keeps for
+   * general questions: an empty temp directory, as the review path has always
+   * had. Never a path — see `EndpointWorkspace`. */
+  workspace?: string;
   repo?: string;
   ref?: string;
   base?: string;
@@ -103,9 +128,16 @@ export interface OpenControl {
 
 /** Why an open was refused; `reason` stays the human sentence. Whether to retry
  * is the caller's decision, not ours. */
-export type RefusalCode = 'offline' | 'at_capacity' | 'no_such_agent' | 'session_in_use';
+export type RefusalCode =
+  'offline' | 'at_capacity' | 'no_such_agent' | 'no_such_workspace' | 'session_in_use';
 
-const REFUSAL_CODES: RefusalCode[] = ['offline', 'at_capacity', 'no_such_agent', 'session_in_use'];
+const REFUSAL_CODES: RefusalCode[] = [
+  'offline',
+  'at_capacity',
+  'no_such_agent',
+  'no_such_workspace',
+  'session_in_use',
+];
 
 export interface AckControl {
   kind: 'opened' | 'refused';
@@ -167,6 +199,19 @@ export function parseRelayControl(line: string): RelayControl | undefined {
           return undefined;
         sessions = raw.sessions as string[];
       }
+      // Rejected rather than dropped, like `sessions` above: the ids are the
+      // companion's own derivation, so a malformed one is its bug and not
+      // something to answer by quietly advertising nothing.
+      let workspaces: EndpointWorkspace[] | undefined;
+      if (raw.workspaces !== undefined) {
+        if (!Array.isArray(raw.workspaces)) return undefined;
+        workspaces = [];
+        for (const entry of raw.workspaces as Record<string, unknown>[]) {
+          if (!entry || !str(entry.id) || !isSafeId(entry.id) || !str(entry.label))
+            return undefined;
+          workspaces.push({ id: entry.id, label: entry.label });
+        }
+      }
       // A JSON number or nothing. Strict where `maxSessions` beside it coerces,
       // because `Number(true)` is 1: a gate on compatibility must not be
       // passable by a value that means nothing. Anything else drops to
@@ -184,6 +229,7 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         maxSessions: max,
         ...(version ? { version } : {}),
         ...(sessions ? { sessions } : {}),
+        ...(workspaces ? { workspaces } : {}),
         ...(str(raw.publicKey) ? { publicKey: raw.publicKey } : {}),
       };
     }
@@ -198,6 +244,11 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         endpoint: raw.endpoint,
         agent: raw.agent,
         ...(str(raw.model) ? { model: raw.model } : {}),
+        // Carried through unchecked on purpose: an id is only ever a key into
+        // the companion's allowlist, never resolved into a path, so a name it
+        // does not know is refused there rather than validated into silence
+        // here — which would open in a temp dir the caller never asked for.
+        ...(str(raw.workspace) ? { workspace: raw.workspace } : {}),
         ...(str(raw.repo) ? { repo: raw.repo } : {}),
         ...(str(raw.ref) ? { ref: raw.ref } : {}),
         ...(str(raw.base) ? { base: raw.base } : {}),

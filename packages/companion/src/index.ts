@@ -8,6 +8,7 @@
  * Spec: docs/design/m2-acp-gateway.md (M2a).
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   accessSync,
   constants,
@@ -22,7 +23,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir, hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 import {
   claudeAcpSpec,
@@ -147,6 +148,30 @@ const agentNames = (
   .split(',')
   .map((entry) => entry.trim())
   .filter(Boolean);
+/**
+ * §4's allowlist: the roots this machine's owner will let an agent run in,
+ * configured here and nowhere else. Keyed by the opaque id that crosses the
+ * wire, so a path never has to — an unknown id is refused rather than resolved.
+ *
+ * The id is derived from the resolved path so it survives a restart: a
+ * conversation that pinned one yesterday still names the same directory today.
+ */
+const workspaces = new Map<string, { id: string; label: string; path: string }>();
+for (const entry of (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
+  .split(',')
+  .map((raw) => raw.trim())
+  .filter(Boolean)) {
+  const path = resolve(entry.startsWith('~/') ? join(homedir(), entry.slice(2)) : entry);
+  // Skipped with a reason rather than fatal, the same way an absent agent is:
+  // one stale line in a config must not stop the machine answering at all.
+  if (!existsSync(path) || !statSync(path).isDirectory()) {
+    log(`skipping workspace ${entry}: not a directory`);
+    continue;
+  }
+  const id = createHash('sha256').update(path).digest('hex').slice(0, 12);
+  workspaces.set(id, { id, label: basename(path), path });
+}
+
 const maxSessions =
   Number(process.env.SYMMA_COMPANION_MAX_SESSIONS) > 0
     ? Number(process.env.SYMMA_COMPANION_MAX_SESSIONS)
@@ -472,6 +497,11 @@ function hello(): HelloControl {
     agents: [...agents.keys()].map((agent) => ({ agent })),
     maxSessions,
     version: PROTOCOL_VERSION,
+    // Ids and labels only. Advertising nothing is the ordinary case and reads
+    // as the empty temp directory every session has had until now.
+    ...(workspaces.size > 0
+      ? { workspaces: [...workspaces.values()].map(({ id, label }) => ({ id, label })) }
+      : {}),
     // Live agents this process still holds — a fresh start sends none, so the
     // relay fails any stale sessions instead of leaving them as zombies. Opens
     // still cloning count: they have no agent yet, but the relay holds them and
@@ -482,6 +512,21 @@ function hello(): HelloControl {
   };
 }
 
+/**
+ * Every directory this process made for a session, and the whole reason
+ * `discard` is safe. Once an allowlisted workspace can be a session's cwd, the
+ * `rmSync` below would otherwise delete the source the member asked about — and
+ * it is reached from seven places, so a flag at each of them is one forgotten
+ * argument away from doing it. Membership here is the argument.
+ */
+const madeHere = new Set<string>();
+
+function tempWorkspace(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'symma-companion-'));
+  madeHere.add(dir);
+  return dir;
+}
+
 /** Reclaim a session's temp state. Never throws: a cleanup failure must not
  * abort a shutdown loop, an exit handler, or a refusal path. */
 function discard(workspace: string, cleanup?: () => void): void {
@@ -490,6 +535,9 @@ function discard(workspace: string, cleanup?: () => void): void {
   } catch {
     /* best effort */
   }
+  // Cleanup runs either way — it reclaims the agent's temp home, not this
+  // directory — but only a directory we created is ours to remove.
+  if (!madeHere.delete(workspace)) return;
   try {
     rmSync(workspace, { recursive: true, force: true });
   } catch {
@@ -534,8 +582,19 @@ async function openSession(control: OpenControl): Promise<void> {
   const spec = agents.get(control.agent);
   if (!spec) return refuse(`agent ${control.agent} not offered`, 'no_such_agent');
 
+  // §4: only a name this endpoint advertised, and a miss is refused rather than
+  // resolved — the allowlist is the boundary, so there is nothing to fall back
+  // to. The agent runs in the member's own source from here, which is what
+  // makes the read-only floor below load-bearing rather than theoretical.
+  const chosen = control.workspace ? workspaces.get(control.workspace) : undefined;
+  if (control.workspace && !chosen)
+    return refuse(`workspace ${control.workspace} not offered`, 'no_such_workspace');
+  // Cloning a review checkout on top of someone's working tree is not what
+  // either caller meant, and the loser would be their uncommitted work.
+  if (chosen && control.repo) return refuse('a workspace and a repo cannot both be given');
+
   const model = control.model ?? 'default';
-  const workspace = mkdtempSync(join(tmpdir(), 'symma-companion-'));
+  const workspace = chosen ? chosen.path : tempWorkspace();
   if (control.repo) {
     // The clone is the one await in this function: hold a slot across it so it
     // counts against capacity and a close can cancel it. Everything after runs
