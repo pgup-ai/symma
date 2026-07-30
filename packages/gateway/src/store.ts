@@ -22,6 +22,15 @@ export interface LiveSession extends SessionRef {
  * `unknown` is the mistyped code, which a log is worth telling apart. */
 export type PairingResult = { ok: true; owner: Owner } | { ok: false; why: 'unknown' | 'spent' };
 
+/** One endpoint row: paired, whether or not anything ever attached to it. A null
+ * `lastSeenAt` has never run — pairing writes the row, attaching writes the
+ * time. */
+export interface PairedEndpoint {
+  id: string;
+  device: string;
+  lastSeenAt: number | null;
+}
+
 export interface Conversation {
   id: string;
   dmChannel: string;
@@ -124,9 +133,8 @@ export interface Store {
   markSeen(endpoint: string): Promise<void>;
   /** Every endpoint this owner has paired, attached or not. The relay knows only
    * the ones that attached since it started, so without this a gateway restart
-   * would tell a paired member they had never paired. A null `lastSeenAt` is one
-   * that has never run — pairing writes the row, attaching writes the time. */
-  endpointsFor(owner: Owner): Promise<{ id: string; device: string; lastSeenAt: number | null }[]>;
+   * would tell a paired member they had never paired. */
+  endpointsFor(owner: Owner): Promise<PairedEndpoint[]>;
   /** For an open the companion went on to refuse: the row outlives the relay's
    * in-memory session otherwise, and blocks the id from ever being reused.
    * Returns what it removed, like every other delete here — frames can already

@@ -144,6 +144,19 @@ describe('dm message', () => {
     }
   });
 
+  it('refuses a state this build has never heard of', async () => {
+    // A gateway one release ahead. The union is a compile-time claim about the
+    // wire, so the cast is the point: a deploy skew is when it stops holding,
+    // and throwing here would take out every DM until the bot caught up.
+    const ahead = { ...READY, state: 'hibernating' } as unknown as SelectedEndpoint;
+    const { deps, posts } = harness({ endpoint: ahead });
+    assert.equal(
+      String(await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1' }, deps)),
+      'refused: hibernating',
+    );
+    assert.match(posts[0]!.text, /not available right now/);
+  });
+
   it('has words for a machine that never said what it is called', async () => {
     // `device_name` defaults to empty and the row exists from the moment of
     // pairing, so this is the ordinary state of one that has not started — not

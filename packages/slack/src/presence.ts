@@ -25,5 +25,10 @@ export function refusal(selected: SelectedEndpoint | undefined): string | undefi
     return 'You have not paired a machine yet. Run `/connect` and I will send you a code.';
   }
   if (selected.state === 'ready') return undefined;
-  return said[selected.state](selected.device || 'your machine');
+  const device = selected.device || 'your machine';
+  // The union is a compile-time claim about the wire, and a gateway one release
+  // ahead is exactly when it stops holding. Refusing is the safe read of a word
+  // this build has never heard: nothing here can tell that it is safe to run.
+  const line: ((device: string) => string) | undefined = said[selected.state];
+  return line ? line(device) : `${device} is not available right now.`;
 }

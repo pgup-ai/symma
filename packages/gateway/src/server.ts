@@ -28,6 +28,7 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
+import { selectEndpoint } from './select-endpoint.js';
 import {
   localStore,
   openStore,
@@ -862,36 +863,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/endpoint') {
-      // §4: the companion advertises, the gateway selects. Attached wins, then
-      // most recently seen — the answer is about the machine the member last
-      // worked on, not one they forgot they paired. `{}` is "nothing paired",
-      // the shape the conversation lookups already use for "nothing yet".
       const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
-      const best = (await store.endpointsFor(owner))
-        .map((row) => {
-          const presence = live.get(row.id);
-          return {
-            endpoint: row.id,
-            // What it calls itself while attached, else what it was called when
-            // paired — the row is all there is before it has ever run.
-            device: presence?.device || row.device,
-            // Absent from the relay only means it has not attached since this
-            // gateway started; the row says whether it ever has at all.
-            state: presence
-              ? relay.stateOf(presence)
-              : row.lastSeenAt === null
-                ? 'unstarted'
-                : 'asleep',
-            seen: presence?.lastSeenAt ?? row.lastSeenAt ?? 0,
-          };
-        })
-        .sort(
-          (a, b) => Number(b.state === 'ready') - Number(a.state === 'ready') || b.seen - a.seen,
-        )[0];
+      // `{}` is "nothing paired", the shape the conversation lookups already use.
       return sendJson(
         res,
         200,
-        best ? { endpoint: best.endpoint, device: best.device, state: best.state } : {},
+        selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf) ?? {},
       );
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
