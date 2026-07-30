@@ -44,8 +44,8 @@ is here, and no rule below depends on reading it.
 
 ## Packages
 
-§8 "Package graph". All five exist; `@symma/slack` arrived with M3d and answers
-one command so far.
+§8 "Package graph". All five exist; `@symma/slack` arrived with M3d and carries
+`/connect`, mentions and DM turns so far — no agent runs from it yet.
 
 | package           | what it is                                                                                                                                                                         | depends on |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
@@ -53,7 +53,7 @@ one command so far.
 | `@symma/gateway`  | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol   |
 | `symma`           | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, pairing, login service                                                                | protocol   |
 | `@symma/client`   | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol   |
-| `@symma/slack`    | the bot — Socket Mode, `/connect`; no agent credentials, spawns nothing                                                                                                            | —          |
+| `@symma/slack`    | the bot — Socket Mode, `/connect`, mentions and DM turns; no agent credentials, spawns nothing                                                                                     | Slack SDK  |
 
 `@symma/client` is what jbot-review consumes at runtime. It exists so the
 reviewer never imports gateway internals to dial a gateway — the inversion this
@@ -110,7 +110,9 @@ extraction fixes, prevented from recurring.
 ## Conventions
 
 - TypeScript ESM. Import specifiers end in `.js` and resolve to `.ts` — writing
-  `.ts` breaks the emit. No new dependencies without clear need.
+  `.ts` breaks the emit. No new dependencies without clear need — `@symma/slack`
+  takes `@slack/web-api` and `@slack/socket-mode`, which is the only one so far
+  and was argued from defects review had already found, not from anticipation.
 - Agent specs are verified twice, in this order: the
   [ACP registry](https://github.com/agentclientprotocol/registry) first for the
   canonical package, bin and launch flags — `npx` runs deprecated packages
