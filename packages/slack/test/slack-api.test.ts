@@ -1,21 +1,23 @@
 import assert from 'node:assert/strict';
-import { afterEach, describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 
 import { slackApi } from '../src/slack-api.js';
 
-const real = globalThis.fetch;
-afterEach(() => {
-  globalThis.fetch = real;
-});
-
 /** Slack answers 200 with `ok: false`, so every case here is a 200. */
-const answers = (body: unknown): void => {
-  globalThis.fetch = (() => Promise.resolve(new Response(JSON.stringify(body)))) as typeof fetch;
+const answering = (...bodies: unknown[]) => {
+  const seen: unknown[] = [];
+  const fetchImpl = ((_url: string, init: { body?: unknown }) => {
+    seen.push(init.body);
+    return Promise.resolve(
+      new Response(JSON.stringify(bodies[Math.min(seen.length - 1, bodies.length - 1)])),
+    );
+  }) as unknown as typeof fetch;
+  return { fetchImpl, seen };
 };
 
 describe('slack api', () => {
   it('reads a thread, and names files without fetching them', async () => {
-    answers({
+    const { fetchImpl } = answering({
       ok: true,
       messages: [
         { ts: '100.0', user: 'U-nel', text: 'the deploy is failing' },
@@ -23,7 +25,10 @@ describe('slack api', () => {
         { user: 'U-no-ts', text: 'dropped: nothing can order or cite it' },
       ],
     });
-    const thread = await slackApi('xoxb-test').threadReplies('C-incidents', '100.0');
+    const thread = await slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies(
+      'C-incidents',
+      '100.0',
+    );
     assert.equal(thread?.length, 2);
     assert.deepEqual(thread?.[1]?.files, [{ name: 'trace.log', size: 12 }]);
   });
@@ -32,39 +37,32 @@ describe('slack api', () => {
     // `conversations.replies` returns oldest first. Stopping at page one and
     // advancing the cursor to its newest would put every later page permanently
     // behind the cursor, with nothing saying so.
-    const pages = [
+    const { fetchImpl, seen } = answering(
       {
         ok: true,
         messages: [{ ts: '100.0', user: 'U-nel', text: 'oldest' }],
         response_metadata: { next_cursor: 'page2' },
       },
-      {
-        ok: true,
-        messages: [{ ts: '101.0', user: 'U-ola', text: 'newest' }],
-        response_metadata: { next_cursor: '' },
-      },
-    ];
-    const asked: unknown[] = [];
-    globalThis.fetch = ((_url: string, init: { body: string }) => {
-      asked.push(JSON.parse(init.body));
-      return Promise.resolve(new Response(JSON.stringify(pages[asked.length - 1])));
-    }) as unknown as typeof fetch;
-
-    const thread = await slackApi('xoxb-test').threadReplies('C-incidents', '100.0');
+      { ok: true, messages: [{ ts: '101.0', user: 'U-ola', text: 'newest' }] },
+    );
+    const thread = await slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies(
+      'C-incidents',
+      '100.0',
+    );
     assert.deepEqual(
       thread?.map((m) => m.text),
       ['oldest', 'newest'],
     );
-    assert.equal((asked[1] as { cursor?: string }).cursor, 'page2', 'the cursor is carried');
+    assert.match(String(seen[1]), /page2/, 'the cursor is carried');
   });
 
   it('reports a channel it cannot see as unreadable, not as broken', async () => {
-    // The difference is what the member is told: "invite me to that channel" or
+    // The difference is what the member is told: "invite me to that channel", or
     // nothing at all while an error goes to a log they never read (§4).
     for (const error of ['not_in_channel', 'channel_not_found', 'missing_scope']) {
-      answers({ ok: false, error });
+      const { fetchImpl } = answering({ ok: false, error });
       assert.equal(
-        await slackApi('xoxb-test').threadReplies('C-private', '100.0'),
+        await slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies('C-private', '100.0'),
         undefined,
         error,
       );
@@ -72,20 +70,13 @@ describe('slack api', () => {
   });
 
   it('lets a real failure through rather than reading it as an empty channel', async () => {
-    // Classified on Slack's own code. An earlier version reparsed our formatted
-    // message, so any error ending in one of those words was swallowed as
-    // "invite me" — telling the member to fix something that was not wrong.
-    answers({ ok: false, error: 'ratelimited' });
+    // Classified on Slack's own code, off the SDK's typed error. An earlier
+    // version reparsed our formatted message, so anything ending in one of those
+    // words was swallowed as "invite me".
+    const { fetchImpl } = answering({ ok: false, error: 'invalid_auth' });
     await assert.rejects(
-      slackApi('xoxb-test').threadReplies('C-incidents', '100.0'),
-      /ratelimited/,
-    );
-
-    globalThis.fetch = (() =>
-      Promise.reject(new Error('socket hang up: not_in_channel'))) as typeof fetch;
-    await assert.rejects(
-      slackApi('xoxb-test').threadReplies('C-incidents', '100.0'),
-      /socket hang up/,
+      slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies('C-incidents', '100.0'),
+      /invalid_auth/,
     );
   });
 
@@ -93,11 +84,11 @@ describe('slack api', () => {
     // Slack's docs disagree about whether a user id can stand in as a channel —
     // one page says it opens the DM, another that the message lands in the
     // Slackbot conversation. Asking is correct under either.
-    answers({ ok: true, channel: { id: 'D-nel' } });
-    assert.equal(await slackApi('xoxb-test').openDm('U-nel'), 'D-nel');
+    const opened = answering({ ok: true, channel: { id: 'D-nel' } });
+    assert.equal(await slackApi('xoxb-test', { fetch: opened.fetchImpl }).openDm('U-nel'), 'D-nel');
 
-    answers({ ok: true, channel: 'D-nel', ts: '200.0' });
-    assert.deepEqual(await slackApi('xoxb-test').post('D-nel', 'hello'), {
+    const posted = answering({ ok: true, channel: 'D-nel', ts: '200.0' });
+    assert.deepEqual(await slackApi('xoxb-test', { fetch: posted.fetchImpl }).post('D-nel', 'hi'), {
       channel: 'D-nel',
       ts: '200.0',
     });

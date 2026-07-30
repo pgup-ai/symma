@@ -1,75 +1,58 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { socketMode, type SocketEnvelope, type SocketLike } from '../src/socket-mode.js';
+import {
+  socketMode,
+  type SlackEvent,
+  type SocketEnvelope,
+  type SocketLike,
+} from '../src/socket-mode.js';
 
-/** Stands in for Slack's end of the socket. */
-class FakeSocket implements SocketLike {
-  sent: string[] = [];
-  closed = false;
-  private listeners = new Map<string, ((event: { data?: unknown }) => void)[]>();
+/**
+ * Stands in for `SocketModeClient`. The connection itself is the SDK's — what is
+ * tested here is the policy it leaves to us: when to acknowledge, and what to do
+ * with a delivery already handled.
+ */
+class FakeClient implements SocketLike {
+  acked: string[] = [];
+  started = false;
+  stopped = false;
+  private listener?: (item: SlackEvent) => void;
 
-  send(data: string): void {
-    this.sent.push(data);
+  on(_event: 'slack_event', listener: (item: SlackEvent) => void): this {
+    this.listener = listener;
+    return this;
   }
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.emit('close', {});
+  start(): Promise<unknown> {
+    this.started = true;
+    return Promise.resolve({});
   }
-  addEventListener(
-    type: 'open' | 'message' | 'close',
-    listener: (event: { data?: unknown }) => void,
-  ): void {
-    const list = this.listeners.get(type) ?? [];
-    list.push(listener);
-    this.listeners.set(type, list);
+  disconnect(): Promise<unknown> {
+    this.stopped = true;
+    return Promise.resolve();
   }
-  open(): void {
-    this.emit('open', {});
-  }
-  deliver(frame: unknown): void {
-    this.deliverRaw(JSON.stringify(frame));
-  }
-  deliverRaw(data: string): void {
-    this.emit('message', { data });
-  }
-  private emit(type: string, event: unknown): void {
-    for (const listener of this.listeners.get(type) ?? []) listener(event as { data?: unknown });
-  }
-  acks(): string[] {
-    return this.sent.map((s) => (JSON.parse(s) as { envelope_id: string }).envelope_id);
+  deliver(item: Partial<SlackEvent>): void {
+    this.listener?.({
+      ack: () => {
+        this.acked.push(String(item.envelope_id));
+        return Promise.resolve();
+      },
+      ...item,
+    } as SlackEvent);
   }
 }
 
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
-const envelope = (id: string): unknown => ({
+const envelope = (id: string): Partial<SlackEvent> => ({
   envelope_id: id,
   type: 'slash_commands',
-  payload: { command: '/connect' },
+  body: { command: '/connect' },
 });
 
-/** Starts the loop over a queue of sockets and waits for the first dial. */
-async function start(sockets: FakeSocket[], onEnvelope: (e: SocketEnvelope) => Promise<void>) {
-  const dialled: FakeSocket[] = [];
-  const waits: number[] = [];
-  const connection = socketMode({
-    appToken: 'xapp-test',
-    log: () => {},
-    onEnvelope,
-    dial: () => {
-      const next = sockets.shift();
-      if (!next) throw new Error('dialled more often than the test expected');
-      dialled.push(next);
-      return Promise.resolve(next);
-    },
-    wait: (ms) => {
-      waits.push(ms);
-      return Promise.resolve();
-    },
-  });
-  await tick();
-  return { connection, dialled, waits };
+function start(onEnvelope: (e: SocketEnvelope) => Promise<void> | void) {
+  const client = new FakeClient();
+  const connection = socketMode({ appToken: 'xapp-test', log: () => {}, onEnvelope, client });
+  return { client, connection };
 }
 
 describe('socket mode', () => {
@@ -79,108 +62,46 @@ describe('socket mode', () => {
     // mints, so a second copy is a second credential.
     let release = (): void => {};
     const running = new Promise<void>((resolve) => (release = resolve));
-    const socket = new FakeSocket();
-    await start([socket], () => running);
+    const { client } = start(() => running);
 
-    socket.deliver(envelope('e1'));
-    assert.deepEqual(socket.acks(), ['e1'], 'acked while the handler is still running');
+    client.deliver(envelope('e1'));
+    assert.deepEqual(client.acked, ['e1'], 'acked while the handler is still running');
     release();
   });
 
   it('acks a redelivery but does not do the work twice', async () => {
     const handled: string[] = [];
-    const socket = new FakeSocket();
-    await start([socket], async (e) => {
+    const { client } = start((e) => {
       handled.push(e.envelopeId);
     });
 
-    socket.deliver(envelope('e1'));
-    socket.deliver(envelope('e1'));
+    client.deliver(envelope('e1'));
+    client.deliver({ ...envelope('e1'), retry_num: 1 });
     await tick();
-    // Both acked — an unacked redelivery just comes back again — but the
-    // command ran once.
-    assert.deepEqual(socket.acks(), ['e1', 'e1']);
+    // Both acked — an unacked redelivery just comes back again — but the command
+    // ran once. Slack's own `retry_num` says the second is a retry; the envelope
+    // id is what makes that a decision rather than a hint.
+    assert.deepEqual(client.acked, ['e1', 'e1']);
     assert.deepEqual(handled, ['e1']);
   });
 
-  it('reconnects when slack asks, and stops when we do', async () => {
-    const first = new FakeSocket();
-    const second = new FakeSocket();
-    const { connection, dialled } = await start([first, second], async () => {});
-
-    // `refresh_requested` is routine — Slack rotates hosts — so it must not
-    // read as the bot being finished.
-    first.deliver({ type: 'disconnect', reason: 'refresh_requested' });
-    await tick();
-    assert.equal(first.closed, true, 'the old socket is closed');
-    assert.equal(dialled.length, 2, 'and a new one is dialled');
-
-    connection.stop();
-    await tick();
-    assert.equal(second.closed, true);
-    // The queue holds no third socket, so a reconnect here would throw inside
-    // the loop rather than fail quietly.
-    assert.equal(dialled.length, 2, 'stop() ends the loop rather than reconnecting');
-  });
-
-  it('backs off a handshake that never opens', async () => {
-    // `new WebSocket` returns while the handshake is still in flight, so
-    // resetting the delay on the dial alone would retry a failing handshake
-    // every second — against the very endpoint that hands out the URLs.
-    const dead = [new FakeSocket(), new FakeSocket(), new FakeSocket()];
-    // One spare: every close dials again, and the last dial is what the loop
-    // parks on while this asserts.
-    const failing = await start([...dead, new FakeSocket()], async () => {});
-    for (const socket of dead) {
-      socket.close();
-      await tick();
-    }
-    failing.connection.stop();
-    assert.deepEqual(failing.waits, [1_000, 2_000, 4_000], 'the delay grows');
-
-    // And one that does open starts again from the floor, so an ordinary
-    // reconnect is not punished for an earlier bad patch.
-    const good = new FakeSocket();
-    const opening = await start([good, new FakeSocket()], async () => {});
-    good.open();
-    good.close();
-    await tick();
-    opening.connection.stop();
-    assert.deepEqual(opening.waits, [1_000]);
-  });
-
-  it('closes a socket that arrives after stop()', async () => {
-    // stop() during an in-flight dial had nothing to close, so the connection
-    // landed afterwards and the loop sat waiting on a close nobody would send.
-    let settle = (_socket: FakeSocket): void => {};
-    const dialling = new Promise<FakeSocket>((resolve) => (settle = resolve));
-    const late = new FakeSocket();
-    const connection = socketMode({
-      appToken: 'xapp-test',
-      log: () => {},
-      onEnvelope: () => {},
-      dial: () => dialling,
-      wait: () => Promise.resolve(),
-    });
-
-    connection.stop();
-    settle(late);
-    await tick();
-    assert.equal(late.closed, true, 'the late socket is closed rather than held open');
-  });
-
-  it('survives a frame it cannot read and a handler that throws', async () => {
+  it('survives a frame it cannot use and a handler that throws', async () => {
     // Neither is a reason to drop a connection that is otherwise fine: one bad
     // command must not take every other member's bot down.
-    const socket = new FakeSocket();
-    await start([socket], () => Promise.reject(new Error('boom')));
+    const { client } = start(() => Promise.reject(new Error('boom')));
 
-    socket.deliver({ type: 'hello' });
-    socket.deliverRaw('{ not json');
-    socket.deliver({ type: 'events_api' }); // parseable, but no envelope id to ack
-    socket.deliver(envelope('e1'));
+    client.deliver({ type: 'slash_commands' }); // no envelope id to ack
+    client.deliver(envelope('e1'));
     await tick();
-    assert.equal(socket.closed, false);
-    assert.deepEqual(socket.acks(), ['e1'], 'hello and junk are not envelopes to ack');
+    assert.deepEqual(client.acked, ['e1'], 'nothing to ack without an envelope id');
+  });
+
+  it('starts on construction and disconnects when told', async () => {
+    const { client, connection } = start(() => {});
+    await tick();
+    assert.equal(client.started, true);
+    connection.stop();
+    await tick();
+    assert.equal(client.stopped, true);
   });
 });

@@ -1,123 +1,75 @@
 /**
  * Socket Mode: the bot dials OUT and holds one WebSocket open, so it needs no
- * public URL, no TLS site and no event endpoint (§6). Node's global `WebSocket`
- * and `fetch` are the transport, which is what keeps it dependency-free.
+ * public URL, no TLS site and no event endpoint (§6).
+ *
+ * The connection itself is `@slack/socket-mode`, which owns the handshake,
+ * ping/pong, the `disconnect` frame and reconnect backoff — a hand-rolled
+ * version got three review findings in those four areas alone. What stays here
+ * is the policy the SDK deliberately leaves to its caller: when to acknowledge,
+ * and what to do about a delivery we have already handled.
  */
+import { SocketModeClient } from '@slack/socket-mode';
 
-/** One inbound work item. Slack redelivers an envelope that is not acked, which
- * is why `envelope_id` exists and why it is the dedupe key below. */
+/** One inbound work item. */
 export interface SocketEnvelope {
   envelopeId: string;
   type: string;
   payload: Record<string, unknown>;
 }
 
-/** The slice of `WebSocket` this uses, so a test can hand over a fake without
- * standing up a WebSocket server. */
+/** What this uses of `SocketModeClient`, so a test can hand over a stub instead
+ * of a live WebSocket. */
 export interface SocketLike {
-  send(data: string): void;
-  close(): void;
-  addEventListener(
-    type: 'open' | 'message' | 'close',
-    listener: (event: { data?: unknown }) => void,
-  ): void;
+  on(event: 'slack_event', listener: (item: SlackEvent) => void): unknown;
+  start(): Promise<unknown>;
+  disconnect(): Promise<unknown>;
+}
+
+/** The SDK's `slack_event` shape, narrowed to what is read here. */
+export interface SlackEvent {
+  ack: (response?: unknown) => Promise<void>;
+  envelope_id?: unknown;
+  type?: unknown;
+  body?: unknown;
+  /** Slack's own count of how many times it has redelivered this. */
+  retry_num?: unknown;
 }
 
 interface SocketModeOptions {
   appToken: string;
   onEnvelope: (envelope: SocketEnvelope) => Promise<void> | void;
   log: (message: string) => void;
-  /** Opens the next connection. Injected in tests; the default asks Slack for a
-   * URL and dials it. Each connection gets a fresh URL — they are single-use
-   * and short-lived, so a reconnect cannot reuse the last one. */
-  dial?: () => Promise<SocketLike>;
-  /** Replaces the reconnect wait so a test does not sleep. */
-  wait?: (ms: number) => Promise<void>;
+  client?: SocketLike;
 }
 
-const BACKOFF_MIN_MS = 1_000;
-const BACKOFF_MAX_MS = 30_000;
-/** A dial that never settles is a bot that never reconnects — the loop cannot
- * reach its own retry while it waits on one. */
-const DIAL_TIMEOUT_MS = 10_000;
-/** Redelivery follows within seconds, so recent is the only window that matters
- * — and a long-lived bot must not keep one entry per envelope forever. */
+/** Bounded so a long-lived bot does not keep one entry per envelope forever.
+ * Redelivery follows within seconds, so recent is the only window that matters. */
 const SEEN_LIMIT = 512;
 
-async function openConnection(appToken: string): Promise<SocketLike> {
-  const res = await fetch('https://slack.com/api/apps.connections.open', {
-    method: 'POST',
-    headers: { authorization: `Bearer ${appToken}` },
-    signal: AbortSignal.timeout(DIAL_TIMEOUT_MS),
-  });
-  // A non-2xx carries no Slack error to read, and a proxy can answer it with
-  // HTML — parsing that reports a syntax error where the status is the whole
-  // fact. A 429 here is rate limiting, which must not read as a bug in this file.
-  if (!res.ok) throw new Error(`apps.connections.open: http ${res.status}`);
-  // Slack answers 200 with `ok: false` for a bad token, so the status alone
-  // never says whether this worked.
-  const body = (await res.json()) as { ok?: boolean; url?: string; error?: string };
-  if (!body.ok || !body.url) {
-    throw new Error(`apps.connections.open: ${body.error ?? 'no url'}`);
-  }
-  return new WebSocket(body.url) as unknown as SocketLike;
-}
-
-/**
- * Runs until `stop()`. Reconnects forever: a bot that quietly stops listening
- * looks exactly like a bot nobody is using, and §6's whole architecture is one
- * long-lived outbound socket.
- */
 export function socketMode(options: SocketModeOptions): { stop: () => void } {
-  const { appToken, onEnvelope, log } = options;
-  const dial = options.dial ?? (() => openConnection(appToken));
-  const wait = options.wait ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const { onEnvelope, log } = options;
+  const client = options.client ?? new SocketModeClient({ appToken: options.appToken });
   const seen = new Set<string>();
-  let stopped = false;
-  let socket: SocketLike | undefined;
-  // Raced against the reconnect wait below: without it the flag is next read
-  // only once the timer fires, so stopping between connections would sit out
-  // the rest of the backoff — up to 30s of it.
-  let wake = (): void => {};
-  const stopping = new Promise<void>((resolve) => {
-    wake = resolve;
-  });
 
-  // Takes the socket the frame arrived on rather than reading the current one:
-  // a late frame from a connection we already replaced would otherwise close
-  // its successor.
-  const receive = (raw: string, from: SocketLike): void => {
-    let frame: Record<string, unknown>;
-    try {
-      frame = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      // A frame we cannot read is not a reason to drop a healthy connection.
-      log('ignoring an unparseable frame');
-      return;
-    }
-    if (frame.type === 'hello') return;
-    if (frame.type === 'disconnect') {
-      // Slack asks for this on refresh and before taking a host down; it is
-      // routine, so the reconnect below treats it as a clean end.
-      log(`slack asked us to reconnect (${String(frame.reason ?? 'no reason given')})`);
-      from.close();
-      return;
-    }
-    const envelopeId = frame.envelope_id;
-    const type = frame.type;
+  client.on('slack_event', (item) => {
+    const envelopeId = item.envelope_id;
+    const type = item.type;
     if (typeof envelopeId !== 'string' || typeof type !== 'string') {
-      // Every envelope type Slack sends carries both, so this should never
-      // fire — which is why it is worth hearing about when it does.
+      // Every envelope Slack sends carries both, so this should never fire —
+      // which is why it is worth hearing about when it does.
       log('ignoring a frame with no envelope id or type');
       return;
     }
 
-    // Acked before the work, not after: Slack redelivers what is unacked, so a
-    // handler slower than its window would earn a second copy of itself. The
-    // dedupe below is what makes that safe rather than merely unlikely.
-    from.send(JSON.stringify({ envelope_id: envelopeId }));
+    // Acknowledged before the work, not after: Slack redelivers what is unacked,
+    // so a handler slower than that window would earn a second copy of itself.
+    // The dedupe below is what makes that safe rather than merely unlikely, and
+    // `retry_num` is Slack saying outright that this is one.
+    void item.ack().catch((error: unknown) => log(`ack failed: ${String(error)}`));
     if (seen.has(envelopeId)) {
-      log(`ignoring a redelivered ${type}`);
+      log(
+        `ignoring a redelivered ${type}${item.retry_num ? ` (retry ${String(item.retry_num)})` : ''}`,
+      );
       return;
     }
     if (seen.size >= SEEN_LIMIT) seen.delete(seen.values().next().value!);
@@ -128,58 +80,23 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
         await onEnvelope({
           envelopeId,
           type,
-          payload: (frame.payload ?? {}) as Record<string, unknown>,
+          payload: (item.body ?? {}) as Record<string, unknown>,
         });
       } catch (error) {
         // One member's failed command must not take the socket down with it.
         log(`handling ${type} failed: ${String(error)}`);
       }
     })();
-  };
+  });
 
-  void (async () => {
-    let backoff = BACKOFF_MIN_MS;
-    while (!stopped) {
-      try {
-        const next = (socket = await dial());
-        // stop() may have run while this was in flight, when there was no
-        // socket yet for it to close.
-        if (stopped) {
-          next.close();
-          return;
-        }
-        await new Promise<void>((resolve) => {
-          let opened = false;
-          // Reset on `open`, never on the dial: `new WebSocket` returns while
-          // the handshake is still in flight, so a handshake that then fails
-          // would retry at the minimum forever, against the very endpoint that
-          // hands out the URLs.
-          next.addEventListener('open', () => {
-            opened = true;
-            backoff = BACKOFF_MIN_MS;
-            log('connected to slack');
-          });
-          next.addEventListener('message', (event) => receive(String(event.data), next));
-          next.addEventListener('close', () => {
-            log(opened ? 'slack connection closed' : 'slack connection never opened');
-            resolve();
-          });
-        });
-      } catch (error) {
-        log(`slack connection failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      socket = undefined;
-      if (stopped) return;
-      await Promise.race([wait(backoff), stopping]);
-      backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
-    }
-  })();
+  void client
+    .start()
+    .then(() => log('connected to slack'))
+    .catch((error: unknown) => log(`slack connection failed: ${String(error)}`));
 
   return {
     stop: () => {
-      stopped = true;
-      socket?.close();
-      wake();
+      void client.disconnect().catch((error: unknown) => log(`disconnect: ${String(error)}`));
     },
   };
 }
