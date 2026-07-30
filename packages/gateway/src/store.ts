@@ -62,14 +62,17 @@ export interface Store {
       agent?: string;
     },
   ): Promise<Conversation | undefined>;
-  /** Records one invocation, and the cursor it read the thread up to, as one
-   * fact. Undefined when this Slack event already made a turn — which is how a
-   * redelivery finds its own work rather than repeating it. */
-  recordTurn(
-    conversation: string,
-    slackEventId: string,
-    seenThroughTs?: string,
-  ): Promise<string | undefined>;
+  /** Records one invocation. Undefined when this Slack event already made a turn
+   * — which is how a redelivery finds its own work rather than repeating it. */
+  recordTurn(conversation: string, slackEventId: string): Promise<string | undefined>;
+  /** Whether this conversation is this member's. The bot names an id it was
+   * given, and an id alone is not authorization. */
+  conversationOwnedBy(owner: Owner, conversation: string): Promise<boolean>;
+  /** Advances the cursor, once the member has actually been shown that far. Kept
+   * apart from `recordTurn` because a turn that fails to deliver must not leave
+   * the thread marked read: the next mention would filter out what nobody saw,
+   * and a skipped message never comes back. */
+  markConversationSeen(conversation: string, seenThroughTs: string): Promise<void>;
   /** §1 retention, by last use rather than by age: a thread a member is still
    * replying in is not stale. Turns and session links cascade; frames belong to
    * sessions, which `expireSessions` already answers for. */
@@ -264,34 +267,37 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return landed && { id, dmChannel: spec.dmChannel, rootThread: spec.rootThread };
     },
-    async recordTurn(conversation, slackEventId, seenThroughTs) {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        const turn = await client.query<{ id: string }>(
-          `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
-           ON CONFLICT (slack_event_id) DO NOTHING RETURNING id`,
-          [randomUUID(), conversation, slackEventId],
-        );
-        // Only on a turn this call created: a redelivery must not move the
-        // cursor forward a second time, or the delta it reads would skip work.
-        if (turn.rowCount) {
-          await client.query(
-            `UPDATE conversations
-                SET last_activity_at = now(),
-                    seen_through_ts = coalesce($2, seen_through_ts)
-              WHERE id = $1`,
-            [conversation, seenThroughTs ?? null],
-          );
-        }
-        await client.query('COMMIT');
-        return turn.rows[0]?.id;
-      } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-      } finally {
-        client.release();
+    async recordTurn(conversation, slackEventId) {
+      const turn = await one<{ id: string }>(
+        `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
+         ON CONFLICT (slack_event_id) DO NOTHING RETURNING id`,
+        [randomUUID(), conversation, slackEventId],
+      );
+      // Activity is the invocation, not the delivery: a member who mentioned the
+      // bot today is using this thread whether or not the answer landed.
+      if (turn) {
+        await pool.query(`UPDATE conversations SET last_activity_at = now() WHERE id = $1`, [
+          conversation,
+        ]);
       }
+      return turn?.id;
+    },
+    async conversationOwnedBy(owner, conversation) {
+      return Boolean(
+        await one(`SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2`, [
+          conversation,
+          owner,
+        ]),
+      );
+    },
+    async markConversationSeen(conversation, seenThroughTs) {
+      // Never backwards: a redelivery or a slow turn must not rewind the thread
+      // and re-send what the member already read.
+      await pool.query(
+        `UPDATE conversations SET seen_through_ts = greatest(seen_through_ts, $2)
+          WHERE id = $1`,
+        [conversation, seenThroughTs],
+      );
     },
     async expireConversations(olderThanDays) {
       const { rowCount } = await pool.query(
@@ -740,6 +746,8 @@ export function localStore(
     conversationForSource: needsDatabase,
     openConversation: needsDatabase,
     recordTurn: needsDatabase,
+    conversationOwnedBy: needsDatabase,
+    markConversationSeen: needsDatabase,
     expireConversations: needsDatabase,
     mintPairingCode: needsDatabase,
     redeemPairingCode: needsDatabase,

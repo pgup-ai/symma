@@ -21,8 +21,10 @@ export interface MentionDeps {
     dmChannel: string;
     rootThread: string;
     slackEventId: string;
-    seenThroughTs?: string;
   }) => Promise<{ conversation: ConversationRef; turn?: string }>;
+  /** Called only once the member has been shown that far — a turn that fails to
+   * deliver must not leave the thread marked read. */
+  seen: (conversation: string, seenThroughTs: string) => Promise<void>;
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
   post: (
     channel: string,
@@ -85,6 +87,10 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     ...(existing?.seenThroughTs ? { since: existing.seenThroughTs } : {}),
   });
 
+  const shown = async (conversation: string): Promise<void> => {
+    if (snapshot.seenThroughTs) await deps.seen(conversation, snapshot.seenThroughTs);
+  };
+
   if (existing) {
     const { turn } = await deps.turn({
       sourceChannel: mention.channel,
@@ -92,7 +98,6 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
       dmChannel: existing.dmChannel,
       rootThread: existing.rootThread,
       slackEventId: mention.eventId,
-      ...(snapshot.seenThroughTs ? { seenThroughTs: snapshot.seenThroughTs } : {}),
     });
     if (!turn) return 'already handled';
     await deps.post(
@@ -100,6 +105,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
       opening(snapshot.text, snapshot.omitted),
       existing.rootThread,
     );
+    await shown(existing.id);
     return 'continued';
   }
 
@@ -110,14 +116,27 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     dmChannel: root.channel,
     rootThread: root.ts,
     slackEventId: mention.eventId,
-    ...(snapshot.seenThroughTs ? { seenThroughTs: snapshot.seenThroughTs } : {}),
   });
-  // The gateway adopted a conversation another delivery opened first, so the
-  // message just posted is a stray in the member's own DM. Rare enough to leave
-  // rather than delete, and saying which thread is live costs one line.
+  // A concurrent mention opened this thread's conversation first, so the message
+  // just posted is a stray claiming work is happening in a thread nothing will
+  // answer in. Correcting it there is the only place the member is looking.
   if (conversation.rootThread !== root.ts) {
-    deps.log(`adopted ${conversation.id}; the root just posted is stray`);
-    return turn ? 'adopted' : 'already handled';
+    deps.log(`adopted ${conversation.id}; correcting the stray root`);
+    await deps.post(
+      root.channel,
+      'Started twice — carry on in the other thread, which is where I am working.',
+      root.ts,
+    );
+    if (!turn) return 'already handled';
+    await deps.post(
+      conversation.dmChannel,
+      opening(snapshot.text, snapshot.omitted),
+      conversation.rootThread,
+    );
+    await shown(conversation.id);
+    return 'adopted';
   }
-  return turn ? 'opened' : 'already handled';
+  if (!turn) return 'already handled';
+  await shown(conversation.id);
+  return 'opened';
 }

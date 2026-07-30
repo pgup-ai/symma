@@ -64,13 +64,19 @@ describe('thread snapshot', () => {
     assert.deepEqual(snapshot, { text: '', omitted: 0 });
   });
 
-  it('keeps the newest reply even when it alone exceeds the budget', () => {
-    // The alternative is advancing the cursor past a message never shown, and a
-    // skipped message never comes back.
-    const snapshot = threadSnapshot(thread, { budgetBytes: 1, since: '101.0' });
-    assert.equal(snapshot.seenThroughTs, '103.0');
-    assert.match(snapshot.text, /third reply/);
-    assert.equal(snapshot.omitted, 1, 'and says the one it could not fit is missing');
+  it('trims the newest reply rather than dropping it or blowing the budget', () => {
+    // Dropping it would advance the cursor past a message never shown, and a
+    // skipped message never comes back. Keeping it whole would put the snapshot
+    // past a ceiling that exists partly because Slack will refuse an oversized
+    // post — so it is cut, and says it was cut.
+    const long = [...thread, { ts: '104.0', author: 'U-nel', text: 'x'.repeat(5_000) }];
+    const snapshot = threadSnapshot(long, { budgetBytes: 300, since: '101.0' });
+    assert.equal(snapshot.seenThroughTs, '104.0', 'the cursor still reaches it');
+    assert.match(snapshot.text, /\[truncated\]/);
+    assert.ok(
+      Buffer.byteLength(snapshot.text) < 600,
+      `stayed near the ceiling, got ${Buffer.byteLength(snapshot.text)}`,
+    );
   });
 
   it('names attached files without fetching them', () => {

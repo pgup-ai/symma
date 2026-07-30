@@ -28,6 +28,18 @@ const render = (message: ThreadMessage): string => {
 
 const bytes = (value: string): number => Buffer.byteLength(value, 'utf8');
 
+/** Cut to fit, saying so. A must-keep message that blew the ceiling used to be
+ * exempted from it, which could put a snapshot past what Slack will accept — so
+ * the budget stopped being a budget at the one moment it mattered. */
+const fit = (line: string, budget: number): string => {
+  if (bytes(line) <= budget) return line;
+  const marker = ' … [truncated]';
+  const room = Math.max(0, budget - bytes(marker));
+  let cut = line;
+  while (bytes(cut) > room) cut = cut.slice(0, -Math.max(1, Math.ceil((bytes(cut) - room) / 4)));
+  return cut + marker;
+};
+
 /**
  * `since` makes this a delta: a repeat mention pulls what the agent has not been
  * shown rather than the thread again, which is what stops later messages
@@ -52,30 +64,34 @@ export function threadSnapshot(
   const root = options.since ? undefined : candidates[0];
   const rest = root ? candidates.slice(1) : candidates;
 
-  let used = root ? bytes(render(root)) : 0;
-  const tail: ThreadMessage[] = [];
+  // The root counts against the ceiling like anything else; it used to be
+  // included unmeasured.
+  const rootLine = root ? fit(render(root), options.budgetBytes) : '';
+  let used = bytes(rootLine);
+  const tail: { message: ThreadMessage; line: string }[] = [];
   for (const [i, message] of [...rest].reverse().entries()) {
-    const cost = bytes(render(message)) + 1;
-    // The newest reply is kept whatever it costs. Dropping it would either lose
-    // the message the member just pointed at, or advance the cursor past
-    // something never shown — and a skipped message never comes back.
+    // The newest reply is always kept — dropping it would either lose what the
+    // member just pointed at, or advance the cursor past something never shown,
+    // and a skipped message never comes back. Trimmed to the ceiling, though,
+    // rather than exempted from it.
+    const line = i === 0 ? fit(render(message), options.budgetBytes - used) : render(message);
+    const cost = bytes(line) + 1;
     if (i > 0 && used + cost > options.budgetBytes) break;
     used += cost;
-    tail.unshift(message);
+    tail.unshift({ message, line });
   }
 
   const omitted = rest.length - tail.length;
   // No assertion on the tail: an earlier draft read the last element of an empty
   // array and crashed. Absent is also the safe answer — a cursor that does not
   // move is a turn re-read, where one that moves too far is work never seen.
-  const newest = tail.at(-1) ?? root;
+  const newest = tail.at(-1)?.message ?? root;
   const note = omitted
     ? [`… ${omitted} earlier ${omitted === 1 ? 'reply' : 'replies'} omitted to fit the budget …`]
     : [];
   // The note sits where the messages were dropped from, so the gap is visible in
   // place rather than as a footnote about the thread as a whole.
-  const lines = root
-    ? [render(root), ...note, ...tail.map(render)]
-    : [...note, ...tail.map(render)];
+  const shown = tail.map((t) => t.line);
+  const lines = root ? [rootLine, ...note, ...shown] : [...note, ...shown];
   return { text: lines.join('\n'), ...(newest ? { seenThroughTs: newest.ts } : {}), omitted };
 }

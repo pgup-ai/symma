@@ -807,11 +807,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     if (url.pathname === '/api/slack/turn') {
       const source = threadOf(body);
-      const { dmChannel, rootThread, slackEventId, seenThroughTs, endpoint, agent } = body as {
+      const { dmChannel, rootThread, slackEventId, endpoint, agent } = body as {
         dmChannel?: unknown;
         rootThread?: unknown;
         slackEventId?: unknown;
-        seenThroughTs?: unknown;
         endpoint?: unknown;
         agent?: unknown;
       };
@@ -834,12 +833,22 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (!conversation) return sendJson(res, 409, { error: 'conflict' });
       // An absent turn is a redelivery finding its own work, which the bot
       // answers by not repeating it — not an error.
-      const turn = await store.recordTurn(
-        conversation.id,
-        slackEventId,
-        str(seenThroughTs) ? seenThroughTs : undefined,
-      );
+      const turn = await store.recordTurn(conversation.id, slackEventId);
       return sendJson(res, 200, { conversation, ...(turn ? { turn } : {}) });
+    }
+    if (url.pathname === '/api/slack/seen') {
+      const { conversation, seenThroughTs } = body as {
+        conversation?: unknown;
+        seenThroughTs?: unknown;
+      };
+      if (!str(conversation) || !str(seenThroughTs))
+        return sendJson(res, 400, { error: 'request' });
+      // Scoped to the caller's own conversation: the id arrives from the bot,
+      // which speaks for whichever member ran the command, not for all of them.
+      if (!(await store.conversationOwnedBy(owner, conversation)))
+        return sendJson(res, 404, { error: 'not found' });
+      await store.markConversationSeen(conversation, seenThroughTs);
+      return sendJson(res, 200, {});
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —

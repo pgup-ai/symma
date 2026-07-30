@@ -1502,8 +1502,11 @@ describe('tenancy', () => {
         undefined,
       );
 
-      const turn = await store.recordTurn(first.id, 'Ev-flow', '100.5');
+      const turn = await store.recordTurn(first.id, 'Ev-flow');
       assert.ok(turn);
+      // Separate calls, because a turn that fails to deliver must not leave the
+      // thread marked read.
+      await store.markConversationSeen(first.id, '100.5');
       assert.equal(
         (await store.conversationForSource(wynn.owner, 'C-incidents', '100.0'))?.seenThroughTs,
         '100.5',
@@ -1512,7 +1515,9 @@ describe('tenancy', () => {
       // A redelivery finds its own work instead of repeating it, and must not
       // move the cursor — a delta read past '100.9' would skip the messages
       // between, which is the silent context loss §4 forbids.
-      assert.equal(await store.recordTurn(first.id, 'Ev-flow', '100.9'), undefined);
+      assert.equal(await store.recordTurn(first.id, 'Ev-flow'), undefined);
+      // And never backwards, so a slow turn cannot re-send what was already read.
+      await store.markConversationSeen(first.id, '100.4');
       assert.equal(
         (await store.conversationForSource(wynn.owner, 'C-incidents', '100.0'))?.seenThroughTs,
         '100.5',

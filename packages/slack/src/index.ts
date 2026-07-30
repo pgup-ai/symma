@@ -111,6 +111,9 @@ const mentionDeps = (user: string) => ({
   },
   turn: (spec: Record<string, unknown>) =>
     ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+  seen: async (conversation: string, seenThroughTs: string) => {
+    await ask('/api/slack/seen', { user, conversation, seenThroughTs });
+  },
 });
 
 const connection = socketMode({
