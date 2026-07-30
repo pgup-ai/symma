@@ -24,8 +24,12 @@ describe('thread snapshot', () => {
     // §4: keep the root plus the most recent, and state exactly what was
     // omitted. A snapshot that quietly loses the middle is worse than a short
     // one, because nothing downstream can tell it happened.
-    const room = threadSnapshot([thread[0]!, thread[3]!], { budgetBytes: 10_000 });
-    const snapshot = threadSnapshot(thread, { budgetBytes: room.text.length + 1 });
+    // Sized from the two ends plus room for the note that stands in for the
+    // middle — the note is reserved out of the budget, so a ceiling measured
+    // without it would not fit what it is meant to fit.
+    const ends = threadSnapshot([thread[0]!, thread[3]!], { budgetBytes: 10_000 });
+    const budgetBytes = Buffer.byteLength(ends.text) + 60;
+    const snapshot = threadSnapshot(thread, { budgetBytes });
     assert.equal(snapshot.omitted, 2);
     assert.match(snapshot.text, /the deploy is failing/, 'the root survives');
     assert.match(snapshot.text, /third reply/, 'and the newest');
@@ -33,6 +37,8 @@ describe('thread snapshot', () => {
     assert.match(snapshot.text, /… 2 earlier replies omitted/);
     // In place, so the gap reads where it happened.
     assert.ok(snapshot.text.indexOf('omitted') < snapshot.text.indexOf('third reply'));
+    // Note included, since reserving for it is the point.
+    assert.ok(Buffer.byteLength(snapshot.text) <= budgetBytes);
   });
 
   it('pulls only the delta once the agent has seen part of the thread', () => {
@@ -73,9 +79,11 @@ describe('thread snapshot', () => {
     const snapshot = threadSnapshot(long, { budgetBytes: 300, since: '101.0' });
     assert.equal(snapshot.seenThroughTs, '104.0', 'the cursor still reaches it');
     assert.match(snapshot.text, /\[truncated\]/);
+    // At or under, not merely near: the trimmed line has to leave room for the
+    // newline it gets joined with, or the ceiling is a byte short of one.
     assert.ok(
-      Buffer.byteLength(snapshot.text) < 600,
-      `stayed near the ceiling, got ${Buffer.byteLength(snapshot.text)}`,
+      Buffer.byteLength(snapshot.text) <= 300,
+      `within the ceiling, got ${Buffer.byteLength(snapshot.text)}`,
     );
   });
 

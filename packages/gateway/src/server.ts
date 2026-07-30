@@ -1127,6 +1127,11 @@ if (retentionDays > 0) {
       const doomed = await store.expireSessions(retentionDays, relay.liveSessions());
       forgetSessions(doomed);
       if (doomed.length > 0) log(`retention: expired ${doomed.length} sessions`);
+      // Conversations forget on their own clock — last use, not age — and take
+      // their turns and session links with them. Nothing to unlink: frames belong
+      // to sessions, which the sweep above already answered for.
+      const gone = await store.expireConversations(retentionDays);
+      if (gone > 0) log(`retention: expired ${gone} conversations`);
     })().catch((error: unknown) =>
       log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
     );
