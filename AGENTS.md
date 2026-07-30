@@ -53,7 +53,7 @@ next, and a follow-up says so rather than passing an empty session off as one.
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | `@symma/protocol` | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                           |
 | `@symma/gateway`  | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol                    |
-| `symma`           | the companion CLI — attach loop, agent detection, checkout mechanism, local spawn/lifecycle, pairing, login service                                                                | protocol                    |
+| `symma`           | the companion CLI — attach loop, agent detection, workspace allowlist, checkout mechanism, local spawn/lifecycle, pairing, login service                                           | protocol                    |
 | `@symma/client`   | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol                    |
 | `@symma/slack`    | the bot — Socket Mode, `/connect`, mentions, DM turns, presence copy; no agent credentials, spawns nothing                                                                         | client, protocol, Slack SDK |
 
@@ -77,11 +77,12 @@ turn rather than a standing key.
    **Scoped to the review path.** M3's DM path inverts the caller — the
    endpoint's owner, on their own machine — and allows writes inside an
    allowlisted workspace root (§4, "Read-only ends where the caller changes").
-   That path drives prompts now and still runs under this floor, because the
-   root that would confine a write does not exist until `hello.workspaces[]`
-   does: the agent opens in an empty temp directory. So the invariant is
-   unconditional today, and workspaces land before write mode, not after.
-   Whoever enables writes amends this entry in the same commit.
+   That path drives prompts now, and the root exists: a companion advertises
+   `hello.workspaces[]` and an open may name one. **Writes into it do not** —
+   the floor still refuses every mutating kind, which is what now stands
+   between a prompt and the member's real source rather than an empty temp
+   directory. So the invariant is unconditional today. Whoever enables writes
+   amends this entry in the same commit.
 
 2. **Auxiliary sessions fail open.** A broken precision filter must never
    become a recall hole.

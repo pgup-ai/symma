@@ -216,6 +216,7 @@ export function createRelay(options: RelayOptions = {}) {
           ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
           ...(!online && quit ? { quit: true } : {}),
           ...(hello.publicKey ? { publicKey: hello.publicKey } : {}),
+          ...(hello.workspaces ? { workspaces: hello.workspaces } : {}),
         }));
     },
 

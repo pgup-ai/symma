@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { generateSigningKeys, verifyEnvelope, type ObserverEnvelope } from '@symma/protocol';
+import {
+  generateSigningKeys,
+  verifyEnvelope,
+  type EndpointPresence,
+  type ObserverEnvelope,
+} from '@symma/protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
@@ -16,6 +21,8 @@ import { createServer, type ServerResponse } from 'node:http';
 import { describe, it } from 'node:test';
 
 import { readJournalLines } from '@symma/gateway';
+
+import { bare, waitFor } from './helpers.js';
 
 // Scripted ACP agent: answers initialize/new/prompt like a real CLI, so the
 // black-box path (client → gateway → companion → agent and back) is exercised
@@ -75,33 +82,6 @@ const within = async <T>(ms: number, settled: Promise<T>): Promise<T | 'timeout'
   }
 };
 
-/** A child inheriting no configuration of ours — for the tests that assert what
- * a machine does with none. A runner's own SYMMA_COMPANION_AGENTS would replace
- * the built-in default one of them is about, its GATEWAY and TOKEN would start a
- * companion that should have said it was unpaired, and the blanked keys are the
- * credentials that live outside HOME — any real one makes a bare machine
- * pairable (XDG_DATA_HOME likewise points detection away from the fake HOME). */
-const bare = (home: string): NodeJS.ProcessEnv => {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    HOME: home,
-    CURSOR_API_KEY: '',
-    ANTHROPIC_API_KEY: '',
-    XDG_DATA_HOME: '',
-  };
-  for (const key of Object.keys(env)) if (key.startsWith('SYMMA_COMPANION_')) delete env[key];
-  return env;
-};
-
-async function waitFor<T>(probe: () => Promise<T | undefined>, what: string): Promise<T> {
-  for (let i = 0; i < 100; i += 1) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error(`timed out waiting for ${what}`);
-}
-
 describe('relay e2e', () => {
   it('relays a full session client → gateway → companion → agent and back', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'symma-relay-e2e-'));
@@ -159,9 +139,11 @@ describe('relay e2e', () => {
         process.execPath,
         ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
         {
+          // `bare` rather than the raw environment: a `SYMMA_COMPANION_*` set in
+          // the developer's shell would otherwise reach this companion, and a
+          // workspace list there changes what its `hello` advertises.
           env: {
-            ...process.env,
-            HOME: companionHome,
+            ...bare(companionHome),
             SYMMA_COMPANION_GATEWAY: base,
             SYMMA_COMPANION_TOKEN: 'endpoint-tok',
             SYMMA_COMPANION_ENDPOINT: 'e2e',
@@ -174,16 +156,16 @@ describe('relay e2e', () => {
 
       const auth = { authorization: 'Bearer client-tok' };
       const presence = await waitFor(async () => {
-        const listed = (await (await fetch(`${base}/api/endpoints`, { headers: auth })).json()) as {
-          endpoint: string;
-          device: string;
-          agents: { agent: string }[];
-          publicKey?: string;
-        }[];
+        const listed = (await (
+          await fetch(`${base}/api/endpoints`, { headers: auth })
+        ).json()) as EndpointPresence[];
         return listed.find((entry) => entry.endpoint === 'e2e');
       }, 'endpoint presence');
       assert.equal(presence.device, 'test-box');
       assert.deepEqual(presence.agents, [{ agent: 'echo' }]);
+      // Nothing but what this test configured. Without `bare` above, a
+      // workspace list in the developer's own shell would arrive here.
+      assert.equal(presence.workspaces, undefined, 'no workspace leaked in from the environment');
 
       // Client SSE leg first, then one streaming ingest with open + frames.
       const stream = await fetch(`${base}/api/sessions/sid-e2e/stream?token=client-tok`);

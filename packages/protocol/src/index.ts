@@ -95,6 +95,7 @@ export {
   type EndpointAgent,
   type EndpointPresence,
   type EndpointState,
+  type EndpointWorkspace,
   type HelloControl,
   type OpenControl,
   type RefusalCode,
