@@ -1100,6 +1100,70 @@ describe('tenancy', () => {
     }
   });
 
+  it('picks the machine a turn should go to, and says what it is doing', async () => {
+    const url = pg.getConnectionUri();
+    const zoe = await provision(url, {
+      team: 'presence',
+      slackUser: 'zoe',
+      endpoint: 'zoe-laptop',
+      device: "Zoe's laptop",
+    });
+    const pool = new Pool({ connectionString: url });
+    const ask = async (user: string): Promise<Record<string, string>> =>
+      (await (
+        await fetch(`${base}/api/slack/endpoint`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+          body: JSON.stringify({ team: 'presence', user }),
+        })
+      ).json()) as Record<string, string>;
+    let detach: (() => void) | undefined;
+    try {
+      // Paired and never run. Calling this "asleep" would leave Zoe waiting on a
+      // machine that was never going to connect on its own.
+      assert.deepEqual(await ask('zoe'), {
+        endpoint: 'zoe-laptop',
+        device: "Zoe's laptop",
+        state: 'unstarted',
+      });
+
+      // A second machine that has run before. Neither is here now, so the answer
+      // is about the one she last worked on.
+      await pool.query(
+        `INSERT INTO endpoints (id, user_id, device_name, last_seen_at)
+         VALUES ($1, $2, $3, now())`,
+        ['zoe-desktop', zoe.owner, 'the studio Mac'],
+      );
+      assert.deepEqual(await ask('zoe'), {
+        endpoint: 'zoe-desktop',
+        device: 'the studio Mac',
+        state: 'asleep',
+      });
+
+      // Attached beats recent. Attaching stamps `last_seen_at`, so without this
+      // the laptop would also be the most recently seen and would win on the
+      // tiebreak — proving nothing about the rank. Stamped ahead of it, the
+      // desktop is what recency alone would pick.
+      await pool.query(
+        `UPDATE endpoints SET last_seen_at = now() + interval '1 day' WHERE id = 'zoe-desktop'`,
+      );
+      detach = await attach(zoe.endpointToken, 'zoe-laptop');
+      const live = await waitFor(async () => {
+        const now = await ask('zoe');
+        return now.state === 'ready' ? now : undefined;
+      }, 'the attached endpoint wins and reads as ready');
+      // And it is named whatever it calls itself while running, rather than
+      // whatever it was called on the day it was paired.
+      assert.equal(live.device, 'zoe-laptop');
+
+      // A member the bot has never seen is created by the asking, and has none.
+      assert.deepEqual(await ask('newcomer'), {});
+    } finally {
+      detach?.();
+      await pool.end();
+    }
+  });
+
   it('refuses a spent code, and a companion with nothing to run', async () => {
     const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });

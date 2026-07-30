@@ -94,10 +94,12 @@ export {
   type GoodbyeControl,
   type EndpointAgent,
   type EndpointPresence,
+  type EndpointState,
   type HelloControl,
   type OpenControl,
   type RefusalCode,
   type RelayControl,
+  type SelectedEndpoint,
   type SendLine,
 } from './relay-control.js';
 

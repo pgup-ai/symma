@@ -44,6 +44,22 @@ export interface EndpointPresence {
   publicKey?: string;
 }
 
+/**
+ * What is known of one endpoint, as a single word (§3). `dropped` is a detach
+ * recent enough to still be coming back on its own and `asleep` is one that is
+ * not; `unstarted` is paired but never once attached, which reads to a member
+ * as nothing like a shut lid. The words they see are the caller's to pick —
+ * this is only the fact, which is why the two sit on opposite sides of the wire.
+ */
+export type EndpointState = 'ready' | 'dropped' | 'quit' | 'asleep' | 'unstarted';
+
+/** The endpoint a turn should go to, once something has chosen between them. */
+export interface SelectedEndpoint {
+  endpoint: string;
+  device: string;
+  state: EndpointState;
+}
+
 export interface HelloControl {
   kind: 'hello';
   endpoint: string;

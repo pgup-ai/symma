@@ -2,10 +2,14 @@
  * A message in the DM. Replying in a thread resumes the conversation that thread
  * is; a top-level message opens one with no source (§4).
  *
- * No agent runs yet — this records the turn and says so. Driving the prompt is
- * the next slice, and a turn that exists is what it will pick up.
+ * No agent runs yet — this records the turn, and either says so or says why the
+ * machine it would run on cannot take it (§3). Driving the prompt is the next
+ * slice, and a turn that exists is what it will pick up.
  */
+import type { EndpointState, SelectedEndpoint } from '@symma/protocol';
+
 import type { ConversationRef } from './mention.js';
+import { refusal } from './presence.js';
 
 export interface DmMessage {
   /** The DM channel, always a `D` id — resolved by Slack, not by us. */
@@ -34,10 +38,19 @@ export function isMemberDm(event: Record<string, unknown>): boolean {
   );
 }
 
-export type DmOutcome = 'resumed' | 'opened' | 'already handled';
+/** `refused` names which of §3's states stopped it, so a support question is
+ * answered by the log line rather than by asking the member what they saw. */
+export type DmOutcome =
+  | 'resumed'
+  | 'opened'
+  | 'already handled'
+  | `refused: ${Exclude<EndpointState, 'ready'> | 'unpaired'}`;
 
 export interface DmDeps {
   find: (dmChannel: string, rootThread: string) => Promise<ConversationRef | undefined>;
+  /** The machine this member's agent would run on, whatever state it is in.
+   * Undefined when they have paired none. */
+  endpoint: () => Promise<SelectedEndpoint | undefined>;
   turn: (spec: {
     dmChannel: string;
     rootThread: string;
@@ -75,10 +88,15 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // silence rather than a second acknowledgement.
   if (!turn) return 'already handled';
 
+  // Asked after the dedupe gate, so a redelivery costs the gateway nothing.
+  const selected = await deps.endpoint();
+  const state = selected?.state ?? 'unpaired';
   await deps.post(
     conversation.dmChannel,
-    'Got it. Your agent is not wired up to answer yet — that lands in the next change.',
+    refusal(selected) ??
+      'Got it. Your agent is not wired up to answer yet — that lands in the next change.',
     conversation.rootThread,
   );
+  if (state !== 'ready') return `refused: ${state}`;
   return existing ? 'resumed' : 'opened';
 }

@@ -861,6 +861,40 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       await store.markConversationSeen(conversation, seenThroughTs);
       return sendJson(res, 200, {});
     }
+    if (url.pathname === '/api/slack/endpoint') {
+      // §4: the companion advertises, the gateway selects. Attached wins;
+      // failing that the one seen most recently, so the answer is about the
+      // machine the member last worked on rather than one they forgot they
+      // paired. An empty object is "nothing paired", the same shape the
+      // conversation lookups use for "nothing yet".
+      const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
+      const best = (await store.endpointsFor(owner))
+        .map((row) => {
+          const presence = live.get(row.id);
+          return {
+            endpoint: row.id,
+            // What it calls itself while attached, else what it was called when
+            // paired — the row is all there is before it has ever run.
+            device: presence?.device || row.device,
+            // Absent from the relay only means it has not attached since this
+            // gateway started; the row says whether it ever has at all.
+            state: presence
+              ? relay.stateOf(presence)
+              : row.lastSeenAt === null
+                ? 'unstarted'
+                : 'asleep',
+            seen: presence?.lastSeenAt ?? row.lastSeenAt ?? 0,
+          };
+        })
+        .sort(
+          (a, b) => Number(b.state === 'ready') - Number(a.state === 'ready') || b.seen - a.seen,
+        )[0];
+      return sendJson(
+        res,
+        200,
+        best ? { endpoint: best.endpoint, device: best.device, state: best.state } : {},
+      );
+    }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —
     // between the lookup above and the mint's own locked re-check.
