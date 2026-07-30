@@ -159,7 +159,10 @@ const connection = socketMode({
         // is the fuller answer and is not built.
         log(`mention in ${event.channel} failed: ${String(error)}`);
         await api
-          .post(event.user, 'That did not get through — mention me again and I will retry.')
+          .openDm(event.user)
+          .then((dm) =>
+            api.post(dm, 'That did not get through — mention me again and I will retry.'),
+          )
           .catch(() => log('could not tell them it failed either'));
       }
       return;

@@ -87,6 +87,21 @@ describe('thread snapshot', () => {
     );
   });
 
+  it('never returns more than the budget, even when nothing fits', () => {
+    // Below the truncation marker there is nothing honest to emit: a bare marker
+    // would exceed the budget it was measured against, and an empty line kept in
+    // its place would advance the cursor over a message never shown.
+    for (const budgetBytes of [0, 1, 8, 16, 40]) {
+      const snapshot = threadSnapshot(thread, { budgetBytes });
+      assert.ok(
+        Buffer.byteLength(snapshot.text) <= budgetBytes,
+        `budget ${budgetBytes} produced ${Buffer.byteLength(snapshot.text)} bytes`,
+      );
+      // And whatever it could not show, it has not claimed to have read.
+      if (snapshot.seenThroughTs) assert.ok(snapshot.text.length > 0);
+    }
+  });
+
   it('names attached files without fetching them', () => {
     // v1 passes metadata only: downloading widens the scope request and the
     // data-lifecycle surface both (§10).
