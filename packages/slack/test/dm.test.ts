@@ -9,14 +9,15 @@ import type { ConversationRef } from '../src/mention.js';
 const CONVERSATION: ConversationRef = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
 const READY: SelectedEndpoint = { endpoint: 'ep-1', device: 'the studio Mac', state: 'ready' };
 
-/** `endpoint` defaults to a machine that is there; `null` is a member who has
- * paired none, which is a different answer from one whose laptop is shut. */
 function harness(
   over: { existing?: ConversationRef; turn?: boolean; endpoint?: SelectedEndpoint | null } = {},
 ) {
   const posts: { channel: string; text: string; threadTs?: string }[] = [];
   const turns: Record<string, unknown>[] = [];
   let asked = 0;
+  // Absent is a machine that is there; `null` is a member who has paired none,
+  // which is a different answer from one whose laptop is shut.
+  const selected = over.endpoint === undefined ? READY : over.endpoint;
   const deps: DmDeps = {
     find: () => Promise.resolve(over.existing),
     post: (channel, text, threadTs) => {
@@ -32,7 +33,7 @@ function harness(
     },
     endpoint: () => {
       asked += 1;
-      return Promise.resolve(over.endpoint === undefined ? READY : (over.endpoint ?? undefined));
+      return Promise.resolve(selected ?? undefined);
     },
   };
   return { deps, posts, turns, asked: () => asked };
@@ -123,9 +124,8 @@ describe('dm message', () => {
 
   it('names the machine and what to do when it is not there', async () => {
     // §3: "asleep" and "never started" are one word to the relay and completely
-    // different things to a member — one ends by opening a lid, the other never
-    // ends at all. The outcome carries which, so the log answers the support
-    // question without asking the member what they saw.
+    // different to a member — one ends by opening a lid, the other never ends.
+    // The outcome carries which, so a log answers the support question.
     const cases = [
       { state: 'asleep', outcome: 'refused: asleep', says: /awake/ },
       { state: 'quit', outcome: 'refused: quit', says: /not running/ },
@@ -142,6 +142,15 @@ describe('dm message', () => {
       assert.match(posts[0]!.text, says, state);
       assert.match(posts[0]!.text, /the studio Mac/, `${state} names the machine`);
     }
+  });
+
+  it('has words for a machine that never said what it is called', async () => {
+    // `device_name` defaults to empty and the row exists from the moment of
+    // pairing, so this is the ordinary state of one that has not started — not
+    // an edge case, and not somewhere to leave a sentence with a hole in it.
+    const { deps, posts } = harness({ endpoint: { ...READY, device: '', state: 'unstarted' } });
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1' }, deps);
+    assert.match(posts[0]!.text, /from your machine\b/);
   });
 
   it('sends a member who has paired nothing to /connect', async () => {

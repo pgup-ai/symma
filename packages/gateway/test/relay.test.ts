@@ -51,9 +51,8 @@ describe('relay', () => {
     });
 
     assert.equal(relay.stateOf(seen({ online: true })), 'ready');
-    // A goodbye outranks the clock. However recently they were here, a machine
-    // they quit is not coming back on its own, and "try again shortly" would be
-    // a promise nothing is going to keep.
+    // A goodbye outranks the clock: a machine they quit is not coming back on
+    // its own, however recently it was here.
     assert.equal(relay.stateOf(seen({ quit: true, lastSeenAt: Date.now() })), 'quit');
     assert.equal(relay.stateOf(seen({ lastSeenAt: Date.now() - 1_000 })), 'dropped');
     assert.equal(relay.stateOf(seen({ lastSeenAt: Date.now() - 120_000 })), 'asleep');

@@ -862,11 +862,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/endpoint') {
-      // §4: the companion advertises, the gateway selects. Attached wins;
-      // failing that the one seen most recently, so the answer is about the
-      // machine the member last worked on rather than one they forgot they
-      // paired. An empty object is "nothing paired", the same shape the
-      // conversation lookups use for "nothing yet".
+      // §4: the companion advertises, the gateway selects. Attached wins, then
+      // most recently seen — the answer is about the machine the member last
+      // worked on, not one they forgot they paired. `{}` is "nothing paired",
+      // the shape the conversation lookups already use for "nothing yet".
       const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
       const best = (await store.endpointsFor(owner))
         .map((row) => {
