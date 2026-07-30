@@ -190,6 +190,18 @@ describe('dm message', () => {
     assert.deepEqual(askedFor, ['conv-1']);
   });
 
+  it('does not let a directory name close the span it is shown in', async () => {
+    // A label is `basename` of a real directory, and a backtick in one would end
+    // the code span early and spill the rest of the sentence into it.
+    const { deps, posts } = harness({
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'we`ird' },
+    });
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+
+    assert.match(posts[0]!.text, /in `weird`\./);
+    assert.equal(posts[0]!.text.split('`').length - 1, 2, 'one span, opened and closed');
+  });
+
   it('tells a follow-up that it is starting fresh', async () => {
     // Until `session/load` lands, the honest version of "resumed" is a
     // sentence — §4 will not have an empty session passed off as a resume.

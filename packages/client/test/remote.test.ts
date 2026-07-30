@@ -143,8 +143,10 @@ describe('remote acp prompt', () => {
       );
       assert.match(text, /remote review ok/);
       // No workspace asked for, so the agent got the empty temp directory the
-      // review path has always had.
-      assert.doesNotMatch(text, new RegExp(realpathSync(mine)));
+      // review path has always had. Parsed rather than matched: a path is not a
+      // regex, and `\` on win32 would make one that is not the path.
+      const ranIn = (payload: string): string => (JSON.parse(payload) as { cwd: string }).cwd;
+      assert.notEqual(ranIn(text), realpathSync(mine));
 
       // Named by id, the same prompt runs in the member's own directory. This
       // is the whole of what `workspace` buys, and the agent reporting its own
@@ -160,7 +162,7 @@ describe('remote acp prompt', () => {
         'review',
         noLog,
       );
-      assert.match(inMine, new RegExp(realpathSync(mine)));
+      assert.equal(ranIn(inMine), realpathSync(mine));
 
       // The reply above already proves the round trip; what only this test
       // covers is that it was journaled under the client's run id, one session

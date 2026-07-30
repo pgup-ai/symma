@@ -134,8 +134,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // §4 wants the scope in the DM root rather than guessed at, so the answer
   // says which project it is about — or that it can see no files at all, which
   // is the one thing a member would otherwise assume wrong.
+  // A backtick closes the span it is in, so a directory named with one would
+  // spill the rest of the sentence into code. Their own machine and their own
+  // DM, so this is rendering and not a trust boundary.
   const scope = decision.label
-    ? `On it, in \`${decision.label}\`.`
+    ? `On it, in \`${decision.label.replaceAll('`', '')}\`.`
     : 'On it. It has no access to your files, so keep the question self-contained.';
   await deps.post(
     conversation.dmChannel,
