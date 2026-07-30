@@ -62,9 +62,8 @@ export interface SelectedEndpoint {
 
 /**
  * What a caller needs to run one turn on the selected endpoint. Both extras are
- * absent unless the machine can actually take it, which is the honest shape:
- * there is nothing to hand over for a laptop that is shut, and a refusal should
- * not cost a credential.
+ * absent unless the machine can take it: there is nothing to hand over for a
+ * laptop that is shut, and a refusal should not cost a credential.
  */
 export interface TurnTarget extends SelectedEndpoint {
   /** One the endpoint advertised — an unoffered name is refused (§5). */

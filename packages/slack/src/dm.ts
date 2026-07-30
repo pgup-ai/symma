@@ -19,9 +19,8 @@ export interface DmMessage {
   /** Absent on a top-level message, which is then its own root. */
   threadTs?: string;
   eventId: string;
-  /** What they actually asked. Slack's own text, unresolved: mention and channel
-   * ids stay as they arrived, since expanding them costs a lookup per id and the
-   * agent is being asked about code, not about who `<@U123>` is. */
+  /** What they asked, as Slack sent it: `<@U123>` and `<#C123>` stay unresolved,
+   * since expanding them is a lookup each and the question is about code. */
   text: string;
 }
 
@@ -109,9 +108,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // silence rather than a second acknowledgement.
   if (!turn) return 'already handled';
 
-  // A file with no caption is an ordinary Slack message and an empty prompt.
-  // Caught before the ask below, so it neither mints a token nor spends twenty
-  // minutes of someone's laptop finding out there was no question.
+  // A file with no caption is an ordinary message with an empty prompt. Caught
+  // before the ask below, so it neither mints a token nor starts a run.
   if (!message.text.trim()) {
     await deps.post(
       conversation.dmChannel,
@@ -129,14 +127,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
-  // The envelope was acked long ago and a run has twenty minutes to answer.
-  // Silence for that long reads as broken, and a follow-up is told outright
-  // that it starts fresh — §4 would rather say so than pass an empty session
-  // off as a resume.
+  // A run has twenty minutes to answer, so silence for that long reads as
+  // broken. §4 would rather tell a follow-up it starts over than pass an empty
+  // session off as a resume.
   await deps.post(
     conversation.dmChannel,
     existing
-      ? 'On it. Each turn runs in its own session for now, so it will not remember earlier messages in this thread.'
+      ? 'On it. Each turn runs in its own session for now, so it will not remember what came before.'
       : 'On it.',
     conversation.rootThread,
   );
@@ -162,8 +159,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return 'failed';
   }
 
-  // Slack refuses an empty message, so a run that finished quietly would throw
-  // here and be reported as a failure it was not.
+  // Slack refuses an empty message, so a quiet run would be reported as failed.
   await deps.post(
     conversation.dmChannel,
     answer.trim() || 'That finished without producing an answer.',

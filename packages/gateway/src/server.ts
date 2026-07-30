@@ -44,9 +44,8 @@ import { VIEWER_HTML } from './viewer.js';
 // SSE comment ping; keeps idle viewer connections alive through proxies.
 const HEARTBEAT_MS = 25_000;
 
-// Comfortably past `@symma/client`'s 20-minute prompt deadline, because the
-// token is held for the whole run and a mid-run expiry would fail the ingest
-// rather than the prompt. Short only relative to the standing kind.
+// Past `@symma/client`'s 20-minute prompt deadline: the token is held for the
+// whole run, and expiring mid-run would fail the ingest rather than the prompt.
 const TURN_TOKEN_TTL_MINUTES = 30;
 
 const port =

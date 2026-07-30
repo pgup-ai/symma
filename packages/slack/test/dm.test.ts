@@ -153,8 +153,8 @@ describe('dm message', () => {
       await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps),
       'opened',
     );
-    // Their words, their machine, their credentials — and the conversation is
-    // the run, so a member's thread stays one thing in the journal and viewer.
+    // Their words on their own machine, and the conversation is the run — so a
+    // member's thread stays one thing in the journal and viewer.
     assert.deepEqual(runs, [
       {
         conversation: 'conv-1',
@@ -168,8 +168,8 @@ describe('dm message', () => {
   });
 
   it('tells a follow-up that it is starting fresh', async () => {
-    // §4 would rather say so than pass an empty session off as a resume. Until
-    // `session/load` lands, the honest version of "resumed" is a sentence.
+    // Until `session/load` lands, the honest version of "resumed" is a
+    // sentence — §4 will not have an empty session passed off as a resume.
     const { deps, posts } = harness({ existing: CONVERSATION });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
@@ -186,7 +186,6 @@ describe('dm message', () => {
   });
 
   it('does not spend a laptop on a message with no question in it', async () => {
-    // A file with no caption is an ordinary Slack message and an empty prompt.
     const { deps, posts, runs, asked } = harness();
     assert.equal(
       await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: '   ' }, deps),
@@ -247,8 +246,8 @@ describe('dm message', () => {
 
   it('refuses a machine that is there but has nothing to run', async () => {
     // Ready and still unusable: the companion advertised no agent, or no token
-    // came back. Neither is something the member can act on, so the honest
-    // answer is short — and it must not read as "go" for want of a refusal.
+    // came back. Neither is something the member can act on, so the answer is
+    // short — and this must not read as "go" for want of a refusal.
     const bare: TurnTarget = { endpoint: 'ep-1', device: 'the studio Mac', state: 'ready' };
     const { deps, posts, runs } = harness({ endpoint: bare });
     assert.equal(

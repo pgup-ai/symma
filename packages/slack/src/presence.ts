@@ -1,9 +1,8 @@
 /**
  * §3's right column: what a member is told about the machine their agent runs
- * on. Every line names what to do next, because "offline" on its own is one
- * word for situations a member experiences as completely different things —
- * and it sends people to whoever administers symma when the answer was to open
- * their own lid.
+ * on. Every line names what to do next, because "offline" is one word for
+ * situations they experience as completely different things — and it sends
+ * people to whoever administers symma when the answer was their own lid.
  */
 import type { EndpointState, TurnTarget } from '@symma/protocol';
 
@@ -23,12 +22,8 @@ const said: Record<Exclude<EndpointState, 'ready'>, (device: string) => string> 
  * there and the turn still not going — nothing advertised to run, or no token. */
 export type RefusalReason = Exclude<EndpointState, 'ready'> | 'unpaired' | 'unusable';
 
-/**
- * Whether this turn can run, and what to say when it cannot.
- *
- * One decision rather than a question and a separate lookup, so a caller cannot
- * read "no refusal" as "go" and then find it has nothing to go with.
- */
+/** Whether this turn can run, and what to say when it cannot — one decision, so
+ * a caller cannot read "no refusal" as "go" and find it has nothing to go with. */
 export type TurnDecision =
   | { run: true; endpoint: string; agent: string; token: string }
   | { run: false; why: string; because: RefusalReason };
