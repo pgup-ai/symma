@@ -3,15 +3,12 @@
  * because the member said so.
  *
  * "Invoking the agent is not consent to publish its response" is the whole
- * point of the section, so nothing here happens without the click — and the
- * click is on a button whose confirm named the destination first.
+ * point of the section, so nothing here happens without the click.
  */
 import type { Unusable } from './slack-api.js';
 
 /** The click, narrowed to what this reads. */
 export interface ShareRequest {
-  /** Who pressed it. The shared post carries their name, so an answer in a
-   * channel is always attributable to a person rather than to the bot. */
   user: string;
   /** The DM channel and message the button sits on — where the answer is, and
    * where any refusal goes back to. */
@@ -19,7 +16,7 @@ export interface ShareRequest {
   messageTs: string;
   /** The answer itself, off the message the button is attached to. */
   text: string;
-  /** What the button carried: which conversation, and nothing about where. */
+  /** All the button carried — where it may go is the gateway's answer. */
   conversation: string;
 }
 
@@ -50,9 +47,9 @@ const because: Record<Unusable, string> = {
 export async function handleShare(request: ShareRequest, deps: ShareDeps): Promise<ShareOutcome> {
   const to = await deps.destination(request.conversation);
   if (!to) {
-    // A conversation that began in the DM never had a thread to go back to, and
-    // one that is not theirs answers the same way — the button should not have
-    // been there either way, so this says what is true rather than what failed.
+    // Covers a conversation opened in the DM and one that is not theirs alike:
+    // the button should not have been there either way, so this says what is
+    // true rather than which of the two it was.
     await deps.post(
       request.channel,
       'There is no thread to share this back to.',

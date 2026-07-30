@@ -273,29 +273,25 @@ const connection = socketMode({
         message?: { ts?: unknown; text?: unknown };
         actions?: { action_id?: unknown; value?: unknown }[];
       };
-      const action = actions?.find((a) => a.action_id === SHARE_ACTION);
+      const conversation = actions?.find((a) => a.action_id === SHARE_ACTION)?.value;
+      const who = user?.id;
+      const where = channel?.id;
+      const messageTs = message?.ts;
+      // The answer comes off the message the button sits on, so what is shared
+      // is exactly what the member was looking at when they pressed it.
+      const text = message?.text;
       if (
-        !action ||
-        typeof action.value !== 'string' ||
-        typeof user?.id !== 'string' ||
-        typeof channel?.id !== 'string' ||
-        typeof message?.ts !== 'string' ||
-        typeof message.text !== 'string'
+        typeof conversation !== 'string' ||
+        typeof who !== 'string' ||
+        typeof where !== 'string' ||
+        typeof messageTs !== 'string' ||
+        typeof text !== 'string'
       ) {
         return;
       }
-      const who = user.id;
-      // The answer comes off the message the button is attached to, so what is
-      // shared is exactly what the member was looking at when they pressed it.
       await announcing(who, 'share', () =>
         handleShare(
-          {
-            user: who,
-            channel: channel.id as string,
-            messageTs: message.ts as string,
-            text: message.text as string,
-            conversation: action.value as string,
-          },
+          { user: who, channel: where, messageTs, text, conversation },
           { destination: depsFor(who).destination, share: api.share, post: api.post },
         ),
       );
