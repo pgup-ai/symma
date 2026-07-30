@@ -94,6 +94,11 @@ CREATE TABLE IF NOT EXISTS conversations (
   endpoint_id       text,
   agent             text NOT NULL DEFAULT '',
   model             text,
+  -- The workspace id this conversation last ran in, so a thread keeps answering
+  -- about the same project (§4). An opaque id the companion advertised, never a
+  -- path — and only a preference: it is dropped if that endpoint stops offering
+  -- it, rather than refusing the turn.
+  workspace_id      text,
   -- How far up the source thread the agent has been shown. A repeat mention
   -- pulls the delta past this rather than the thread again, which is what keeps
   -- later messages from joining a running turn without being asked for (§4).
@@ -161,6 +166,10 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_activity_at timestamptz;
 UPDATE conversations SET last_activity_at = created_at WHERE last_activity_at IS NULL;
 ALTER TABLE conversations ALTER COLUMN last_activity_at SET DEFAULT now();
 ALTER TABLE conversations ALTER COLUMN last_activity_at SET NOT NULL;
+
+-- Added with §4's workspace picker; null on every conversation that predates it,
+-- which reads as "no preference yet" and takes the endpoint's first.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS workspace_id text;
 
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);
 CREATE INDEX IF NOT EXISTS endpoints_user_idx ON endpoints (user_id);

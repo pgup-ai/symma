@@ -60,13 +60,16 @@ export interface RunSpec {
   agent: string;
   token: string;
   prompt: string;
+  /** Absent for a machine that advertises no roots — the agent then opens in an
+   * empty temp directory, which the acknowledgement says out loud. */
+  workspace?: string;
 }
 
 export interface DmDeps {
   find: (dmChannel: string, rootThread: string) => Promise<ConversationRef | undefined>;
   /** The machine this member's agent would run on, whatever state it is in, and
    * what it takes to drive it. Undefined when they have paired none. */
-  endpoint: () => Promise<TurnTarget | undefined>;
+  endpoint: (conversation: string) => Promise<TurnTarget | undefined>;
   turn: (spec: {
     dmChannel: string;
     rootThread: string;
@@ -121,22 +124,24 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
 
   // Asked after the dedupe gate, so a redelivery costs the gateway nothing —
   // and, since asking mints a token, costs it no credential either.
-  const decision = decideTurn(await deps.endpoint());
+  const decision = decideTurn(await deps.endpoint(conversation.id));
   if (!decision.run) {
     await deps.post(conversation.dmChannel, decision.why, conversation.rootThread);
     return `refused: ${decision.because}`;
   }
 
   // A run has twenty minutes to answer, so silence that long reads as broken.
-  // Both caveats are said rather than left to be discovered: until
-  // `hello.workspaces[]` lands the agent opens in an empty temp directory, and
-  // §4 will not have an empty session passed off as a resume.
-  const noFiles = 'It has no access to your files yet';
+  // §4 wants the scope in the DM root rather than guessed at, so the answer
+  // says which project it is about — or that it can see no files at all, which
+  // is the one thing a member would otherwise assume wrong.
+  const scope = decision.label
+    ? `On it, in \`${decision.label}\`.`
+    : 'On it. It has no access to your files, so keep the question self-contained.';
   await deps.post(
     conversation.dmChannel,
     existing
-      ? `On it. ${noFiles}, and each turn is its own session, so it will not remember what came before.`
-      : `On it. ${noFiles}, so keep the question self-contained.`,
+      ? `${scope} Each turn is its own session, so it will not remember what came before.`
+      : scope,
     conversation.rootThread,
   );
 
@@ -148,6 +153,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       agent: decision.agent,
       token: decision.token,
       prompt: message.text,
+      ...(decision.workspace ? { workspace: decision.workspace } : {}),
     });
   } catch (error) {
     // Posted into the thread they are watching rather than left to the socket's

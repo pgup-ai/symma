@@ -71,6 +71,12 @@ export interface SelectedEndpoint {
 export interface TurnTarget extends SelectedEndpoint {
   /** One the endpoint advertised — an unoffered name is refused (§5). */
   agent?: string;
+  /** Where the turn will run, chosen from what this endpoint offers and sticky
+   * per conversation (§4). Absent is the no-workspace mode: an empty temp
+   * directory, for a machine that advertises no roots. */
+  workspace?: string;
+  /** Its label, so the answer's scope can be shown rather than guessed at. */
+  workspaceLabel?: string;
   /** Short-lived and scoped to the member, so the caller can act as them for
    * the length of one turn and no longer. */
   token?: string;

@@ -179,7 +179,12 @@ const as = (token: string, path: string, init?: RequestInit): Promise<Response> 
   });
 
 /** Attach a companion for `endpoint` and leave its SSE leg open. */
-const attach = async (token: string, endpoint: string, agents = ['kilo']): Promise<() => void> => {
+const attach = async (
+  token: string,
+  endpoint: string,
+  agents = ['kilo'],
+  workspaces?: { id: string; label: string }[],
+): Promise<() => void> => {
   const abort = new AbortController();
   void fetch(`${base}/api/endpoints/${endpoint}/stream`, {
     headers: { authorization: `Bearer ${token}` },
@@ -193,6 +198,7 @@ const attach = async (token: string, endpoint: string, agents = ['kilo']): Promi
       device: endpoint,
       agents: agents.map((agent) => ({ agent })),
       maxSessions: 2,
+      ...(workspaces ? { workspaces } : {}),
     })}\n`,
   });
   return () => abort.abort();
@@ -1264,6 +1270,58 @@ describe('tenancy', () => {
     }
   });
 
+  it('keeps a thread on the project it already ran in', async () => {
+    // §4: the thread's own choice beats whatever the endpoint lists first, and
+    // is a preference rather than a claim — unlisting it answers in the one
+    // that is left instead of refusing about a directory they no longer have.
+    const url = pg.getConnectionUri();
+    const ivy = await provision(url, { team: 'ws', slackUser: 'ivy', endpoint: 'ivy-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const ask = async (conversation?: string): Promise<Record<string, string>> =>
+      (await (
+        await fetch(`${base}/api/slack/endpoint`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+          body: JSON.stringify({ team: 'ws', user: 'ivy', ...(conversation && { conversation }) }),
+        })
+      ).json()) as Record<string, string>;
+    let detach: (() => void) | undefined;
+    try {
+      const both = [
+        { id: 'aaaaaaaaaaaa', label: 'symma' },
+        { id: 'bbbbbbbbbbbb', label: 'jbot' },
+      ];
+      detach = await attach(ivy.endpointToken, 'ivy-box', ['kilo'], both);
+      const conversation = await waitFor(async () => {
+        const opened = await store.openConversation(ivy.owner, {
+          dmChannel: 'D-ivy',
+          rootThread: '1.0',
+        });
+        return opened?.id;
+      }, 'a conversation to bind');
+
+      // Nothing recorded yet, so the first offered wins — and is written back.
+      assert.equal((await ask(conversation)).workspace, 'aaaaaaaaaaaa');
+      await store.bindConversation(ivy.owner, conversation, 'bbbbbbbbbbbb');
+      const second = await ask(conversation);
+      assert.equal(second.workspace, 'bbbbbbbbbbbb', 'the thread kept its own project');
+      assert.equal(second.workspaceLabel, 'jbot');
+
+      // A different thread is not dragged along by the first one's choice.
+      assert.equal((await ask()).workspace, 'aaaaaaaaaaaa');
+
+      // And unlisting it falls back rather than refusing.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(ivy.endpointToken, 'ivy-box', ['kilo'], [both[0]!]);
+        return (await ask(conversation)).workspace === 'aaaaaaaaaaaa' ? off : (off(), undefined);
+      }, 'the endpoint reattached offering only one');
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
   it('refuses a spent code, and a companion with nothing to run', async () => {
     const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });
@@ -1543,7 +1601,13 @@ describe('tenancy', () => {
 
       // Removing the member takes theirs, and only theirs.
       await pool.query(`DELETE FROM users WHERE id = $1`, [tia.owner]);
-      const left = await pool.query(`SELECT id FROM conversations ORDER BY id`);
+      // Scoped to the two members this case is about. Asserting over the whole
+      // table proved the same thing only for as long as no other test opened a
+      // conversation, which is a fact about test order and not about the rule.
+      const left = await pool.query(
+        `SELECT id FROM conversations WHERE user_id IN ($1, $2) ORDER BY id`,
+        [tia.owner, uzo.owner],
+      );
       assert.deepEqual(
         left.rows.map((r: { id: string }) => r.id),
         ['conv-uzo'],

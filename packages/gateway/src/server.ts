@@ -867,18 +867,40 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/endpoint') {
+      const { conversation } = body as { conversation?: unknown };
       const live = new Map(relay.listEndpoints(owner).map((e) => [e.endpoint, e]));
       const selected = selectEndpoint(await store.endpointsFor(owner), live, relay.stateOf);
       // `{}` is "nothing paired", the shape the conversation lookups already use.
       if (!selected) return sendJson(res, 200, {});
+      const attached = live.get(selected.endpoint);
       // The agent the endpoint offers first. §5's picker replaces this with the
       // member's own choice; until then it is whatever their companion found.
-      const agent = live.get(selected.endpoint)?.agents[0]?.agent;
+      const agent = attached?.agents[0]?.agent;
       if (selected.state !== 'ready' || !agent) return sendJson(res, 200, selected);
+
+      // §4: what this thread last ran in, if that machine still offers it, else
+      // whatever it offers first. A recorded id is a preference and not a claim
+      // — a member who unlists a root, or asks from a different laptop, gets an
+      // answer rather than a refusal about a directory they no longer have.
+      const offered = attached?.workspaces ?? [];
+      const remembered = str(conversation)
+        ? (await store.conversationForId(owner, conversation))?.workspaceId
+        : undefined;
+      const workspace = offered.find((w) => w.id === remembered) ?? offered[0];
+      // Written back so the thread keeps its project: §9's picker overrides this
+      // rather than replacing it.
+      if (workspace && str(conversation) && workspace.id !== remembered)
+        await store.bindConversation(owner, conversation, workspace.id);
+
       // Minted here rather than on every presence check: this route is asked
       // once per turn that is going to run, so a refusal costs no credential.
       const token = await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES);
-      return sendJson(res, 200, { ...selected, agent, token });
+      return sendJson(res, 200, {
+        ...selected,
+        agent,
+        token,
+        ...(workspace ? { workspace: workspace.id, workspaceLabel: workspace.label } : {}),
+      });
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —

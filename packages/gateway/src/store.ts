@@ -38,6 +38,9 @@ export interface Conversation {
   /** How far up the source thread the agent has been shown; absent until a
    * snapshot has been taken for it. */
   seenThroughTs?: string;
+  /** The workspace this thread last ran in (§4). A preference, not a claim: the
+   * endpoint chosen now may no longer advertise it. */
+  workspaceId?: string;
 }
 
 export interface Store {
@@ -135,6 +138,14 @@ export interface Store {
     model?: string;
   }): Promise<void>;
   markSeen(endpoint: string): Promise<void>;
+  /** One conversation by id, scoped to its owner — the id arrives from the bot,
+   * and an id alone is not authorization. */
+  conversationForId(owner: Owner, conversation: string): Promise<Conversation | undefined>;
+  /** Records what this conversation ran on, so the next turn in the thread lands
+   * on the same project (§4) rather than wherever the endpoint happens to list
+   * first. Scoped to the owner: the id arrives from the bot, and an id alone is
+   * not authorization. */
+  bindConversation(owner: Owner, conversation: string, workspaceId: string): Promise<void>;
   /** A client token for this member, good for `ttlMinutes`. The bot holds no
    * credential of its own (§6), so this is how it acts as whoever is asking —
    * for one turn, rather than by being handed a standing key to them. */
@@ -164,6 +175,23 @@ export interface Store {
 /** Spread, so an absent cursor is a missing key rather than an explicit
  * undefined — the shape the rest of this file uses for optional columns. */
 const seen = (ts: string | null): { seenThroughTs?: string } => (ts ? { seenThroughTs: ts } : {});
+
+/** Both conversation lookups differ only in the key they ask by, so they read
+ * the same row back and build it the same way. */
+interface Row {
+  id: string;
+  dm: string;
+  root: string;
+  seen: string | null;
+  workspace: string | null;
+}
+const conversationFrom = (row: Row): Conversation => ({
+  id: row.id,
+  dmChannel: row.dm,
+  rootThread: row.root,
+  ...seen(row.seen),
+  ...(row.workspace ? { workspaceId: row.workspace } : {}),
+});
 
 /** Tokens are compared by hash, so the plaintext never lands in a row or a log. */
 const hashToken = (token: string): string => createHash('sha256').update(token).digest('hex');
@@ -268,22 +296,24 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       }
     },
     async conversationForSource(owner, sourceChannel, sourceThread) {
-      const row = await one<{ id: string; dm: string; root: string; seen: string | null }>(
-        `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen
+      const row = await one<Row>(
+        `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
+                workspace_id AS workspace
            FROM conversations
           WHERE user_id = $1 AND source_channel_id = $2 AND source_thread_ts = $3`,
         [owner, sourceChannel, sourceThread],
       );
-      return row && { id: row.id, dmChannel: row.dm, rootThread: row.root, ...seen(row.seen) };
+      return row && conversationFrom(row);
     },
     async conversationForDm(owner, dmChannel, rootThread) {
-      const row = await one<{ id: string; dm: string; root: string; seen: string | null }>(
-        `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen
+      const row = await one<Row>(
+        `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
+                workspace_id AS workspace
            FROM conversations
           WHERE user_id = $1 AND dm_channel_id = $2 AND root_thread_ts = $3`,
         [owner, dmChannel, rootThread],
       );
-      return row && { id: row.id, dmChannel: row.dm, rootThread: row.root, ...seen(row.seen) };
+      return row && conversationFrom(row);
     },
     async openConversation(owner, spec) {
       const id = randomUUID();
@@ -500,6 +530,22 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         `DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < now()`,
       );
       return rowCount ?? 0;
+    },
+    async conversationForId(owner, conversation) {
+      const row = await one<Row>(
+        `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
+                workspace_id AS workspace
+           FROM conversations
+          WHERE user_id = $1 AND id = $2`,
+        [owner, conversation],
+      );
+      return row && conversationFrom(row);
+    },
+    async bindConversation(owner, conversation, workspaceId) {
+      await pool.query(
+        `UPDATE conversations SET workspace_id = $3 WHERE id = $2 AND user_id = $1`,
+        [owner, conversation, workspaceId],
+      );
     },
     async mintClientToken(owner, ttlMinutes) {
       const token = randomUUID();
@@ -793,6 +839,8 @@ export function localStore(
     markSeen: () => Promise.resolve(),
     endpointsFor: needsDatabase,
     mintClientToken: needsDatabase,
+    bindConversation: needsDatabase,
+    conversationForId: needsDatabase,
     expireTokens: needsDatabase,
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
