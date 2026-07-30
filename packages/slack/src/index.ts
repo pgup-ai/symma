@@ -5,6 +5,7 @@
  * has not earned any of them yet.
  */
 import { connectMessage, runConnect, type MintResult } from './connect.js';
+import { handleDm, isMemberDm } from './dm.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import { slackApi } from './slack-api.js';
 import { socketMode } from './socket-mode.js';
@@ -89,32 +90,61 @@ const mint = async (slackUser: string): Promise<MintResult> => {
 
 const api = slackApi(botToken);
 
-/** A mention carries the member's Slack id, which is the trusted assertion of
- * who is asking — the same one `/connect` pairs on. */
-const mentionDeps = (user: string) => ({
-  budgetBytes,
-  log,
-  threadReplies: api.threadReplies,
-  openDm: api.openDm,
-  post: api.post,
-  // Read at the boundary rather than cast: an empty object is the gateway saying
-  // this thread has no conversation yet, which is the ordinary first mention.
-  find: async (sourceChannel: string, sourceThread: string) => {
-    const found = await ask<Partial<ConversationRef>>('/api/slack/conversation', {
+/**
+ * Runs a handler and makes sure the member hears about it either way.
+ *
+ * The envelope is acked before the handler runs, so Slack will not redeliver and
+ * a throw would leave them waiting on nothing. Shared rather than repeated: the
+ * mention path grew this after a review and the DM path was written without it,
+ * which is one copy going stale immediately.
+ */
+async function announcing(user: string, what: string, run: () => Promise<string>): Promise<void> {
+  try {
+    log(`${what}: ${await run()}`);
+  } catch (error) {
+    log(`${what} failed: ${String(error)}`);
+    await api
+      .openDm(user)
+      .then((dm) => api.post(dm, 'That did not get through — say it again and I will retry.'))
+      .catch(() => log('could not tell them it failed either'));
+  }
+}
+
+/** Everything either path needs, bound to the member's Slack id — the trusted
+ * assertion of who is asking, and the same one `/connect` pairs on. */
+const depsFor = (user: string) => {
+  // Both lookups read the same shape back and differ only in the key they ask
+  // by. Read at the boundary rather than cast: an empty object is the gateway
+  // saying this thread has no conversation, which is the ordinary first mention
+  // and also a DM thread the bot did not open.
+  const lookup = async (
+    path: string,
+    by: Record<string, string>,
+  ): Promise<ConversationRef | undefined> => {
+    const { id, dmChannel, rootThread, seenThroughTs } = await ask<Partial<ConversationRef>>(path, {
       user,
-      sourceChannel,
-      sourceThread,
+      ...by,
     });
-    const { id, dmChannel, rootThread, seenThroughTs } = found;
     if (!id || !dmChannel || !rootThread) return undefined;
     return { id, dmChannel, rootThread, ...(seenThroughTs ? { seenThroughTs } : {}) };
-  },
-  turn: (spec: Record<string, unknown>) =>
-    ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
-  seen: async (conversation: string, seenThroughTs: string) => {
-    await ask('/api/slack/seen', { user, conversation, seenThroughTs });
-  },
-});
+  };
+  return {
+    budgetBytes,
+    log,
+    threadReplies: api.threadReplies,
+    openDm: api.openDm,
+    post: api.post,
+    find: (sourceChannel: string, sourceThread: string) =>
+      lookup('/api/slack/conversation', { sourceChannel, sourceThread }),
+    findDm: (dmChannel: string, rootThread: string) =>
+      lookup('/api/slack/dm', { dmChannel, rootThread }),
+    turn: (spec: Record<string, unknown>) =>
+      ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+    seen: async (conversation: string, seenThroughTs: string) => {
+      await ask('/api/slack/seen', { user, conversation, seenThroughTs });
+    },
+  };
+};
 
 const connection = socketMode({
   appToken,
@@ -131,6 +161,25 @@ const connection = socketMode({
           thread_ts?: unknown;
         };
       };
+      if (event?.type === 'message') {
+        const dm = event as Record<string, unknown>;
+        if (typeof eventId !== 'string' || !isMemberDm(dm)) return;
+        const user = dm.user as string;
+        const channel = dm.channel as string;
+        const deps = depsFor(user);
+        await announcing(user, `dm in ${channel}`, () =>
+          handleDm(
+            {
+              channel,
+              ts: dm.ts as string,
+              ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
+              eventId,
+            },
+            { find: deps.findDm, turn: deps.turn, post: deps.post },
+          ),
+        );
+        return;
+      }
       if (event?.type !== 'app_mention') return;
       if (
         typeof eventId !== 'string' ||
@@ -147,23 +196,9 @@ const connection = socketMode({
         threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
         eventId,
       };
-      try {
-        log(
-          `mention in ${event.channel}: ${await handleMention(mention, mentionDeps(event.user))}`,
-        );
-      } catch (error) {
-        // The envelope was acked before this ran, so Slack will not redeliver and
-        // a throw would leave the member waiting on nothing. Telling them costs
-        // one message and is the only definite outcome available; a durable queue
-        // is the fuller answer and is not built.
-        log(`mention in ${event.channel} failed: ${String(error)}`);
-        await api
-          .openDm(event.user)
-          .then((dm) =>
-            api.post(dm, 'That did not get through — mention me again and I will retry.'),
-          )
-          .catch(() => log('could not tell them it failed either'));
-      }
+      await announcing(mention.user, `mention in ${mention.channel}`, () =>
+        handleMention(mention, depsFor(mention.user)),
+      );
       return;
     }
     if (envelope.type !== 'slash_commands') return;
@@ -179,6 +214,13 @@ const connection = socketMode({
     // socket's handler catch reports.
     log(`/connect: ${outcome.ok ? 'minted' : outcome.why}`);
   },
+});
+
+// Exit rather than log: a bot left up on a permanent connection failure looks
+// healthy to everything except the members it is ignoring.
+connection.ready.catch((error: unknown) => {
+  console.error(`[symma-slack] cannot connect to slack: ${String(error)}`);
+  process.exit(1);
 });
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

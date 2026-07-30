@@ -33,6 +33,7 @@ import {
   openStore,
   PAIRING_TTL_MINUTES,
   sameSecret,
+  type Conversation,
   type Owner,
   type SessionRef,
   type Store,
@@ -805,27 +806,41 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // first mention, not a failure the bot should read as one.
       return sendJson(res, 200, (await store.conversationForSource(owner, ...source)) ?? {});
     }
+    if (url.pathname === '/api/slack/dm') {
+      const { dmChannel, rootThread } = body as { dmChannel?: unknown; rootThread?: unknown };
+      if (!str(dmChannel) || !str(rootThread)) return sendJson(res, 400, { error: 'request' });
+      return sendJson(
+        res,
+        200,
+        (await store.conversationForDm(owner, dmChannel, rootThread)) ?? {},
+      );
+    }
     if (url.pathname === '/api/slack/turn') {
+      // A mention is keyed by the thread it came from; a DM by its own root,
+      // which is all a conversation started in the DM has.
       const source = threadOf(body);
       const { dmChannel, rootThread, slackEventId } = body as {
         dmChannel?: unknown;
         rootThread?: unknown;
         slackEventId?: unknown;
       };
-      if (!source || !str(dmChannel) || !str(rootThread) || !str(slackEventId))
+      if (!str(dmChannel) || !str(rootThread) || !str(slackEventId))
         return sendJson(res, 400, { error: 'request' });
+      const find = (): Promise<Conversation | undefined> =>
+        source
+          ? store.conversationForSource(owner, ...source)
+          : store.conversationForDm(owner, dmChannel, rootThread);
       // Find, else open, else find again: `openConversation` declines rather
-      // than overwrite when a concurrent mention won, and the loser's answer is
+      // than overwrite when a concurrent delivery won, and the loser's answer is
       // to carry on in the thread that won.
       const conversation =
-        (await store.conversationForSource(owner, ...source)) ??
+        (await find()) ??
         (await store.openConversation(owner, {
           dmChannel,
           rootThread,
-          sourceChannel: source[0],
-          sourceThread: source[1],
+          ...(source ? { sourceChannel: source[0], sourceThread: source[1] } : {}),
         })) ??
-        (await store.conversationForSource(owner, ...source));
+        (await find());
       if (!conversation) return sendJson(res, 409, { error: 'conflict' });
       // An absent turn is a redelivery finding its own work, which the bot
       // answers by not repeating it — not an error.

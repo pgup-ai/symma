@@ -1525,6 +1525,23 @@ describe('tenancy', () => {
       const mine = `SELECT count(*)::int AS n FROM turns WHERE conversation_id = $1`;
       assert.equal((await pool.query(mine, [first.id])).rows[0].n, 1);
 
+      // A DM reply finds its conversation by the root it threads under, which is
+      // the other key the same row answers to.
+      assert.deepEqual(await store.conversationForDm(wynn.owner, 'D-wynn', '200.0'), {
+        id: first.id,
+        dmChannel: 'D-wynn',
+        rootThread: '200.0',
+        seenThroughTs: '100.5',
+      });
+      assert.equal(await store.conversationForDm(wynn.owner, 'D-wynn', '999.0'), undefined);
+
+      // A conversation opened in the DM has no source, so it collides on its own
+      // root instead — which a redelivery reuses, since the root is the member's
+      // own message ts.
+      const bare = { dmChannel: 'D-wynn', rootThread: '400.0' };
+      assert.ok(await store.openConversation(wynn.owner, bare));
+      assert.equal(await store.openConversation(wynn.owner, bare), undefined);
+
       // Retention forgets by last use. A conversation opened long ago but
       // answered today is not stale, which is why the sweep cannot key on
       // created_at.

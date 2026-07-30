@@ -1,38 +1,42 @@
 /**
- * The two Slack Web API calls the mention path needs. Hand-rolled for the same
- * reason Socket Mode is: `fetch` is the whole transport, and Slack's own docs are
- * the contract.
+ * The Slack Web API calls the conversation paths need.
+ *
+ * `@slack/web-api` carries what this layer would otherwise owe Slack itself:
+ * pagination cursors, `ok: false` on a 200, a typed error holding Slack's own
+ * code, and `Retry-After` on a 429.
  */
+import { ErrorCode, WebClient, type WebAPIPlatformError } from '@slack/web-api';
+
 import type { ThreadMessage } from './snapshot.js';
 
-/** Carries Slack's own error code, so a caller can decide on it rather than
- * reparse a message we formatted. */
-class SlackError extends Error {
-  constructor(
-    readonly code: string,
-    method: string,
-  ) {
-    super(`${method}: ${code}`);
-  }
-}
-
-/** Slack answers 200 with `ok: false`, so a status is never the whole answer. */
-async function call<T>(token: string, method: string, body: unknown): Promise<T> {
-  const res = await fetch(`https://slack.com/api/${method}`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!res.ok) throw new SlackError(`http ${res.status}`, method);
-  const answer = (await res.json()) as { ok?: boolean; error?: string };
-  if (!answer.ok) throw new SlackError(answer.error ?? 'not ok', method);
-  return answer as T;
+export interface SlackApi {
+  /** Oldest first. Undefined when the bot cannot see the channel at all, which
+   * §4 wants said out loud rather than answered around. */
+  threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
+  /** The member's DM channel. Asked for rather than assumed: Slack's docs
+   * disagree about whether a user id can stand in as a channel. */
+  openDm: (user: string) => Promise<string>;
+  post: (
+    channel: string,
+    text: string,
+    threadTs?: string,
+  ) => Promise<{ channel: string; ts: string }>;
 }
 
 /** Threads cap far below this in practice; it is here so a pathological one
  * cannot spin the fetch loop, not as a limit anybody should reach. */
 const MAX_PAGES = 20;
+
+/** Slack codes that mean "not visible to this bot" rather than "broken". Anything
+ * else throws: guessing which is which is how a partial snapshot gets answered. */
+const UNREADABLE = new Set(['not_in_channel', 'channel_not_found', 'missing_scope']);
+
+/** Read off the typed error, never off a message — the code is the fact, and a
+ * message is prose a version can reword. */
+const slackCode = (error: unknown): string | undefined =>
+  (error as { code?: string }).code === ErrorCode.PlatformError
+    ? (error as WebAPIPlatformError).data.error
+    : undefined;
 
 interface RawMessage {
   ts?: unknown;
@@ -41,86 +45,66 @@ interface RawMessage {
   files?: { name?: unknown; size?: unknown }[];
 }
 
-export interface SlackApi {
-  /** Oldest first. Undefined when the bot cannot see the channel at all, which
-   * §4 wants said out loud rather than answered around. */
-  threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
-  /** The member's DM channel. Slack's docs disagree about whether a user id can
-   * stand in as a channel — one page says it opens the DM, another says the
-   * message lands in the Slackbot conversation instead — so this asks. */
-  openDm: (user: string) => Promise<string>;
-  /** Returns the posted message's ts. `channel` is a real channel id. */
-  post: (
-    channel: string,
-    text: string,
-    threadTs?: string,
-  ) => Promise<{ channel: string; ts: string }>;
-}
+const read = (raw: RawMessage[]): ThreadMessage[] =>
+  raw
+    .filter((m): m is RawMessage & { ts: string } => typeof m.ts === 'string')
+    .map((m) => ({
+      ts: m.ts,
+      author: typeof m.user === 'string' ? m.user : 'unknown',
+      text: typeof m.text === 'string' ? m.text : '',
+      // Named, never fetched: downloading widens both the scope request and the
+      // data-lifecycle surface (§10).
+      ...(m.files?.length
+        ? {
+            files: m.files.map((f) => ({
+              name: typeof f.name === 'string' ? f.name : 'file',
+              ...(typeof f.size === 'number' ? { size: f.size } : {}),
+            })),
+          }
+        : {}),
+    }));
 
-/** Slack codes that mean "not visible to this bot" rather than "broken". Anything
- * else throws: guessing which is which is how a partial snapshot gets answered. */
-const UNREADABLE = new Set(['not_in_channel', 'channel_not_found', 'missing_scope']);
-
-export function slackApi(token: string): SlackApi {
+/** `fetch` is injectable so a test can answer without a live workspace; the
+ * default client keeps the SDK's own retry, which is what handles a 429. */
+export function slackApi(token: string, options: { fetch?: typeof fetch } = {}): SlackApi {
+  const client = new WebClient(token, options.fetch ? { fetch: options.fetch } : {});
   return {
     async threadReplies(channel, thread) {
       try {
-        // Paged to the end, because `conversations.replies` returns the *oldest*
-        // replies first: stopping at one page and advancing the cursor to its
-        // newest would put every later page permanently behind the cursor, so
-        // they could never enter a snapshot and nothing would say so.
         const raw: RawMessage[] = [];
-        let cursor: string | undefined;
-        for (let page = 0; page < MAX_PAGES; page += 1) {
-          const answer = await call<{
-            messages?: RawMessage[];
-            response_metadata?: { next_cursor?: string };
-          }>(token, 'conversations.replies', {
-            channel,
-            ts: thread,
-            limit: 200,
-            ...(cursor ? { cursor } : {}),
-          });
-          raw.push(...(answer.messages ?? []));
-          cursor = answer.response_metadata?.next_cursor || undefined;
-          if (!cursor) break;
+        let pages = 0;
+        // Paged to the end, because `conversations.replies` returns the oldest
+        // replies first: stopping at one page and advancing the cursor to its
+        // newest would put every later page permanently behind it.
+        for await (const page of client.paginate('conversations.replies', {
+          channel,
+          ts: thread,
+          limit: 200,
+        })) {
+          // Refused rather than truncated, for the same reason: what a cap drops
+          // is the newest end, the part the question is most likely about.
+          if (++pages > MAX_PAGES) throw new Error('thread too long to read');
+          raw.push(...((page as { messages?: RawMessage[] }).messages ?? []));
         }
-        // Only reachable on a thread past MAX_PAGES × 200 replies, where what is
-        // missing is the newest end — the part that matters most.
-        if (cursor) throw new SlackError('thread too long to read', 'conversations.replies');
-        return raw
-          .filter((m): m is RawMessage & { ts: string } => typeof m.ts === 'string')
-          .map((m) => ({
-            ts: m.ts,
-            author: typeof m.user === 'string' ? m.user : 'unknown',
-            text: typeof m.text === 'string' ? m.text : '',
-            ...(m.files?.length
-              ? {
-                  files: m.files.map((f) => ({
-                    name: typeof f.name === 'string' ? f.name : 'file',
-                    ...(typeof f.size === 'number' ? { size: f.size } : {}),
-                  })),
-                }
-              : {}),
-          }));
+        return read(raw);
       } catch (error) {
-        if (error instanceof SlackError && UNREADABLE.has(error.code)) return undefined;
+        const code = slackCode(error);
+        if (code && UNREADABLE.has(code)) return undefined;
         throw error;
       }
     },
     async openDm(user) {
-      const { channel } = await call<{ channel?: { id?: string } }>(token, 'conversations.open', {
-        users: user,
-      });
-      if (!channel?.id) throw new SlackError('no channel', 'conversations.open');
+      const { channel } = await client.conversations.open({ users: user });
+      if (!channel?.id) throw new Error('conversations.open returned no channel');
       return channel.id;
     },
     async post(channel, text, threadTs) {
-      const sent = await call<{ channel: string; ts: string }>(token, 'chat.postMessage', {
+      const sent = await client.chat.postMessage({
         channel,
         text,
         ...(threadTs ? { thread_ts: threadTs } : {}),
       });
+      if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
       return { channel: sent.channel, ts: sent.ts };
     },
   };
