@@ -115,7 +115,16 @@ async function catchUp(
   conversation: ConversationRef,
   deps: DmDeps,
 ): Promise<{ context: string; note: string } | undefined> {
-  const replies = await deps.threadReplies(conversation.dmChannel, conversation.rootThread);
+  // Fails open, per the auxiliary rule: this is context, not the answer.
+  // `threadReplies` throws on a thread past its page cap and on any Slack error
+  // that is not a plain "cannot see it" — and a conversation long enough to
+  // reach that cap is precisely the one worth catching up.
+  const replies = await deps
+    .threadReplies(conversation.dmChannel, conversation.rootThread)
+    .catch((error: unknown) => {
+      deps.log(`catch-up skipped: ${String(error)}`);
+      return undefined;
+    });
   const earlier = (replies ?? []).filter((reply) => reply.ts !== message.ts);
   const snapshot = threadSnapshot(earlier, { budgetBytes: deps.budgetBytes });
   if (!snapshot.text) return undefined;

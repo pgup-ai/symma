@@ -26,6 +26,9 @@ function harness(
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
     history?: ThreadMessage[] | null;
+    /** A thread read that throws rather than coming back empty — a page cap, a
+     * transient Slack error. */
+    historyFails?: Error;
     budgetBytes?: number;
   } = {},
 ) {
@@ -39,7 +42,10 @@ function harness(
   const selected = over.endpoint === undefined ? READY : over.endpoint;
   const deps: DmDeps = {
     budgetBytes: over.budgetBytes ?? 24_000,
-    threadReplies: () => Promise.resolve(over.history === null ? undefined : (over.history ?? [])),
+    threadReplies: () =>
+      over.historyFails
+        ? Promise.reject(over.historyFails)
+        : Promise.resolve(over.history === null ? undefined : (over.history ?? [])),
     log: () => {},
     run: (spec) => {
       runs.push(spec);
@@ -265,6 +271,25 @@ describe('dm message', () => {
     );
     assert.equal(runs[0]!.prompt, 'and now?');
     assert.doesNotMatch(posts[0]!.text, /Catching it up/);
+  });
+
+  it('answers when the thread read throws, not just when it comes back empty', async () => {
+    // Invariant 2: catch-up is context, not the answer. `threadReplies` throws
+    // past its page cap — which a long conversation is exactly how you reach —
+    // and that must not be the thing that stops a member's question running.
+    const { deps, posts, runs } = harness({
+      existing: CONVERSATION,
+      historyFails: new Error('thread too long to read'),
+    });
+    assert.equal(
+      await handleDm(
+        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+        deps,
+      ),
+      'resumed',
+    );
+    assert.equal(runs[0]!.prompt, 'and now?');
+    assert.equal(posts.at(-1)!.text, 'the answer');
   });
 
   it('does not spend a laptop on a message with no question in it', async () => {
