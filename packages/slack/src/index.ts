@@ -5,6 +5,8 @@
  * has not earned any of them yet.
  */
 import { connectMessage, runConnect, type MintResult } from './connect.js';
+import { handleMention, type ConversationRef } from './mention.js';
+import { slackApi } from './slack-api.js';
 import { socketMode } from './socket-mode.js';
 
 const log = (message: string): void => {
@@ -22,24 +24,30 @@ function required(name: string): string {
   return value;
 }
 
-/** Asks the gateway, which owns the member lookup and the code. The bot never
- * reaches the database: `(team, user) → owner` is the check §6 marks as the
- * entire security model, and it belongs on the side that can enforce it. */
-function mintThrough(
-  gateway: string,
-  token: string,
-  team: string,
-): (slackUser: string) => Promise<MintResult> {
-  return async (slackUser) => {
-    const res = await fetch(`${gateway}/api/slack/pair`, {
+/**
+ * Every call the bot makes to the gateway: one door, the shared secret, and the
+ * team it speaks for. The bot never reaches the database — `(team, user) → owner`
+ * is the check §6 calls the whole security model, and it belongs on the side that
+ * can enforce it.
+ *
+ * `send` hands back the response because pairing reads a status: a 403 there is
+ * an answer about the member, not an outage. `ask` covers everything else.
+ */
+function gatewayClient(base: string, token: string, team: string) {
+  const send = (path: string, body: Record<string, unknown>): Promise<Response> =>
+    fetch(`${base}${path}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ team, user: slackUser }),
+      body: JSON.stringify({ team, ...body }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (res.status === 403) return { ok: false, why: 'not-a-member' };
-    if (!res.ok) throw new Error(`gateway said ${res.status}`);
-    return { ok: true, ...((await res.json()) as { code: string; expiresInMinutes: number }) };
+  return {
+    send,
+    ask: async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
+      const res = await send(path, body);
+      if (!res.ok) throw new Error(`${path}: ${res.status}`);
+      return (await res.json()) as T;
+    },
   };
 }
 
@@ -64,12 +72,100 @@ const team = required('SYMMA_SLACK_TEAM');
 const gateway = required('SYMMA_GATEWAY').replace(/\/+$/, '');
 const gatewayToken = required('SYMMA_SLACK_GATEWAY_TOKEN');
 
-const mint = mintThrough(gateway, gatewayToken, team);
+const botToken = required('SYMMA_SLACK_BOT_TOKEN');
+// A ceiling on injected context, not a tuning knob: §4 requires a hard budget
+// and an honest account of what it left out.
+const budgetBytes = Number(process.env.SYMMA_SLACK_BUDGET_BYTES) || 24_000;
+
+const { send, ask } = gatewayClient(gateway, gatewayToken, team);
+
+const mint = async (slackUser: string): Promise<MintResult> => {
+  const res = await send('/api/slack/pair', { user: slackUser });
+  // A real answer about this member, not an outage: their account is not active.
+  if (res.status === 403) return { ok: false, why: 'not-a-member' };
+  if (!res.ok) throw new Error(`/api/slack/pair: ${res.status}`);
+  return { ok: true, ...((await res.json()) as { code: string; expiresInMinutes: number }) };
+};
+
+const api = slackApi(botToken);
+
+/** A mention carries the member's Slack id, which is the trusted assertion of
+ * who is asking — the same one `/connect` pairs on. */
+const mentionDeps = (user: string) => ({
+  budgetBytes,
+  log,
+  threadReplies: api.threadReplies,
+  openDm: api.openDm,
+  post: api.post,
+  // Read at the boundary rather than cast: an empty object is the gateway saying
+  // this thread has no conversation yet, which is the ordinary first mention.
+  find: async (sourceChannel: string, sourceThread: string) => {
+    const found = await ask<Partial<ConversationRef>>('/api/slack/conversation', {
+      user,
+      sourceChannel,
+      sourceThread,
+    });
+    const { id, dmChannel, rootThread, seenThroughTs } = found;
+    if (!id || !dmChannel || !rootThread) return undefined;
+    return { id, dmChannel, rootThread, ...(seenThroughTs ? { seenThroughTs } : {}) };
+  },
+  turn: (spec: Record<string, unknown>) =>
+    ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+  seen: async (conversation: string, seenThroughTs: string) => {
+    await ask('/api/slack/seen', { user, conversation, seenThroughTs });
+  },
+});
 
 const connection = socketMode({
   appToken,
   log,
   onEnvelope: async (envelope) => {
+    if (envelope.type === 'events_api') {
+      const { event_id: eventId, event } = envelope.payload as {
+        event_id?: unknown;
+        event?: {
+          type?: unknown;
+          user?: unknown;
+          channel?: unknown;
+          ts?: unknown;
+          thread_ts?: unknown;
+        };
+      };
+      if (event?.type !== 'app_mention') return;
+      if (
+        typeof eventId !== 'string' ||
+        typeof event.user !== 'string' ||
+        typeof event.channel !== 'string' ||
+        typeof event.ts !== 'string'
+      ) {
+        return;
+      }
+      const mention = {
+        user: event.user,
+        channel: event.channel,
+        // A mention that starts a thread is its own thread.
+        threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
+        eventId,
+      };
+      try {
+        log(
+          `mention in ${event.channel}: ${await handleMention(mention, mentionDeps(event.user))}`,
+        );
+      } catch (error) {
+        // The envelope was acked before this ran, so Slack will not redeliver and
+        // a throw would leave the member waiting on nothing. Telling them costs
+        // one message and is the only definite outcome available; a durable queue
+        // is the fuller answer and is not built.
+        log(`mention in ${event.channel} failed: ${String(error)}`);
+        await api
+          .openDm(event.user)
+          .then((dm) =>
+            api.post(dm, 'That did not get through — mention me again and I will retry.'),
+          )
+          .catch(() => log('could not tell them it failed either'));
+      }
+      return;
+    }
     if (envelope.type !== 'slash_commands') return;
     const command = envelope.payload as { command?: unknown; response_url?: unknown };
     if (command.command !== '/connect') return;

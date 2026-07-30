@@ -1324,33 +1324,49 @@ describe('tenancy', () => {
     const uzo = await provision(url, { team: 'conv', slackUser: 'uzo', endpoint: 'uzo-mac' });
     const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
     const pool = new Pool({ connectionString: url });
-    const open = (id: string, owner: string, endpoint: string, dm: string): Promise<unknown> =>
+    // Each case below varies one thing, so a rejection can only be the rule that
+    // case is about: two conversations differing in nothing violate both the DM
+    // identity and the source-thread index, and Postgres reports either.
+    const open = (
+      id: string,
+      owner: string,
+      endpoint: string,
+      dm: string,
+      sourceThread: string,
+    ): Promise<unknown> =>
       pool.query(
         `INSERT INTO conversations (id, user_id, dm_channel_id, root_thread_ts,
                                    source_channel_id, source_thread_ts, endpoint_id, agent)
-         VALUES ($1, $2, $3, '111.0', 'C-incidents', '999.0', $4, 'kilo')`,
-        [id, owner, dm, endpoint],
+         VALUES ($1, $2, $3, '111.0', 'C-incidents', $5, $4, 'kilo')`,
+        [id, owner, dm, endpoint, sourceThread],
       );
     try {
-      await open('conv-tia', tia.owner, 'tia-mac', 'D-tia');
+      await open('conv-tia', tia.owner, 'tia-mac', 'D-tia', 'T-1');
 
-      // A redelivered mention must find the conversation it already made. The
-      // thread is the identity, so the second insert has nowhere to land.
+      // One DM root is one conversation, so a reply arriving in it has exactly
+      // one conversation to resume.
       await assert.rejects(
-        open('conv-tia-again', tia.owner, 'tia-mac', 'D-tia'),
+        open('conv-dupe-root', tia.owner, 'tia-mac', 'D-tia', 'T-2'),
         broke('conversations_identity'),
+      );
+
+      // And one source thread is one conversation per member: a repeat mention
+      // continues the thread already on screen rather than opening a second (§4).
+      await assert.rejects(
+        open('conv-dupe-source', tia.owner, 'tia-mac', 'D-later', 'T-1'),
+        broke('conversations_source_thread'),
       );
 
       // Two members on one DM channel id is contrived — Slack gives each their
       // own — and that is the point: it leaves `user_id` as the only thing
       // separating them, so §4's rule that each gets a private conversation
       // from a shared thread is a constraint here rather than a claim.
-      await open('conv-uzo', uzo.owner, 'uzo-mac', 'D-tia');
+      await open('conv-uzo', uzo.owner, 'uzo-mac', 'D-tia', 'T-1');
 
       // Existence is not ownership: the endpoint has to be this member's, or a
       // conversation could drive a machine belonging to someone else.
       await assert.rejects(
-        open('conv-theft', tia.owner, 'uzo-mac', 'D-theft'),
+        open('conv-theft', tia.owner, 'uzo-mac', 'D-theft', 'T-3'),
         broke('conversations_endpoint_is_owned'),
       );
 
@@ -1451,6 +1467,145 @@ describe('tenancy', () => {
     } finally {
       await pool.end();
       await store.close();
+    }
+  });
+
+  it('continues the conversation a thread already has, and counts each mention once', async () => {
+    const url = pg.getConnectionUri();
+    const wynn = await provision(url, { team: 'flow', slackUser: 'wynn', endpoint: 'wynn-mac' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    const source = { sourceChannel: 'C-incidents', sourceThread: '100.0' };
+    try {
+      const first = await store.openConversation(wynn.owner, {
+        dmChannel: 'D-wynn',
+        rootThread: '200.0',
+        endpoint: 'wynn-mac',
+        agent: 'kilo',
+        ...source,
+      });
+      assert.ok(first);
+
+      // The thread is what a repeat mention finds, so it lands a turn in the
+      // conversation the member is already looking at (§4, amended).
+      const found = await store.conversationForSource(wynn.owner, 'C-incidents', '100.0');
+      assert.deepEqual(found, { id: first.id, dmChannel: 'D-wynn', rootThread: '200.0' });
+
+      // And a second open loses rather than overwriting: the winner's DM root is
+      // the thread already on screen.
+      assert.equal(
+        await store.openConversation(wynn.owner, {
+          dmChannel: 'D-wynn',
+          rootThread: '999.0',
+          ...source,
+        }),
+        undefined,
+      );
+
+      const turn = await store.recordTurn(first.id, 'Ev-flow');
+      assert.ok(turn);
+      // Separate calls, because a turn that fails to deliver must not leave the
+      // thread marked read.
+      await store.markConversationSeen(first.id, '100.5');
+      assert.equal(
+        (await store.conversationForSource(wynn.owner, 'C-incidents', '100.0'))?.seenThroughTs,
+        '100.5',
+      );
+
+      // A redelivery finds its own work instead of repeating it, and must not
+      // move the cursor — a delta read past '100.9' would skip the messages
+      // between, which is the silent context loss §4 forbids.
+      assert.equal(await store.recordTurn(first.id, 'Ev-flow'), undefined);
+      // And never backwards, so a slow turn cannot re-send what was already read.
+      await store.markConversationSeen(first.id, '100.4');
+      assert.equal(
+        (await store.conversationForSource(wynn.owner, 'C-incidents', '100.0'))?.seenThroughTs,
+        '100.5',
+      );
+      const mine = `SELECT count(*)::int AS n FROM turns WHERE conversation_id = $1`;
+      assert.equal((await pool.query(mine, [first.id])).rows[0].n, 1);
+
+      // Retention forgets by last use. A conversation opened long ago but
+      // answered today is not stale, which is why the sweep cannot key on
+      // created_at.
+      await pool.query(
+        `UPDATE conversations SET created_at = now() - interval '90 days' WHERE id = $1`,
+        [first.id],
+      );
+      assert.equal(await store.expireConversations(30), 0);
+
+      await pool.query(
+        `UPDATE conversations SET last_activity_at = now() - interval '90 days' WHERE id = $1`,
+        [first.id],
+      );
+      assert.equal(await store.expireConversations(30), 1);
+      assert.equal((await pool.query(mine, [first.id])).rows[0].n, 0);
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('adds the conversation columns to a database that predates them', async () => {
+    // #27 shipped `conversations` without them, and CREATE TABLE IF NOT EXISTS
+    // skips a table that exists — so on that database the columns would never
+    // arrive and every conversation query would fail on one. Dropping them is
+    // how a fresh container can look like that release.
+    const url = pg.getConnectionUri();
+    const pool = new Pool({ connectionString: url });
+    const schema = join(import.meta.dirname, '../src/schema.sql');
+    const columns = async (): Promise<string[]> =>
+      (
+        await pool.query(
+          `SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'conversations'
+              AND column_name IN ('seen_through_ts', 'last_activity_at') ORDER BY 1`,
+        )
+      ).rows.map((r: { column_name: string }) => r.column_name);
+    try {
+      // A conversation from that release, opened long ago.
+      const old = await provision(url, { team: 'old', slackUser: 'old', endpoint: 'old-mac' });
+      await pool.query(
+        `INSERT INTO conversations (id, user_id, dm_channel_id, root_thread_ts, created_at)
+         VALUES ('conv-old', $1, 'D-old', '1.0', now() - interval '90 days')`,
+        [old.owner],
+      );
+      // CASCADE takes the activity index with the column, which the re-apply has
+      // to rebuild too.
+      await pool.query(
+        `ALTER TABLE conversations DROP COLUMN seen_through_ts,
+                                   DROP COLUMN last_activity_at CASCADE`,
+      );
+      assert.deepEqual(await columns(), []);
+
+      await (await openStore(url, schema)).close();
+      assert.deepEqual(await columns(), ['last_activity_at', 'seen_through_ts']);
+      assert.equal(
+        (
+          await pool.query(
+            `SELECT 1 FROM pg_indexes WHERE indexname = 'conversations_activity_idx'`,
+          )
+        ).rowCount,
+        1,
+        'and the index the drop cascaded away',
+      );
+
+      // Backfilled from `created_at`, not stamped with the migration moment: the
+      // latter would hand every existing conversation a fresh 30 days and hold
+      // what retention promised to forget.
+      const store = await openStore(url, schema);
+      try {
+        assert.equal(await store.expireConversations(30), 1, 'a 90-day-old row is stale');
+      } finally {
+        await store.close();
+      }
+
+      // Re-appliable, which is the property that lets this file stand in for a
+      // migration runner at all.
+      await (await openStore(url, schema)).close();
+      assert.deepEqual(await columns(), ['last_activity_at', 'seen_through_ts']);
+    } finally {
+      await pool.end();
     }
   });
 });

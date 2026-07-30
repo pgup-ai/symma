@@ -1,6 +1,7 @@
 # @symma/slack
 
-The bot. Holds one outbound WebSocket to Slack and answers `/connect`.
+The bot. Holds one outbound WebSocket to Slack, answers `/connect`, and turns a
+mention into a private conversation.
 
 It spawns nothing and holds no agent credentials — it asks the gateway to mint a
 pairing code for whoever ran the command, and the member runs `symma pair` on the
@@ -9,13 +10,17 @@ machine they want to reach.
 ## Setup
 
 **1. Create the app.** api.slack.com/apps → _Create New App_ → _From a manifest_,
-and paste [`app-manifest.json`](app-manifest.json). It asks for one scope,
-`commands`, because one slash command is all this does today.
+and paste [`app-manifest.json`](app-manifest.json). It asks for `commands` to run
+the slash command, `app_mentions:read` to hear a mention, `channels:history` and
+`groups:history` to read the thread it came from, and `chat:write` with `im:write`
+to answer in the member's DM. **Re-paste it after a change and reinstall**, or the
+new scopes are not granted.
 
 **2. Make an app-level token.** _Basic Information_ → _App-Level Tokens_ →
 _Generate_, with the `connections:write` scope. This is the `xapp-…` token Socket
-Mode dials with — not the bot token, which nothing here needs yet: `/connect`
-answers through Slack's `response_url`, which carries its own authorization.
+Mode dials with. The `xoxb-…` bot token is separate and also needed now — reading
+a thread and posting a DM are authorized calls, where `/connect` got by on
+`response_url` carrying its own.
 
 **3. Install it** to the workspace, and note the team id (`T…`).
 
@@ -23,6 +28,7 @@ answers through Slack's `response_url`, which carries its own authorization.
 
 ```bash
 SYMMA_SLACK_APP_TOKEN=xapp-… \
+SYMMA_SLACK_BOT_TOKEN=xoxb-… \
 SYMMA_SLACK_TEAM=T0123ABCD \
 SYMMA_GATEWAY=https://gateway.symma.dev \
 SYMMA_SLACK_GATEWAY_TOKEN=… \
@@ -40,8 +46,16 @@ TLS site, no event endpoint and no OAuth — which is the whole reason the pilot
 runs on a custom app. The trade is that Socket Mode apps cannot be listed in the
 Slack Marketplace; that is a deliberate phase-1 choice, not an oversight.
 
+`SYMMA_SLACK_BUDGET_BYTES` caps injected thread context (24 kB by default). It is
+a ceiling, not a tuning knob: over it, the snapshot keeps the root and the newest
+replies and says how many it left out.
+
 ## Scope
 
-One command, deliberately. A chat surface that grows model, provider, directory
-and shell controls is support and security surface this workflow has not earned
-yet.
+One slash command, deliberately. A chat surface that grows model, provider,
+directory and shell controls is support and security surface this workflow has
+not earned yet — mentions are the interface, not commands.
+
+A mention supplies context and, later, a destination — never an answer. Work
+happens in the member's DM, and nothing returns to the channel without an
+explicit grant (§5), which is not built yet.

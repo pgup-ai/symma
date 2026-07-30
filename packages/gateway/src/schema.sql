@@ -94,7 +94,14 @@ CREATE TABLE IF NOT EXISTS conversations (
   endpoint_id       text,
   agent             text NOT NULL DEFAULT '',
   model             text,
+  -- How far up the source thread the agent has been shown. A repeat mention
+  -- pulls the delta past this rather than the thread again, which is what keeps
+  -- later messages from joining a running turn without being asked for (§4).
+  seen_through_ts   text,
   created_at        timestamptz NOT NULL DEFAULT now(),
+  -- Retention forgets a conversation by when it was last used, not when it
+  -- opened: a thread a member is still replying in is not stale at 30 days.
+  last_activity_at  timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT conversations_identity UNIQUE (user_id, dm_channel_id, root_thread_ts),
   -- Paired with `user_id` so the reference proves ownership and not merely that
   -- the row exists: a conversation cannot point at another member's machine.
@@ -139,6 +146,30 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   PRIMARY KEY (conversation_id, ordinal)
 );
 
+-- #27 shipped `conversations`, so CREATE TABLE IF NOT EXISTS skips it on any
+-- database that already ran that release and these columns would never arrive.
+-- Declared above for a fresh database and added here for an upgraded one —
+-- ADD COLUMN IF NOT EXISTS is idempotent, which is what keeps this file
+-- re-appliable and the migration runner still unbuilt.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS seen_through_ts text;
+-- Added nullable and backfilled, because `DEFAULT now()` would stamp every
+-- existing row with the moment of the migration and hand each of them a fresh
+-- 30 days — retention holding what it promised to forget. `created_at` is the
+-- honest floor: it errs toward forgetting sooner. Each statement is a no-op on
+-- second run, which is what keeps this file re-appliable.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_activity_at timestamptz;
+UPDATE conversations SET last_activity_at = created_at WHERE last_activity_at IS NULL;
+ALTER TABLE conversations ALTER COLUMN last_activity_at SET DEFAULT now();
+ALTER TABLE conversations ALTER COLUMN last_activity_at SET NOT NULL;
+
 CREATE INDEX IF NOT EXISTS sessions_run_idx ON sessions (run_id);
 CREATE INDEX IF NOT EXISTS endpoints_user_idx ON endpoints (user_id);
 CREATE INDEX IF NOT EXISTS turns_conversation_idx ON turns (conversation_id);
+-- A mention continues the conversation its thread already has, so the source
+-- thread must be findable and one per member — unique, or two mentions racing
+-- would each open one. Partial, because a top-level DM has no source and any
+-- number of those may exist.
+CREATE UNIQUE INDEX IF NOT EXISTS conversations_source_thread
+  ON conversations (user_id, source_channel_id, source_thread_ts)
+  WHERE source_channel_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS conversations_activity_idx ON conversations (last_activity_at);
