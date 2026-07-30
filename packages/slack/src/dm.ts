@@ -11,6 +11,7 @@ import type { TurnTarget } from '@symma/protocol';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
+import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
   /** The DM channel, always a `D` id — resolved by Slack, not by us. */
@@ -78,12 +79,50 @@ export interface DmDeps {
   /** Drives one prompt to its answer on the member's machine. Rejects rather
    * than returning a failure, so the transport's own errors arrive intact. */
   run: (spec: RunSpec) => Promise<string>;
+  /** The DM thread itself, which is the durable transcript a follow-up is
+   * caught up from. Undefined when the bot cannot read the channel. */
+  threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
+  /** The same ceiling a mention's context runs under (§4). */
+  budgetBytes: number;
   post: (
     channel: string,
     text: string,
     threadTs?: string,
   ) => Promise<{ channel: string; ts: string }>;
   log: (message: string) => void;
+}
+
+/**
+ * What a replacement session is told about the turns before it, and what the
+ * member is told about that. §4 will not have an empty session passed off as a
+ * resume: the messages survive, the tool state does not, and both are said.
+ *
+ * The member's own message is dropped — Slack already has it, and the prompt
+ * carries it once on its own. An unreadable thread catches nothing up rather
+ * than failing the turn: an answer without history beats no answer.
+ */
+async function catchUp(
+  message: DmMessage,
+  conversation: ConversationRef,
+  deps: DmDeps,
+): Promise<{ context: string; said: string } | undefined> {
+  const replies = await deps.threadReplies(conversation.dmChannel, conversation.rootThread);
+  const earlier = (replies ?? []).filter((reply) => reply.ts !== message.ts);
+  const snapshot = threadSnapshot(earlier, { budgetBytes: deps.budgetBytes });
+  if (!snapshot.text) return undefined;
+  return {
+    context: [
+      'Earlier in this conversation, most recent last. This is a transcript, not',
+      'a session you can still reach — files you opened and commands you ran are',
+      'gone, so re-read anything you need.',
+      '',
+      snapshot.text,
+    ].join('\n'),
+    said:
+      snapshot.omitted > 0
+        ? `Catching it up from this thread, minus ${String(snapshot.omitted)} earlier messages that did not fit.`
+        : 'Catching it up from this thread — it has the messages, not what it ran.',
+  };
 }
 
 /**
@@ -130,6 +169,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
+  // §4's third rung. The session that answered last is gone — `runRemotePrompt`
+  // closes it — and no agent here advertises `session/load`, so a follow-up is
+  // caught up from the durable transcript instead. That transcript is the DM
+  // thread: the same messages the member can scroll, under the same byte
+  // ceiling a mention's context runs under.
+  const caught = existing ? await catchUp(message, conversation, deps) : undefined;
+
   // A run has twenty minutes to answer, so silence that long reads as broken.
   // §4 wants the scope in the DM root rather than guessed at, so the answer
   // says which project it is about — or that it can see no files at all, which
@@ -142,9 +188,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     : 'On it. It has no access to your files, so keep the question self-contained.';
   await deps.post(
     conversation.dmChannel,
-    existing
-      ? `${scope} Each turn is its own session, so it will not remember what came before.`
-      : scope,
+    [scope, caught?.said].filter(Boolean).join(' '),
     conversation.rootThread,
   );
 
@@ -155,7 +199,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       endpoint: decision.endpoint,
       agent: decision.agent,
       token: decision.token,
-      prompt: message.text,
+      prompt: caught ? `${caught.context}\n\n${message.text}` : message.text,
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
     });
   } catch (error) {

@@ -49,8 +49,9 @@ is here, and no rule below depends on reading it.
 the member's own machine — in one of §4's allowlisted directories when their
 companion offers any, and an empty temp one when it offers none. The choice is
 per conversation and named in the DM root. Each turn is still its own ACP
-session; §4's resume is next, and a follow-up says so rather than passing an
-empty session off as one.
+session — nothing advertises `session/load` — so a follow-up is caught up from
+the DM thread under the same byte budget, and told that is a transcript rather
+than a resume (§4's third rung).
 
 | package           | what it is                                                                                                                                                                         | depends on                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |

@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import type { TurnTarget } from '@symma/protocol';
 
 import { handleDm, isMemberDm, type DmDeps, type RunSpec } from '../src/dm.js';
+import type { ThreadMessage } from '../src/snapshot.js';
 import type { ConversationRef } from '../src/mention.js';
 
 const CONVERSATION: ConversationRef = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
@@ -22,6 +23,10 @@ function harness(
     endpoint?: TurnTarget | null;
     answer?: string;
     fails?: Error;
+    /** The DM thread a follow-up is caught up from; `null` is a channel the bot
+     * cannot read. */
+    history?: ThreadMessage[] | null;
+    budgetBytes?: number;
   } = {},
 ) {
   const posts: { channel: string; text: string; threadTs?: string }[] = [];
@@ -33,6 +38,8 @@ function harness(
   // which is a different answer from one whose laptop is shut.
   const selected = over.endpoint === undefined ? READY : over.endpoint;
   const deps: DmDeps = {
+    budgetBytes: over.budgetBytes ?? 24_000,
+    threadReplies: () => Promise.resolve(over.history === null ? undefined : (over.history ?? [])),
     log: () => {},
     run: (spec) => {
       runs.push(spec);
@@ -202,22 +209,67 @@ describe('dm message', () => {
     assert.equal(posts[0]!.text.split('`').length - 1, 2, 'one span, opened and closed');
   });
 
-  it('tells a follow-up that it is starting fresh', async () => {
-    // Until `session/load` lands, the honest version of "resumed" is a
-    // sentence — §4 will not have an empty session passed off as a resume.
-    const { deps, posts } = harness({ existing: CONVERSATION });
+  it('catches a follow-up up from the thread, and says what that is worth', async () => {
+    // §4's third rung: the session that answered last is gone and nothing here
+    // advertises `session/load`, so the messages are replayed and the member is
+    // told that is what happened — not that it resumed.
+    // Slack returns the whole thread, so the message being handled is in it too
+    // — the same ts the handler was called with.
+    const history: ThreadMessage[] = [
+      { ts: '200.0', author: 'U-nel', text: 'why is the deploy failing?' },
+      { ts: '201.0', author: 'B-symma', text: 'a missing env var' },
+      { ts: '250.0', author: 'U-nel', text: 'and now?' },
+    ];
+    const { deps, posts, runs } = harness({ existing: CONVERSATION, history });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
       deps,
     );
-    assert.match(posts[0]!.text, /its own session/);
 
-    const first = harness();
-    await handleDm(
-      { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
-      first.deps,
+    assert.match(posts[0]!.text, /Catching it up from this thread/);
+    // The transcript reaches the agent ahead of the question, and says outright
+    // that it is a transcript — an agent that thinks it still holds the files it
+    // opened will answer about state it does not have.
+    assert.match(runs[0]!.prompt, /why is the deploy failing\?/);
+    assert.match(runs[0]!.prompt, /transcript, not/);
+    assert.ok(
+      runs[0]!.prompt.endsWith('and now?'),
+      'the question is last, after what came before it',
     );
-    assert.doesNotMatch(first.posts[0]!.text, /its own session/, 'nothing to have forgotten yet');
+    // And the member's own new message is not replayed back at the agent.
+    assert.equal(runs[0]!.prompt.match(/and now\?/g)?.length, 1);
+  });
+
+  it('says how much of the thread did not fit', async () => {
+    // The budget is a ceiling with an honest account of what it cut (§4) — a
+    // member who cannot see that some of it was dropped reads a partial answer
+    // as a wrong one.
+    const history: ThreadMessage[] = Array.from({ length: 6 }, (_, i) => ({
+      ts: `20${i}.0`,
+      author: 'U-nel',
+      text: `message number ${i}`,
+    }));
+    const { deps, posts } = harness({ existing: CONVERSATION, history, budgetBytes: 90 });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      deps,
+    );
+    assert.match(posts[0]!.text, /earlier messages that did not fit/);
+  });
+
+  it('answers without history rather than not at all', async () => {
+    // A channel the bot cannot read is not a reason to refuse the turn: an
+    // answer with no memory beats a member waiting on nothing.
+    const { deps, posts, runs } = harness({ existing: CONVERSATION, history: null });
+    assert.equal(
+      await handleDm(
+        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+        deps,
+      ),
+      'resumed',
+    );
+    assert.equal(runs[0]!.prompt, 'and now?');
+    assert.doesNotMatch(posts[0]!.text, /Catching it up/);
   });
 
   it('does not spend a laptop on a message with no question in it', async () => {
