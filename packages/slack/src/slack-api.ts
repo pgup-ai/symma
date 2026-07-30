@@ -1,10 +1,9 @@
 /**
  * The Slack Web API calls the conversation paths need.
  *
- * On `@slack/web-api` rather than `fetch`, after a hand-rolled version cost four
- * review findings that this layer answers for free: pagination cursors, a typed
- * error carrying Slack's own code, `ok: false` on a 200, and `Retry-After` on a
- * 429 — the last of which we had deferred outright.
+ * `@slack/web-api` carries what this layer would otherwise owe Slack itself:
+ * pagination cursors, `ok: false` on a 200, a typed error holding Slack's own
+ * code, and `Retry-After` on a 429.
  */
 import { ErrorCode, WebClient, type WebAPIPlatformError } from '@slack/web-api';
 

@@ -2,11 +2,10 @@
  * Socket Mode: the bot dials OUT and holds one WebSocket open, so it needs no
  * public URL, no TLS site and no event endpoint (§6).
  *
- * The connection itself is `@slack/socket-mode`, which owns the handshake,
- * ping/pong, the `disconnect` frame and reconnect backoff — a hand-rolled
- * version got three review findings in those four areas alone. What stays here
- * is the policy the SDK deliberately leaves to its caller: when to acknowledge,
- * and what to do about a delivery we have already handled.
+ * `@slack/socket-mode` owns the connection: the handshake, ping/pong, the
+ * `disconnect` frame and reconnect backoff. What stays here is the policy it
+ * deliberately leaves to its caller — when to acknowledge, and what to do about
+ * a delivery already handled.
  */
 import { SocketModeClient } from '@slack/socket-mode';
 
