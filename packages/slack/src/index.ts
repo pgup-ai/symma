@@ -217,6 +217,13 @@ const connection = socketMode({
   },
 });
 
+// Exit rather than log: a bot left up on a permanent connection failure looks
+// healthy to everything except the members it is ignoring.
+connection.ready.catch((error: unknown) => {
+  console.error(`[symma-slack] cannot connect to slack: ${String(error)}`);
+  process.exit(1);
+});
+
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     connection.stop();

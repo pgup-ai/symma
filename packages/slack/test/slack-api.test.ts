@@ -56,6 +56,23 @@ describe('slack api', () => {
     assert.match(String(seen[1]), /page2/, 'the cursor is carried');
   });
 
+  it('gives up on a thread it cannot read to the end', async () => {
+    // Every page claims another follows, so nothing but the cap ends this. The
+    // answer is a refusal rather than the pages it did get: they are the oldest
+    // ones, and a snapshot missing its newest end is worse than no snapshot.
+    const { fetchImpl, seen } = answering({
+      ok: true,
+      messages: [{ ts: '100.0', user: 'U-nel', text: 'more' }],
+      response_metadata: { next_cursor: 'again' },
+    });
+
+    await assert.rejects(
+      () => slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies('C-incidents', '100.0'),
+      /too long/,
+    );
+    assert.ok(seen.length <= 21, `bounded, and stopped at ${String(seen.length)} pages`);
+  });
+
   it('reports a channel it cannot see as unreadable, not as broken', async () => {
     // The difference is what the member is told: "invite me to that channel", or
     // nothing at all while an error goes to a log they never read (§4).

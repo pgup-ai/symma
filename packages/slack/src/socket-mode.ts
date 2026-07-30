@@ -45,7 +45,10 @@ interface SocketModeOptions {
  * Redelivery follows within seconds, so recent is the only window that matters. */
 const SEEN_LIMIT = 512;
 
-export function socketMode(options: SocketModeOptions): { stop: () => void } {
+export function socketMode(options: SocketModeOptions): {
+  ready: Promise<void>;
+  stop: () => void;
+} {
   const { onEnvelope, log } = options;
   const client = options.client ?? new SocketModeClient({ appToken: options.appToken });
   const seen = new Set<string>();
@@ -88,12 +91,13 @@ export function socketMode(options: SocketModeOptions): { stop: () => void } {
     })();
   });
 
-  void client
-    .start()
-    .then(() => log('connected to slack'))
-    .catch((error: unknown) => log(`slack connection failed: ${String(error)}`));
+  // The SDK retries anything transient before rejecting, so a rejection here is
+  // permanent — a bad token, a deleted app. Handed back because the answer to
+  // that is exiting, which is the caller's call, not a connection helper's.
+  const ready = client.start().then(() => log('connected to slack'));
 
   return {
+    ready,
     stop: () => {
       void client.disconnect().catch((error: unknown) => log(`disconnect: ${String(error)}`));
     },

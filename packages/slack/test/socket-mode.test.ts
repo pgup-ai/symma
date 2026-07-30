@@ -17,6 +17,8 @@ class FakeClient implements SocketLike {
   acked: string[] = [];
   started = false;
   stopped = false;
+  /** Set to make `start()` reject the way a bad app token does. */
+  failStart?: Error;
   private listener?: (item: SlackEvent) => void;
 
   on(_event: 'slack_event', listener: (item: SlackEvent) => void): this {
@@ -25,7 +27,7 @@ class FakeClient implements SocketLike {
   }
   start(): Promise<unknown> {
     this.started = true;
-    return Promise.resolve({});
+    return this.failStart ? Promise.reject(this.failStart) : Promise.resolve({});
   }
   disconnect(): Promise<unknown> {
     this.stopped = true;
@@ -94,6 +96,22 @@ describe('socket mode', () => {
     client.deliver(envelope('e1'));
     await tick();
     assert.deepEqual(client.acked, ['e1'], 'nothing to ack without an envelope id');
+  });
+
+  it('hands a failed start back rather than logging it away', async () => {
+    // The SDK retries everything transient before rejecting, so what reaches
+    // here is permanent. Swallowed, it would leave a process that is up, green
+    // to every health check, and deaf — which is why the caller gets to exit.
+    const client = new FakeClient();
+    client.failStart = new Error('invalid_auth');
+    const connection = socketMode({
+      appToken: 'xapp-test',
+      log: () => {},
+      onEnvelope: () => {},
+      client,
+    });
+
+    await assert.rejects(() => connection.ready, /invalid_auth/);
   });
 
   it('starts on construction and disconnects when told', async () => {

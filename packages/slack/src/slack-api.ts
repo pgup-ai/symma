@@ -23,6 +23,10 @@ export interface SlackApi {
   ) => Promise<{ channel: string; ts: string }>;
 }
 
+/** Threads cap far below this in practice; it is here so a pathological one
+ * cannot spin the fetch loop, not as a limit anybody should reach. */
+const MAX_PAGES = 20;
+
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */
 const UNREADABLE = new Set(['not_in_channel', 'channel_not_found', 'missing_scope']);
@@ -68,6 +72,7 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
     async threadReplies(channel, thread) {
       try {
         const raw: RawMessage[] = [];
+        let pages = 0;
         // Paged to the end, because `conversations.replies` returns the oldest
         // replies first: stopping at one page and advancing the cursor to its
         // newest would put every later page permanently behind it.
@@ -76,6 +81,9 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
           ts: thread,
           limit: 200,
         })) {
+          // Refused rather than truncated, for the same reason: what a cap drops
+          // is the newest end, the part the question is most likely about.
+          if (++pages > MAX_PAGES) throw new Error('thread too long to read');
           raw.push(...((page as { messages?: RawMessage[] }).messages ?? []));
         }
         return read(raw);
