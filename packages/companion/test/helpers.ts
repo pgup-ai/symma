@@ -13,3 +13,20 @@ export async function waitFor<T>(probe: () => Promise<T | undefined>, what: stri
   }
   throw new Error(`timed out waiting for ${what}`);
 }
+
+/** A machine with none of this developer's symma configuration on it. Every
+ * `SYMMA_COMPANION_*` is stripped so a variable set in the shell — a workspace
+ * list, an agent override — cannot change what a spawned companion advertises,
+ * and the API keys go because agent detection reads them. Anything a test
+ * actually wants, it sets itself afterwards. */
+export const bare = (home: string): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    CURSOR_API_KEY: '',
+    ANTHROPIC_API_KEY: '',
+    XDG_DATA_HOME: '',
+  };
+  for (const key of Object.keys(env)) if (key.startsWith('SYMMA_COMPANION_')) delete env[key];
+  return env;
+};

@@ -14,7 +14,7 @@ import { after, before, describe, it } from 'node:test';
 
 import type { AckControl, EndpointPresence } from '@symma/protocol';
 
-import { waitFor } from './wait.js';
+import { bare, waitFor } from './helpers.js';
 
 /** Writes where it was started, then stays up so the session does. The cwd is
  * the whole assertion: nothing else can show which directory won. */
@@ -123,8 +123,7 @@ before(async () => {
     ['--conditions=symma-source', '--import', 'tsx', 'packages/companion/src/index.ts'],
     {
       env: {
-        ...process.env,
-        HOME: home,
+        ...bare(home),
         SYMMA_COMPANION_GATEWAY: base,
         SYMMA_COMPANION_TOKEN: 'endpoint-tok',
         SYMMA_COMPANION_ENDPOINT: 'ws',

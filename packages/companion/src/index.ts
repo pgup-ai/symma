@@ -161,11 +161,18 @@ for (const entry of (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
   .filter(Boolean)) {
   const path = resolve(entry);
   // Skipped with a reason rather than fatal, the same way an absent agent is:
-  // one stale line in a config must not stop the machine answering at all.
-  // `throwIfNoEntry` keeps that true for a path that goes away underneath us,
-  // which an `existsSync` before the `stat` would only narrow, not close.
-  if (!statSync(path, { throwIfNoEntry: false })?.isDirectory()) {
-    log(`skipping workspace ${entry}: not a directory`);
+  // one bad line in a config must not stop the machine answering at all. That
+  // has to hold for every way a stat can fail — `throwIfNoEntry` covers the
+  // path that is not there, and the catch covers the one this user cannot
+  // reach, which would otherwise throw at module scope and never boot.
+  let why: string | undefined;
+  try {
+    if (!statSync(path, { throwIfNoEntry: false })?.isDirectory()) why = 'not a directory';
+  } catch (error) {
+    why = error instanceof Error ? error.message : String(error);
+  }
+  if (why) {
+    log(`skipping workspace ${entry}: ${why}`);
     continue;
   }
   const id = createHash('sha256').update(path).digest('hex').slice(0, 12);
