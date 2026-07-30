@@ -127,14 +127,16 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
-  // A run has twenty minutes to answer, so silence for that long reads as
-  // broken. §4 would rather tell a follow-up it starts over than pass an empty
-  // session off as a resume.
+  // A run has twenty minutes to answer, so silence that long reads as broken.
+  // Both caveats are said rather than left to be discovered: until
+  // `hello.workspaces[]` lands the agent opens in an empty temp directory, and
+  // §4 will not have an empty session passed off as a resume.
+  const noFiles = 'It has no access to your files yet';
   await deps.post(
     conversation.dmChannel,
     existing
-      ? 'On it. Each turn runs in its own session for now, so it will not remember what came before.'
-      : 'On it.',
+      ? `On it. ${noFiles}, and each turn is its own session, so it will not remember what came before.`
+      : `On it. ${noFiles}, so keep the question self-contained.`,
     conversation.rootThread,
   );
 

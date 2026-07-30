@@ -93,6 +93,10 @@ export interface Store {
    * replying in is not stale. Turns and session links cascade; frames belong to
    * sessions, which `expireSessions` already answers for. */
   expireConversations(olderThanDays: number): Promise<number>;
+  /** Drops tokens that are already past their expiry. They cannot authenticate,
+   * so keeping them only grows the table — and a Slack turn mints one every
+   * time a member asks something. */
+  expireTokens(): Promise<number>;
   /** §2 pairing. Returns the plaintext once — the row keeps only its hash — and
    * supersedes this owner's outstanding code. Undefined if they are no longer an
    * active member, which the caller must answer rather than hand back a code
@@ -491,6 +495,12 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         lastSeenAt: seen?.getTime() ?? null,
       }));
     },
+    async expireTokens() {
+      const { rowCount } = await pool.query(
+        `DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < now()`,
+      );
+      return rowCount ?? 0;
+    },
     async mintClientToken(owner, ttlMinutes) {
       const token = randomUUID();
       await pool.query(
@@ -783,6 +793,7 @@ export function localStore(
     markSeen: () => Promise.resolve(),
     endpointsFor: needsDatabase,
     mintClientToken: needsDatabase,
+    expireTokens: needsDatabase,
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
       // One tenant, so a run and session id are the whole key here.

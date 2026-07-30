@@ -1166,6 +1166,10 @@ if (retentionDays > 0) {
       // to sessions, which the sweep above already answered for.
       const gone = await store.expireConversations(retentionDays);
       if (gone > 0) log(`retention: expired ${gone} conversations`);
+      // On their own clock, not the retention window: they are dead the moment
+      // they expire, and a Slack turn mints one per question.
+      const stale = await store.expireTokens();
+      if (stale > 0) log(`retention: dropped ${stale} expired tokens`);
     })().catch((error: unknown) =>
       log(`retention failed: ${error instanceof Error ? error.message : String(error)}`),
     );

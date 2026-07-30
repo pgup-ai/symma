@@ -1187,6 +1187,36 @@ describe('tenancy', () => {
     }
   });
 
+  it('drops tokens once they expire, and keeps the ones that have not', async () => {
+    const url = pg.getConnectionUri();
+    const ann = await provision(url, { team: 'tokens', slackUser: 'ann', endpoint: 'ann-laptop' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    const rows = async (): Promise<number> =>
+      (
+        await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM tokens WHERE subject_id = $1`,
+          [ann.owner],
+        )
+      ).rows[0]!.n;
+    try {
+      // A Slack turn mints one of these per question and nothing else ever
+      // deletes them, so `expires_at` was stopping them authenticating but not
+      // accumulating.
+      const dead = await store.mintClientToken(ann.owner, -1);
+      const alive = await store.mintClientToken(ann.owner, 30);
+      const before = await rows();
+
+      await store.expireTokens();
+      assert.equal(await rows(), before - 1, 'the expired row is gone, not just refused');
+      assert.equal(await store.ownerForClientToken(dead), undefined);
+      assert.equal(await store.ownerForClientToken(alive), ann.owner);
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
   it('refuses a spent code, and a companion with nothing to run', async () => {
     const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });

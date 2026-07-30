@@ -77,8 +77,11 @@ turn rather than a standing key.
    **Scoped to the review path.** M3's DM path inverts the caller — the
    endpoint's owner, on their own machine — and allows writes inside an
    allowlisted workspace root (§4, "Read-only ends where the caller changes").
-   That path does not exist in code yet, so this invariant is unconditional
-   today; whoever builds it amends this entry in the same commit.
+   That path drives prompts now and still runs under this floor, because the
+   root that would confine a write does not exist until `hello.workspaces[]`
+   does: the agent opens in an empty temp directory. So the invariant is
+   unconditional today, and workspaces land before write mode, not after.
+   Whoever enables writes amends this entry in the same commit.
 
 2. **Auxiliary sessions fail open.** A broken precision filter must never
    become a recall hole.

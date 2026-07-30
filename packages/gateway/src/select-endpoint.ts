@@ -11,6 +11,9 @@ import type { EndpointPresence, EndpointState, SelectedEndpoint } from '@symma/p
 
 import type { PairedEndpoint } from './store.js';
 
+/** Busy beats away: its slots free up, and a shut laptop does not. */
+const rank = (state: EndpointState): number => (state === 'ready' ? 0 : state === 'busy' ? 1 : 2);
+
 export function selectEndpoint(
   paired: PairedEndpoint[],
   live: Map<string, EndpointPresence>,
@@ -33,10 +36,9 @@ export function selectEndpoint(
         seen: (presence?.online ? undefined : presence?.lastSeenAt) ?? row.lastSeenAt ?? 0,
       };
     })
-    // Attached wins, then most recently seen — the answer is about the machine
-    // the member last worked on, not one they forgot they paired.
-    .sort(
-      (a, b) => Number(b.state === 'ready') - Number(a.state === 'ready') || b.seen - a.seen,
-    )[0];
+    // One that can take the turn wins, then one that is at least here, then the
+    // most recently seen — the answer is about the machine the member last
+    // worked on, not one they forgot they paired.
+    .sort((a, b) => rank(a.state) - rank(b.state) || b.seen - a.seen)[0];
   return best && { endpoint: best.endpoint, device: best.device, state: best.state };
 }

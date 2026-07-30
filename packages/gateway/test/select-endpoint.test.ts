@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import type { EndpointPresence } from '@symma/protocol';
+import type { EndpointPresence, EndpointState } from '@symma/protocol';
 
 import { selectEndpoint } from '../src/select-endpoint.js';
 import type { PairedEndpoint } from '../src/store.js';
@@ -26,9 +26,13 @@ const attached = (endpoint: string, over: Partial<EndpointPresence> = {}): Endpo
 const live = (...entries: EndpointPresence[]): Map<string, EndpointPresence> =>
   new Map(entries.map((e) => [e.endpoint, e]));
 
-/** The relay's own classifier is asserted next door. Here it only has to turn
- * on `online`, so what these pin is the ordering rather than the wording. */
-const stateOf = (p: EndpointPresence): 'ready' | 'asleep' => (p.online ? 'ready' : 'asleep');
+/** Enough of the relay's classifier to produce the three states the ordering
+ * distinguishes; the real one is asserted next door. */
+const stateOf = (p: EndpointPresence): EndpointState =>
+  p.online ? (p.activeSessions >= p.maxSessions ? 'busy' : 'ready') : 'asleep';
+
+const full = (endpoint: string): EndpointPresence =>
+  attached(endpoint, { activeSessions: 2, maxSessions: 2 });
 
 describe('endpoint selection', () => {
   it('has nothing to say about a member who has paired none', () => {
@@ -52,6 +56,27 @@ describe('endpoint selection', () => {
       stateOf,
     );
     assert.equal(selected?.endpoint, 'laptop');
+  });
+
+  it('ranks a machine that is full above one that is away, and below one that is free', () => {
+    // A full machine frees up; a shut laptop does not. Both are stamped older
+    // than the one they beat, so only the rank can put them first.
+    assert.equal(
+      selectEndpoint(
+        [paired('full', { lastSeenAt: 1 }), paired('gone', { lastSeenAt: 9_999 })],
+        live(full('full')),
+        stateOf,
+      )?.state,
+      'busy',
+    );
+    assert.equal(
+      selectEndpoint(
+        [paired('free', { lastSeenAt: 1 }), paired('full', { lastSeenAt: 9_999 })],
+        live(attached('free'), full('full')),
+        stateOf,
+      )?.endpoint,
+      'free',
+    );
   });
 
   it('reads a re-attached machine off its row, not the detach it still carries', () => {

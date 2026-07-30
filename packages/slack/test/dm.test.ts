@@ -165,6 +165,10 @@ describe('dm message', () => {
       },
     ]);
     assert.equal(posts.at(-1)!.text, 'the deploy fails on a missing env var');
+    // Said up front, not discovered: until `hello.workspaces[]` lands the agent
+    // opens in an empty temp dir, which is not what "your own machine" sounds
+    // like to someone asking about their repo.
+    assert.match(posts[0]!.text, /no access to your files/);
   });
 
   it('tells a follow-up that it is starting fresh', async () => {
@@ -225,6 +229,7 @@ describe('dm message', () => {
     // The outcome carries which, so a log answers the support question.
     const cases = [
       { state: 'asleep', outcome: 'refused: asleep', says: /awake/ },
+      { state: 'busy', outcome: 'refused: busy', says: /already running/ },
       { state: 'quit', outcome: 'refused: quit', says: /not running/ },
       { state: 'dropped', outcome: 'refused: dropped', says: /shortly/ },
       { state: 'unstarted', outcome: 'refused: unstarted', says: /Run `symma`/ },

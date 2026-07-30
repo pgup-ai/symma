@@ -9,6 +9,10 @@ import type { EndpointState, TurnTarget } from '@symma/protocol';
 /** Named mid-sentence throughout: the device is empty until a companion
  * attaches and says what it is, so it cannot be trusted to open one. */
 const said: Record<Exclude<EndpointState, 'ready'>, (device: string) => string> = {
+  // Not broken and not away — it will free up, so the answer is to wait rather
+  // than to go and do something to the machine.
+  busy: (device) =>
+    `${device} is already running as much as it can. Send this again when one of those finishes.`,
   quit: (device) => `symma is not running on ${device}. Start it there and send this again.`,
   // "Asleep" here would send someone to a lid that is already open.
   dropped: (device) => `Lost contact with ${device} a moment ago — send this again shortly.`,
