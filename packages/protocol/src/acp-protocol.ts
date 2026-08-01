@@ -340,6 +340,12 @@ export function matchModelOptionValue(
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
+  /** Assistant text the agent did not label with a `messageId`, in a session
+   * where it labelled everything else — an adapter with no channel of its own
+   * putting an operational notice in the message stream. codex-acp turns
+   * codex's `warning` and `configWarning` events into exactly this. Kept out of
+   * `text`, because it is not what was asked. */
+  notices: string[];
 }
 
 /**
@@ -356,11 +362,16 @@ export async function driveAcpSession(
 ): Promise<AcpSessionResult> {
   const { agent, label, log } = options;
   const segments: string[] = [];
+  const notices: string[] = [];
   let current = '';
   let lastMessageId: unknown;
+  let seenChunk = false;
   let usesMessageIds = false;
   const flush = () => {
-    if (current.trim()) segments.push(current);
+    // An unlabelled segment beside labelled ones is the agent talking about
+    // itself, not answering — see `AcpSessionResult.notices`.
+    if (current.trim())
+      (usesMessageIds && lastMessageId === undefined ? notices : segments).push(current);
     current = '';
   };
 
@@ -372,11 +383,13 @@ export async function driveAcpSession(
       const kind = update.sessionUpdate;
       if (kind === 'agent_message_chunk') {
         const messageId = update.messageId;
-        if (messageId !== undefined) {
-          usesMessageIds = true;
-          if (lastMessageId !== undefined && messageId !== lastMessageId) flush();
-          lastMessageId = messageId;
-        }
+        if (messageId !== undefined) usesMessageIds = true;
+        // `undefined` is an id like any other, so a chunk the agent did not
+        // label starts its own segment rather than joining the answer. Agents
+        // that label nothing see no change: their id never varies.
+        if (seenChunk && messageId !== lastMessageId) flush();
+        seenChunk = true;
+        lastMessageId = messageId;
         const content = update.content as { type?: string; text?: string } | undefined;
         if (content?.type === 'text' && typeof content.text === 'string') current += content.text;
       } else if ((kind === 'tool_call' || kind === 'tool_call_update') && !usesMessageIds) {
@@ -479,6 +492,7 @@ export async function driveAcpSession(
   return {
     text: (segments[segments.length - 1] ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
+    notices: notices.map((notice) => notice.trim()),
   };
 }
 

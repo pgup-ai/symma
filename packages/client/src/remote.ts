@@ -46,6 +46,10 @@ export interface RemoteAcpConfig {
    * that directory instead of an empty temp one. Never a path — resolving it is
    * the companion's job, and its allowlist is the boundary (§4). */
   workspace?: string;
+  /** Where the agent's own operational notices go — the ones it put in the
+   * message stream for want of a channel (`AcpSessionResult.notices`). Absent
+   * drops them, which is what a caller with nowhere to show them should do. */
+  onNotice?: (notice: string) => void;
   /** Checked out by the companion so the agent can explore the code it reviews. */
   repo?: string;
   ref?: string;
@@ -267,6 +271,7 @@ export async function runRemotePrompt(
     log(
       `${label} prompt complete via gateway: stopReason=${result.stopReason} last-message=${result.text.length} chars`,
     );
+    for (const notice of result.notices) config.onNotice?.(notice);
     if (!result.text) {
       throw new Error(
         `${label}: agent produced no assistant message (stopReason=${result.stopReason})`,

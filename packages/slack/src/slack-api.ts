@@ -23,6 +23,10 @@ export interface SlackApi {
     /** §5's action on a finished answer. The button carries the conversation and
      * nothing else — where it may publish is the gateway's to state. */
     offerShare?: { conversation: string; destination: string },
+    /** The agent talking about itself rather than answering. Rendered as a
+     * context block, which is Slack's own small-and-grey — the member should be
+     * able to tell it from the answer without reading it. */
+    notices?: string[],
   ) => Promise<{ channel: string; ts: string }>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
@@ -144,40 +148,50 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       if (!channel?.id) throw new Error('conversations.open returned no channel');
       return channel.id;
     },
-    async post(channel, text, threadTs, offerShare) {
+    async post(channel, text, threadTs, offerShare, notices) {
+      // Context is Slack's small-and-grey, so a member can tell a notice from
+      // the answer without reading it. Above, which is where the agent put it.
+      const context = (notices ?? []).map((notice) => ({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: notice }],
+      }));
+      const actions = offerShare
+        ? [
+            {
+              type: 'actions',
+              elements: [
+                {
+                  type: 'button',
+                  action_id: SHARE_ACTION,
+                  text: { type: 'plain_text', text: 'Share to thread' },
+                  value: offerShare.conversation,
+                  // §5 wants the destination previewed before it is published,
+                  // and the content is the message this sits on.
+                  confirm: {
+                    title: { type: 'plain_text', text: 'Share this answer?' },
+                    text: {
+                      type: 'mrkdwn',
+                      text: `It will be posted to ${offerShare.destination}, with your name on it.`,
+                    },
+                    confirm: { type: 'plain_text', text: 'Share' },
+                    deny: { type: 'plain_text', text: 'Keep private' },
+                  },
+                },
+              ],
+            },
+          ]
+        : [];
       const sent = await client.chat.postMessage({
         channel,
         // Sent alongside the blocks as the notification and accessibility text,
         // which Slack uses wherever it will not render them.
         text,
         ...(threadTs ? { thread_ts: threadTs } : {}),
-        ...(offerShare
+        // Blocks replace the body wholesale, so the answer's own section has to
+        // be rebuilt here as soon as anything needs to go with it.
+        ...(context.length || actions.length
           ? {
-              blocks: [
-                { type: 'section', text: { type: 'mrkdwn', text } },
-                {
-                  type: 'actions',
-                  elements: [
-                    {
-                      type: 'button',
-                      action_id: SHARE_ACTION,
-                      text: { type: 'plain_text', text: 'Share to thread' },
-                      value: offerShare.conversation,
-                      // §5 wants the destination previewed before it is
-                      // published, and the content is the message this sits on.
-                      confirm: {
-                        title: { type: 'plain_text', text: 'Share this answer?' },
-                        text: {
-                          type: 'mrkdwn',
-                          text: `It will be posted to ${offerShare.destination}, with your name on it.`,
-                        },
-                        confirm: { type: 'plain_text', text: 'Share' },
-                        deny: { type: 'plain_text', text: 'Keep private' },
-                      },
-                    },
-                  ],
-                },
-              ],
+              blocks: [...context, { type: 'section', text: { type: 'mrkdwn', text } }, ...actions],
             }
           : {}),
       });

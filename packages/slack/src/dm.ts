@@ -80,8 +80,10 @@ export interface DmDeps {
     slackEventId: string;
   }) => Promise<{ conversation: ConversationRef; turn?: string }>;
   /** Drives one prompt to its answer on the member's machine. Rejects rather
-   * than returning a failure, so the transport's own errors arrive intact. */
-  run: (spec: RunSpec) => Promise<string>;
+   * than returning a failure, so the transport's own errors arrive intact.
+   * `notices` is what the agent said about itself rather than about the
+   * question — kept apart so it reads as an aside (§4). */
+  run: (spec: RunSpec) => Promise<{ text: string; notices: string[] }>;
   /** The DM thread itself, which is the durable transcript a follow-up is
    * caught up from. Undefined when the bot cannot read the channel. */
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
@@ -92,6 +94,7 @@ export interface DmDeps {
     text: string,
     threadTs?: string,
     offerShare?: { conversation: string; destination: string },
+    notices?: string[],
   ) => Promise<{ channel: string; ts: string }>;
   /** Marks the member's own message for the length of the run. Only the run is
    * worth marking — everything refused answers in words, immediately. */
@@ -211,7 +214,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  let answer: string;
+  let answer: { text: string; notices: string[] };
   try {
     answer = await deps.run({
       conversation: conversation.id,
@@ -245,9 +248,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // Slack refuses an empty message, so a quiet run would be reported as failed.
     await deps.post(
       conversation.dmChannel,
-      answer.trim() || 'That finished without producing an answer.',
+      answer.text.trim() || 'That finished without producing an answer.',
       conversation.rootThread,
       to ? { conversation: conversation.id, destination: `<#${to.channel}>` } : undefined,
+      answer.notices,
     );
   } catch (error) {
     // The run is over either way, and `announcing` tells them the delivery

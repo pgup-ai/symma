@@ -691,6 +691,50 @@ describe('acp', () => {
   // everywhere CI runs it (`ubuntu-latest`), and neither holds on the Windows
   // copy path. Gating them would trade a real assertion for a branch nobody
   // executes; adding Windows CI is what would earn the branch.
+  it('keeps what the agent said about itself out of the answer', async () => {
+    // codex-acp has no channel for codex's `warning` events, so it puts them in
+    // the message stream as text with no `messageId` — live-observed against
+    // codex-acp 1.1.7. Agents that label nothing must not be caught by the same
+    // rule: for them an absent id is every chunk they send.
+    const cases = [
+      {
+        label: 'labelled',
+        chunks: [
+          { text: 'Warning: skill descriptions were shortened.' },
+          { messageId: 'm1', text: 'the answer' },
+        ],
+        text: 'the answer',
+        notices: ['Warning: skill descriptions were shortened.'],
+      },
+      {
+        label: 'unlabelled',
+        chunks: [{ text: 'the ' }, { text: 'answer' }],
+        text: 'the answer',
+        notices: [],
+      },
+    ];
+    for (const { label, chunks, text, notices } of cases) {
+      const fake = fakeAgentIo({
+        onPrompt: (agent) => {
+          for (const chunk of chunks) {
+            agent.update({
+              sessionUpdate: 'agent_message_chunk',
+              ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
+              content: { type: 'text', text: chunk.text },
+            });
+          }
+          agent.finish();
+        },
+      });
+      const result = await driveAcpSession(
+        { input: fake.input, output: fake.output },
+        { cwd: '/tmp', prompt: 'hi', agent: 'probe', label, log: () => {} },
+      );
+      assert.equal(result.text, text, label);
+      assert.deepEqual(result.notices, notices, label);
+    }
+  });
+
   it('materializes per-agent read-only and model config', () => {
     const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
     writeFileSync(codexAuthPath(codexHome), '{"tokens":"first"}');

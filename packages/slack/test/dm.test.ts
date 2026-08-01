@@ -23,6 +23,8 @@ function harness(
     turn?: boolean;
     endpoint?: TurnTarget | null;
     answer?: string;
+    /** What the agent said about itself rather than about the question. */
+    notices?: string[];
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
@@ -42,6 +44,7 @@ function harness(
     text: string;
     threadTs?: string;
     offerShare?: { conversation: string; destination: string };
+    notices?: string[];
   }[] = [];
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
@@ -60,15 +63,18 @@ function harness(
     log: () => {},
     run: (spec) => {
       runs.push(spec);
-      return over.fails ? Promise.reject(over.fails) : Promise.resolve(over.answer ?? 'the answer');
+      return over.fails
+        ? Promise.reject(over.fails)
+        : Promise.resolve({ text: over.answer ?? 'the answer', notices: over.notices ?? [] });
     },
     find: () => Promise.resolve(over.existing),
-    post: (channel, text, threadTs, offerShare) => {
+    post: (channel, text, threadTs, offerShare, notices) => {
       posts.push({
         channel,
         text,
         ...(threadTs ? { threadTs } : {}),
         ...(offerShare ? { offerShare } : {}),
+        ...(notices?.length ? { notices } : {}),
       });
       // The acknowledgement is always first; anything later is the answer.
       return over.answerPostFails && posts.length > 1
@@ -326,6 +332,17 @@ describe('dm message', () => {
     );
     assert.equal(runs[0]!.prompt, 'and now?');
     assert.equal(posts.at(-1)!.text, 'the answer');
+  });
+
+  it('passes the agent’s asides through as asides, not as the answer', async () => {
+    const { deps, posts } = harness({
+      answer: 'the deploy fails on a missing env var',
+      notices: ['Warning: skill descriptions were shortened.'],
+    });
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    const answered = posts.at(-1)!;
+    assert.equal(answered.text, 'the deploy fails on a missing env var');
+    assert.deepEqual(answered.notices, ['Warning: skill descriptions were shortened.']);
   });
 
   it('offers a share only when there is a thread to share back to', async () => {

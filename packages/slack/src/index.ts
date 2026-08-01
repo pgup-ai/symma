@@ -166,8 +166,9 @@ const depsFor = (user: string) => {
         ...(workspaceLabel ? { workspaceLabel } : {}),
       };
     },
-    run: ({ conversation, endpoint, agent, token, prompt, workspace, model }: RunSpec) =>
-      runRemotePrompt(
+    run: async ({ conversation, endpoint, agent, token, prompt, workspace, model }: RunSpec) => {
+      const notices: string[] = [];
+      const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
         {
@@ -176,13 +177,16 @@ const depsFor = (user: string) => {
           endpoint,
           agent,
           runId: conversation,
+          onNotice: (notice) => notices.push(notice),
           ...(workspace ? { workspace } : {}),
         },
         model,
         prompt,
         `slack-${conversation}`,
         log,
-      ),
+      );
+      return { text, notices };
+    },
     destination: async (conversation: string) => {
       // `{}` is the gateway saying this conversation began in the DM, or is not
       // this member's — neither is something the bot decides for itself.

@@ -130,4 +130,44 @@ describe('slack api', () => {
     await slackApi('xoxb-test', { fetch: fetchImpl }).mark('D-nel', '250.0', 'done');
     assert.deepEqual(called, ['reactions.remove', 'reactions.add']);
   });
+
+  it('sets a notice apart from the answer instead of running them together', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      undefined,
+      ['Warning: skill descriptions were shortened.'],
+    );
+    // The SDK form-encodes this call and JSON-encodes only the complex fields.
+    const sent = new URLSearchParams(String(seen[0]));
+    const blocks = JSON.parse(sent.get('blocks') ?? '[]') as {
+      type: string;
+      elements?: { text: string }[];
+      text?: { text: string };
+    }[];
+    assert.deepEqual(
+      blocks.map((b) => b.type),
+      ['context', 'section'],
+      'the notice is above, small and grey, and the answer keeps its own block',
+    );
+    assert.match(blocks[0]!.elements![0]!.text, /shortened/);
+    assert.equal(blocks[1]!.text!.text, 'the answer');
+    // The fallback is what Slack notifies and reads out, so it stays the answer
+    // alone — a notice is not what the member is being told about.
+    assert.equal(sent.get('text'), 'the answer');
+  });
+
+  it('stays a plain message when there is nothing to set apart', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      undefined,
+      [],
+    );
+    assert.equal(new URLSearchParams(String(seen[0])).get('blocks'), null);
+  });
 });
