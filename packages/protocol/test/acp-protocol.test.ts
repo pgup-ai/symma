@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -667,56 +668,84 @@ describe('acp', () => {
 
   it('materializes per-agent read-only and model config', () => {
     const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
-    writeFileSync(codexAuthPath(codexHome), '{}');
-    const codex = codexAcpSpec(codexHome);
-    // Seed the adapter runtime overrides so the strip assertions are not
-    // vacuous: env() inherits process.env, so if a delete were dropped the
-    // ambient value would leak into the child.
+    writeFileSync(codexAuthPath(codexHome), '{"tokens":"first"}');
+    const runHome = join(mkdtempSync(join(tmpdir(), 'symma-test-run-')), 'codex');
+    const codex = codexAcpSpec(codexHome, runHome);
+    // Seeded so the strip assertions are not vacuous: env() inherits
+    // process.env, so a dropped delete would let the ambient value through.
     const overrides = ['CODEX_CONFIG', 'CODEX_PATH', 'MODEL_PROVIDER'] as const;
     const savedOverrides = overrides.map((key) => [key, process.env[key]] as const);
     for (const key of overrides) process.env[key] = `ambient-${key}`;
-    const codexLeakPrefix = 'symma-codex-acp-';
-    const codexEnv = codex.env('codex/gpt-5.2-codex');
     try {
-      const home = codexEnv.env.CODEX_HOME as string;
-      // Anchors the leak check below: matched against a stale prefix, both its
-      // snapshots are empty and it passes without observing anything.
-      assert.ok(home.includes(codexLeakPrefix), 'codex temp dirs carry the expected prefix');
-      const config = readFileSync(join(home, 'config.toml'), 'utf8');
-      assert.match(config, /sandbox_mode = "read-only"/);
-      assert.match(config, /model = "gpt-5\.2-codex"/);
-      const weird = codex.env('codex/we"ird\\model');
-      try {
-        const escaped = readFileSync(join(weird.env.CODEX_HOME as string, 'config.toml'), 'utf8');
-        assert.ok(escaped.includes('model = "we\\"ird\\\\model"'));
-      } finally {
-        weird.cleanup?.();
-      }
-      assert.ok(existsSync(codexAuthPath(home)));
-      // codex-acp runtime overrides are stripped despite the seeded ambient
-      // values (README: CODEX_CONFIG merges into session config, CODEX_PATH
-      // swaps the binary, MODEL_PROVIDER redirects models); mode is pinned.
-      for (const key of overrides) assert.equal(codexEnv.env[key], undefined);
+      const codexEnv = codex.env('codex/gpt-5.2-codex');
+      assert.equal(codexEnv.env.CODEX_HOME, runHome);
+
+      // Static: the model is deliberately NOT here. Two sessions can spawn at
+      // once and share this file, so anything per-spawn written into it is one
+      // run reading another's config — or a truncated one, mid-write.
+      assert.equal(
+        readFileSync(join(runHome, 'config.toml'), 'utf8'),
+        'sandbox_mode = "read-only"\n',
+      );
+      // It rides the env instead, which is per process.
+      assert.equal(codexEnv.env.CODEX_CONFIG, '{"model":"gpt-5.2-codex"}');
+
+      // Linked, not copied: codex refreshes the token in place, so a copy would
+      // strand the refresh here and go stale without saying so. Written through
+      // the link and read back from the original, because asserting the link's
+      // own contents would pass just as well on a copy.
+      writeFileSync(codexAuthPath(runHome), '{"tokens":"refreshed"}');
+      assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"refreshed"}');
+
+      // The home outlives the spawn — no cleanup to call — which is the whole
+      // point: codex writes its rollout under it, and a home that went with the
+      // run is a session nothing can load back.
+      assert.equal(codexEnv.cleanup, undefined);
+      writeFileSync(join(runHome, 'sessions.probe'), 'a rollout would live here');
+      // A rename swaps the inode, so an unchanged one is the proof that the
+      // steady state writes nothing — which is what keeps a concurrent spawn
+      // from ever reading this file half-written.
+      const settled = statSync(join(runHome, 'config.toml')).ino;
+      const second = codex.env('codex/default');
+      assert.equal(second.env.CODEX_HOME, runHome);
+      assert.equal(statSync(join(runHome, 'config.toml')).ino, settled);
+      assert.ok(existsSync(join(runHome, 'sessions.probe')), 'a second spawn reuses the home');
+      // `default` names no model, so the ambient override must not stand in.
+      assert.equal(second.env.CODEX_CONFIG, undefined);
+
+      // CODEX_PATH swaps the binary and MODEL_PROVIDER redirects models
+      // (codex-acp README), so neither may reach the child; mode is pinned.
+      assert.equal(codexEnv.env.CODEX_PATH, undefined);
+      assert.equal(codexEnv.env.MODEL_PROVIDER, undefined);
       assert.equal(codexEnv.env.INITIAL_AGENT_MODE, 'read-only');
       assert.equal(codexEnv.env.NO_BROWSER, '1');
     } finally {
-      codexEnv.cleanup?.();
       for (const [key, value] of savedOverrides) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
     }
-    rmSync(codexHome, { recursive: true, force: true });
 
-    const codexBefore = readdirSync(tmpdir()).filter((entry) => entry.startsWith(codexLeakPrefix));
+    // A home an older build left a real copy in is migrated, not left as the
+    // stale credential it has become.
+    rmSync(codexAuthPath(runHome), { force: true });
+    writeFileSync(codexAuthPath(runHome), '{"tokens":"stale copy"}');
+    codex.env('codex/default');
+    assert.equal(readFileSync(codexAuthPath(runHome), 'utf8'), '{"tokens":"refreshed"}');
+
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(runHome, { recursive: true, force: true });
+
+    // A link to nothing is an auth failure codex reports much later, with no
+    // hint of where the file was meant to be.
     const codexEmptyHome = mkdtempSync(join(tmpdir(), 'symma-test-empty-'));
+    const emptyRun = join(codexEmptyHome, 'run');
     try {
-      assert.throws(() => codexAcpSpec(codexEmptyHome).env('codex/default'));
+      assert.throws(() => codexAcpSpec(codexEmptyHome, emptyRun).env('codex/default'));
+      assert.ok(!existsSync(emptyRun), 'and nothing is built for a home that has none');
     } finally {
       rmSync(codexEmptyHome, { recursive: true, force: true });
     }
-    const codexAfter = readdirSync(tmpdir()).filter((entry) => entry.startsWith(codexLeakPrefix));
-    assert.deepEqual(codexAfter, codexBefore);
 
     const kilo = kiloAcpSpec('{"token":"k"}');
     assert.deepEqual(kilo.args('kilo/default'), ['acp']);

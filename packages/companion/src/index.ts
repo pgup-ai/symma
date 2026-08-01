@@ -329,7 +329,7 @@ function resolveAgent(entry: string): { name: string; spec: AcpAgentSpec } | str
     case 'codex': {
       const home = join(homedir(), '.codex');
       if (!credential(codexAuthPath(home))) return `codex: no auth at ${codexAuthPath(home)}`;
-      return { name: entry, spec: codexAcpSpec(home) };
+      return { name: entry, spec: codexAcpSpec(home, join(stateDir, 'codex')) };
     }
     case 'devin': {
       if (!credential(devinCredentialsPath(homedir())))
