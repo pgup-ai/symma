@@ -6,13 +6,15 @@ import { slackApi } from '../src/slack-api.js';
 /** Slack answers 200 with `ok: false`, so every case here is a 200. */
 const answering = (...bodies: unknown[]) => {
   const seen: unknown[] = [];
-  const fetchImpl = ((_url: string, init: { body?: unknown }) => {
+  const called: string[] = [];
+  const fetchImpl = ((url: string, init: { body?: unknown }) => {
+    called.push(String(url).split('/').pop() ?? '');
     seen.push(init.body);
     return Promise.resolve(
       new Response(JSON.stringify(bodies[Math.min(seen.length - 1, bodies.length - 1)])),
     );
   }) as unknown as typeof fetch;
-  return { fetchImpl, seen };
+  return { fetchImpl, seen, called };
 };
 
 describe('slack api', () => {
@@ -109,5 +111,29 @@ describe('slack api', () => {
       channel: 'D-nel',
       ts: '200.0',
     });
+  });
+
+  it('replaces the working mark rather than piling one on top of it', async () => {
+    const { fetchImpl, called } = answering({ ok: true });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).mark('D-nel', '250.0', 'done');
+    assert.deepEqual(called, ['reactions.remove', 'reactions.add']);
+  });
+
+  it('has nothing to remove when the run is only starting', async () => {
+    const { fetchImpl, called } = answering({ ok: true });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).mark('D-nel', '250.0', 'working');
+    assert.deepEqual(called, ['reactions.add']);
+  });
+
+  it('never lets a lost mark cost the member the answer it was about', async () => {
+    // The remove has nothing to take off when the working mark's own add failed,
+    // so swallowing the pair together would drop the mark that actually says the
+    // run is over. Both failing is still not the member's problem.
+    const { fetchImpl, called } = answering(
+      { ok: false, error: 'no_reaction' },
+      { ok: false, error: 'message_not_found' },
+    );
+    await slackApi('xoxb-test', { fetch: fetchImpl }).mark('D-nel', '250.0', 'done');
+    assert.deepEqual(called, ['reactions.remove', 'reactions.add']);
   });
 });

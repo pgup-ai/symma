@@ -30,7 +30,8 @@
         "commands",
         "groups:history",
         "im:history",
-        "im:write"
+        "im:write",
+        "reactions:write"
       ]
     }
   },

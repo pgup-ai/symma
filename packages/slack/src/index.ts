@@ -234,6 +234,7 @@ const connection = socketMode({
               post: deps.post,
               endpoint: deps.endpoint,
               run: deps.run,
+              mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,
               budgetBytes,

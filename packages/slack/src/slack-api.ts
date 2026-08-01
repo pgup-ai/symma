@@ -29,6 +29,10 @@ export interface SlackApi {
    * and reporting a failed update as a failed share would be a lie the member
    * acts on. */
   settle: (channel: string, ts: string, text: string) => Promise<void>;
+  /** 👀 on the member's own message while the run is out, replaced when it
+   * lands. Never throws: the mark is a hint, and losing one must not cost them
+   * the answer it was a hint about. */
+  mark: (channel: string, ts: string, state: MarkState) => Promise<void>;
   /** Publishes into the source thread. Returns why it could not rather than
    * throwing: §5 keeps the answer in the DM and names which of these happened,
    * and a publication that cannot land is not a lost answer. */
@@ -41,6 +45,16 @@ export interface SlackApi {
 
 /** The ways a destination stops being one, as §5 lists them. */
 export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope';
+
+/** A run takes minutes, and Slack offers no way to say so in the composer — so
+ * the member's own message carries it. */
+export type MarkState = 'working' | 'done' | 'failed';
+
+const MARK: Record<MarkState, string> = {
+  working: 'eyes',
+  done: 'white_check_mark',
+  failed: 'x',
+};
 
 const UNUSABLE: Record<string, Unusable> = {
   is_archived: 'archived',
@@ -181,6 +195,19 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       } catch {
         /* the share landed; the button outliving it is the smaller problem */
       }
+    },
+    async mark(channel, ts, state) {
+      // Swallowed one call at a time rather than around the pair: a working
+      // mark that is not there is ordinary — its own add may have failed — and
+      // must not stop the one that replaces it.
+      if (state !== 'working') {
+        await client.reactions
+          .remove({ channel, timestamp: ts, name: MARK.working })
+          .catch(() => undefined);
+      }
+      await client.reactions
+        .add({ channel, timestamp: ts, name: MARK[state] })
+        .catch(() => undefined);
     },
     async share(channel, thread, text) {
       try {

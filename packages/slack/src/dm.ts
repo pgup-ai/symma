@@ -11,6 +11,7 @@ import type { TurnTarget } from '@symma/protocol';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
+import type { MarkState } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
@@ -92,6 +93,9 @@ export interface DmDeps {
     threadTs?: string,
     offerShare?: { conversation: string; destination: string },
   ) => Promise<{ channel: string; ts: string }>;
+  /** Marks the member's own message for the length of the run. Only the run is
+   * worth marking — everything refused answers in words, immediately. */
+  mark: (channel: string, ts: string, state: MarkState) => Promise<void>;
   /** Where this conversation may publish (§5). Undefined for one that began in
    * the DM, which has nowhere to go back to. */
   destination: (conversation: string) => Promise<{ channel: string; thread: string } | undefined>;
@@ -205,6 +209,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     conversation.rootThread,
   );
 
+  await deps.mark(message.channel, message.ts, 'working');
+
   let answer: string;
   try {
     answer = await deps.run({
@@ -222,6 +228,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // Posted into the thread they are watching rather than left to the socket's
     // catch, which answers at the DM root where this reply is not.
     deps.log(`run failed: ${String(error)}`);
+    await deps.mark(message.channel, message.ts, 'failed');
     await deps.post(
       conversation.dmChannel,
       'That run did not finish. Send it again and I will retry.',
@@ -241,5 +248,6 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     conversation.rootThread,
     to ? { conversation: conversation.id, destination: `<#${to.channel}>` } : undefined,
   );
+  await deps.mark(message.channel, message.ts, 'done');
   return existing ? 'resumed' : 'opened';
 }
