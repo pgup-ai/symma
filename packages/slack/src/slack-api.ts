@@ -213,14 +213,26 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
         : [];
       // The answer takes the blocks it needs and the asides take what is left,
       // in that order — a run that talked about itself a lot must not crowd out
-      // what it was talking alongside.
+      // what it was talking alongside. One block is held back for them all the
+      // same: an aside gone without trace is worse than an answer a block
+      // shorter, since it is often the part saying something went wrong.
       const room = MESSAGE_BLOCK_LIMIT - actions.length;
-      const body = sections(text, room);
+      const body = sections(text, room - (notices?.length ? 1 : 0));
+      const shown = (notices ?? []).slice(0, room - body.length);
+      const hidden = (notices?.length ?? 0) - shown.length;
       // Above the answer, which is where the agent put it. Truncated rather
       // than dropped: one over the limit would take the whole post down with it.
-      const context = (notices ?? []).slice(0, room - body.length).map((notice) => ({
+      const context = shown.map((notice, index) => ({
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: clip(notice, BLOCK_TEXT_LIMIT) }],
+        elements: [
+          {
+            type: 'mrkdwn',
+            text:
+              hidden && index === shown.length - 1
+                ? `${clip(notice, BLOCK_TEXT_LIMIT - 40)}\n_and ${String(hidden)} more_`
+                : clip(notice, BLOCK_TEXT_LIMIT),
+          },
+        ],
       }));
       const sent = await client.chat.postMessage({
         channel,
@@ -233,7 +245,11 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
         // Blocks replace the body wholesale, so the answer's own section has to
         // be rebuilt here as soon as anything needs to go with it — and a plain
         // body has no length limit worth reaching where a section does.
-        ...(context.length || actions.length ? { blocks: [...context, ...body, ...actions] } : {}),
+        // An answer past one section needs them too, or the plain body is all
+        // that carries it and everything past the fallback's own cap is gone.
+        ...(context.length || actions.length || body.length > 1
+          ? { blocks: [...context, ...body, ...actions] }
+          : {}),
       });
       if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
       return { channel: sent.channel, ts: sent.ts };
