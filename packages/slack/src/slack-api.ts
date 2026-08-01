@@ -90,7 +90,7 @@ const clip = (text: string, limit: number): string =>
  * a cut landing between the halves of an emoji leaves a lone surrogate that
  * renders as a replacement glyph. One unit back is always a whole character. */
 const cut = (text: string, at: number): number =>
-  /[\uD800-\uDBFF]/.test(text[at - 1] ?? '') ? at - 1 : at;
+  /[\uD800-\uDBFF]/.test(text[at - 1]!) ? at - 1 : at;
 
 /** The answer as however many sections it needs. Split at a line break near the
  * limit where there is one, so a fence or a list is less likely to be cut
@@ -100,7 +100,10 @@ function sections(text: string, budget: number): SectionBlock[] {
   let rest = text;
   while (rest.length > BLOCK_TEXT_LIMIT && parts.length < budget - 1) {
     const line = rest.lastIndexOf('\n', BLOCK_TEXT_LIMIT);
-    const at = line > BLOCK_TEXT_LIMIT / 2 ? line : cut(rest, BLOCK_TEXT_LIMIT);
+    // Only when what is left still fits without it: a tidy break is worth less
+    // than the tail it would cost, since the blocks that remain are counted.
+    const fits = rest.length - line <= (budget - parts.length - 1) * BLOCK_TEXT_LIMIT;
+    const at = line > BLOCK_TEXT_LIMIT / 2 && fits ? line : cut(rest, BLOCK_TEXT_LIMIT);
     parts.push(rest.slice(0, at));
     rest = rest.slice(at);
   }

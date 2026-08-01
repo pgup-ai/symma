@@ -275,6 +275,21 @@ describe('slack api', () => {
     assert.equal(new URLSearchParams(String(seen[0])).get('blocks'), null);
   });
 
+  it('does not pay for a tidy break with the answer’s tail', async () => {
+    // Every line break shortens the section it ends, so preferring them costs
+    // blocks — and just past the budget that cost comes out of the answer.
+    const line = `${'w'.repeat(2599)}\n`;
+    // 54 lines: 47 sections when cut at the limit, 54 when cut at the breaks —
+    // so the tidy version is the one that does not fit in 50.
+    const answer = line.repeat(54);
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', answer, '200.0');
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      text?: { text: string };
+    }[];
+    assert.equal(blocks.map((b) => b.text!.text).join(''), answer, 'all of it, tidy or not');
+  });
+
   it('still splits a long answer with nothing beside it', async () => {
     // The ordinary DM case: no notice, and no thread to share back to. Without
     // blocks the whole answer rides the fallback, which has a cap of its own.
