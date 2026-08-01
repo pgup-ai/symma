@@ -141,6 +141,21 @@ function fakeAgentIo(script: FakeAgentScript): {
   return { input, output, setModeIds, setConfigCalls, authCalls };
 }
 
+/** A pid nothing holds, asked for rather than hard-coded: Linux `pid_max` can
+ * sit far above any constant worth writing, and a fixture that assumes one is
+ * flaky on exactly the long-uptime machine that would expose it. */
+function unusedPid(from: number): number {
+  for (let pid = from; pid < from + 200; pid += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      // EPERM is a live process under another user; only ESRCH is nobody.
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error(`no unused pid between ${String(from)} and ${String(from + 200)}`);
+}
+
 describe('acp', () => {
   it('parses newline-delimited frames split across chunks and skips banner noise', () => {
     const seen: unknown[] = [];
@@ -702,16 +717,19 @@ describe('acp', () => {
         utimesSync(path, new Date(0), new Date(0));
         return path;
       };
-      const orphan = aged('config.toml.99999', 'a pid no OS hands out');
+      const dead = unusedPid(99_999);
+      const alsoDead = unusedPid(dead + 1);
+      const orphan = aged(`config.toml.${String(dead)}`, 'its companion is gone');
       const alive = aged('config.toml.1', 'old, but its process is still there');
       const notOurs = aged('history.jsonl.4', 'codex wrote this');
       const notStaged = aged('auth.json.backup.123', 'and so did this, despite the shape');
-      const midWrite = join(runHome, 'config.toml.99998');
+      // Dead too, so age is the only thing keeping it.
+      const midWrite = join(runHome, `config.toml.${String(alsoDead)}`);
       writeFileSync(midWrite, "another companion's, seconds old");
       // A staged auth is a symlink, and its target is the member's own file —
       // freshly written above. Aged through the link it would look current
       // forever; `lutimes` backdates the link itself, which is what decides.
-      const stagedLink = join(runHome, 'auth.json.99999');
+      const stagedLink = join(runHome, `auth.json.${String(dead)}`);
       symlinkSync(codexAuthPath(codexHome), stagedLink);
       lutimesSync(stagedLink, new Date(0), new Date(0));
 
