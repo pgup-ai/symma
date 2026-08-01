@@ -686,11 +686,6 @@ describe('acp', () => {
     }
   });
 
-  // The codex assertions below are POSIX-shaped — a link to write through, and
-  // an inode that a rename changes. Both are what the implementation does
-  // everywhere CI runs it (`ubuntu-latest`), and neither holds on the Windows
-  // copy path. Gating them would trade a real assertion for a branch nobody
-  // executes; adding Windows CI is what would earn the branch.
   it('keeps what the agent said about itself out of the answer', async () => {
     // codex-acp has no channel for codex's `warning` events, so it puts them in
     // the message stream as text with no `messageId` — live-observed against
@@ -785,6 +780,11 @@ describe('acp', () => {
     }
   });
 
+  // The codex assertions below are POSIX-shaped — a link to write through, and
+  // an inode that a rename changes. Both are what the implementation does
+  // everywhere CI runs it (`ubuntu-latest`), and neither holds on the Windows
+  // copy path. Gating them would trade a real assertion for a branch nobody
+  // executes; adding Windows CI is what would earn the branch.
   it('materializes per-agent read-only and model config', () => {
     const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
     writeFileSync(codexAuthPath(codexHome), '{"tokens":"first"}');
