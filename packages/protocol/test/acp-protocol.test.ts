@@ -691,25 +691,30 @@ describe('acp', () => {
       // Left by a companion killed between staging and the rename. This home
       // outlives the process, so nothing else would ever reclaim it — and on
       // Windows the same shape holds a plaintext credential.
+      // Every rule the sweep has to get right, since it deletes and the home is
+      // codex's too. Backdating stands in for a companion that died: nothing
+      // still being written can be this old.
       mkdirSync(runHome, { recursive: true });
-      const orphan = join(runHome, 'config.toml.99999');
-      writeFileSync(orphan, 'orphaned');
-      // Backdated past the staleness window: a staging file this new belongs to
-      // a companion mid-write, and taking it would break that rename.
-      utimesSync(orphan, new Date(0), new Date(0));
-      const live = join(runHome, 'config.toml.99998');
-      writeFileSync(live, "another companion's, mid-write");
-      // Old, digit-suffixed, and none of symma's business — the sweep deletes,
-      // so it only ever touches the two names it stages.
-      const codexOwned = join(runHome, 'history.jsonl.4');
-      writeFileSync(codexOwned, 'codex wrote this');
-      utimesSync(codexOwned, new Date(0), new Date(0));
+      const aged = (name: string, body: string) => {
+        const path = join(runHome, name);
+        writeFileSync(path, body);
+        utimesSync(path, new Date(0), new Date(0));
+        return path;
+      };
+      const orphan = aged('config.toml.99999', 'a pid no OS hands out');
+      const alive = aged('config.toml.1', 'old, but its process is still there');
+      const notOurs = aged('history.jsonl.4', 'codex wrote this');
+      const notStaged = aged('auth.json.backup.123', 'and so did this, despite the shape');
+      const midWrite = join(runHome, 'config.toml.99998');
+      writeFileSync(midWrite, "another companion's, seconds old");
 
       const codexEnv = codex.env('codex/gpt-5.2-codex');
       assert.equal(codexEnv.env.CODEX_HOME, runHome);
-      assert.ok(!existsSync(orphan), 'a stale staging file is reclaimed');
-      assert.ok(existsSync(live), "a live one is another process's to rename");
-      assert.ok(existsSync(codexOwned), 'and a name symma never stages is not ours to delete');
+      assert.ok(!existsSync(orphan), 'a staging file whose process is gone is reclaimed');
+      assert.ok(existsSync(alive), 'one whose pid still answers is not');
+      assert.ok(existsSync(midWrite), 'nor is one too new to have been abandoned');
+      assert.ok(existsSync(notOurs), 'a name symma never stages is not ours to delete');
+      assert.ok(existsSync(notStaged), 'and neither is one that only looks like a stage');
 
       // The model is deliberately NOT here: sessions share this file, so a
       // per-spawn write is one run reading another's config.

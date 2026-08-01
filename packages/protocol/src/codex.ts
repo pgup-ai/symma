@@ -99,23 +99,49 @@ function place(path: string, write: (staged: string) => void): void {
  * renaming is two synchronous calls. */
 const STAGING_STALE_MS = 60_000;
 
+/** The pid `place()` suffixed, or undefined for a name it never staged. Exact
+ * rather than a prefix: this decides a delete, and the home is codex's too, so
+ * an `auth.json.backup.123` of its own must not read as ours. */
+function stagedPid(entry: string): number | undefined {
+  for (const name of STAGED) {
+    if (!entry.startsWith(`${name}.`)) continue;
+    const suffix = entry.slice(name.length + 1);
+    if (/^\d+$/.test(suffix)) return Number(suffix);
+  }
+  return undefined;
+}
+
 /**
  * Clears staging files a killed companion left behind. The home outlives the
  * process now, so no later run shares that pid to reclaim its own, and on
  * Windows the file is a plaintext copy of the member's credential.
  *
- * Age is the test, not ownership. A live staging file belongs to another
- * companion mid-write, and deleting one takes it out from under that rename —
- * which is the failure this whole shape exists to avoid.
+ * Both tests have to pass, because either alone is wrong. Age misses a
+ * companion frozen between its write and its rename, which for this product is
+ * a laptop closing rather than an exotic stall. Liveness misses a pid the OS
+ * has since handed to something else. Taking a live file out from under
+ * another rename is the failure this whole shape exists to avoid.
  */
 function sweepStaging(home: string): void {
   const cutoff = Date.now() - STAGING_STALE_MS;
   for (const entry of readdirSync(home)) {
-    if (!STAGED.some((name) => entry.startsWith(`${name}.`)) || !/\.\d+$/.test(entry)) continue;
+    const pid = stagedPid(entry);
+    if (pid === undefined) continue;
     const path = join(home, entry);
-    if ((statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) < cutoff) {
-      rmSync(path, { force: true });
-    }
+    if ((statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) >= cutoff) continue;
+    if (!isGone(pid)) continue;
+    rmSync(path, { force: true });
+  }
+}
+
+/** Signal 0 delivers nothing and only asks whether the pid is there. `EPERM`
+ * is a process under another user — still not ours to clear up after. */
+function isGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
   }
 }
 
