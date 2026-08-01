@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
 import {
   existsSync,
+  lstatSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readlinkSync,
   readFileSync,
   rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -133,6 +139,21 @@ function fakeAgentIo(script: FakeAgentScript): {
   input.setEncoding('utf8');
   input.on('data', (chunk: string) => read(chunk));
   return { input, output, setModeIds, setConfigCalls, authCalls };
+}
+
+/** A pid nothing holds, asked for rather than hard-coded: Linux `pid_max` can
+ * sit far above any constant worth writing, and a fixture that assumes one is
+ * flaky on exactly the long-uptime machine that would expose it. */
+function unusedPid(from: number): number {
+  for (let pid = from; pid < from + 200; pid += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      // EPERM is a live process under another user; only ESRCH is nobody.
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error(`no unused pid between ${String(from)} and ${String(from + 200)}`);
 }
 
 describe('acp', () => {
@@ -665,58 +686,128 @@ describe('acp', () => {
     }
   });
 
+  // The codex assertions below are POSIX-shaped — a link to write through, and
+  // an inode that a rename changes. Both are what the implementation does
+  // everywhere CI runs it (`ubuntu-latest`), and neither holds on the Windows
+  // copy path. Gating them would trade a real assertion for a branch nobody
+  // executes; adding Windows CI is what would earn the branch.
   it('materializes per-agent read-only and model config', () => {
     const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
-    writeFileSync(codexAuthPath(codexHome), '{}');
-    const codex = codexAcpSpec(codexHome);
-    // Seed the adapter runtime overrides so the strip assertions are not
-    // vacuous: env() inherits process.env, so if a delete were dropped the
-    // ambient value would leak into the child.
+    writeFileSync(codexAuthPath(codexHome), '{"tokens":"first"}');
+    const runParent = mkdtempSync(join(tmpdir(), 'symma-test-run-'));
+    // Nested, so the run home is one prepare has to create for itself.
+    const runHome = join(runParent, 'codex');
+    const codex = codexAcpSpec(codexHome, runHome);
+    // Seeded so the strip assertions are not vacuous: env() inherits
+    // process.env, so a dropped delete would let the ambient value through.
     const overrides = ['CODEX_CONFIG', 'CODEX_PATH', 'MODEL_PROVIDER'] as const;
     const savedOverrides = overrides.map((key) => [key, process.env[key]] as const);
     for (const key of overrides) process.env[key] = `ambient-${key}`;
-    const codexLeakPrefix = 'symma-codex-acp-';
-    const codexEnv = codex.env('codex/gpt-5.2-codex');
     try {
-      const home = codexEnv.env.CODEX_HOME as string;
-      // Anchors the leak check below: matched against a stale prefix, both its
-      // snapshots are empty and it passes without observing anything.
-      assert.ok(home.includes(codexLeakPrefix), 'codex temp dirs carry the expected prefix');
-      const config = readFileSync(join(home, 'config.toml'), 'utf8');
-      assert.match(config, /sandbox_mode = "read-only"/);
-      assert.match(config, /model = "gpt-5\.2-codex"/);
-      const weird = codex.env('codex/we"ird\\model');
-      try {
-        const escaped = readFileSync(join(weird.env.CODEX_HOME as string, 'config.toml'), 'utf8');
-        assert.ok(escaped.includes('model = "we\\"ird\\\\model"'));
-      } finally {
-        weird.cleanup?.();
-      }
-      assert.ok(existsSync(codexAuthPath(home)));
-      // codex-acp runtime overrides are stripped despite the seeded ambient
-      // values (README: CODEX_CONFIG merges into session config, CODEX_PATH
-      // swaps the binary, MODEL_PROVIDER redirects models); mode is pinned.
-      for (const key of overrides) assert.equal(codexEnv.env[key], undefined);
+      // Left by a companion killed between staging and the rename. This home
+      // outlives the process, so nothing else would ever reclaim it — and on
+      // Windows the same shape holds a plaintext credential.
+      // Every rule the sweep has to get right, since it deletes and the home is
+      // codex's too. Backdating stands in for a companion that died: nothing
+      // still being written can be this old.
+      mkdirSync(runHome, { recursive: true });
+      const aged = (name: string, body: string) => {
+        const path = join(runHome, name);
+        writeFileSync(path, body);
+        utimesSync(path, new Date(0), new Date(0));
+        return path;
+      };
+      const dead = unusedPid(99_999);
+      const alsoDead = unusedPid(dead + 1);
+      const orphan = aged(`config.toml.${String(dead)}`, 'its companion is gone');
+      const alive = aged('config.toml.1', 'old, but its process is still there');
+      const notOurs = aged('history.jsonl.4', 'codex wrote this');
+      const notStaged = aged('auth.json.backup.123', 'and so did this, despite the shape');
+      // Dead too, so age is the only thing keeping it.
+      const midWrite = join(runHome, `config.toml.${String(alsoDead)}`);
+      writeFileSync(midWrite, "another companion's, seconds old");
+      // A staged auth is a symlink, and its target is the member's own file —
+      // freshly written above. Aged through the link it would look current
+      // forever; `lutimes` backdates the link itself, which is what decides.
+      const stagedLink = join(runHome, `auth.json.${String(dead)}`);
+      symlinkSync(codexAuthPath(codexHome), stagedLink);
+      lutimesSync(stagedLink, new Date(0), new Date(0));
+
+      const codexEnv = codex.env('codex/gpt-5.2-codex');
+      assert.equal(codexEnv.env.CODEX_HOME, runHome);
+      assert.ok(!existsSync(orphan), 'a staging file whose process is gone is reclaimed');
+      assert.ok(existsSync(alive), 'one whose pid still answers is not');
+      assert.ok(existsSync(midWrite), 'nor is one too new to have been abandoned');
+      assert.ok(existsSync(notOurs), 'a name symma never stages is not ours to delete');
+      assert.ok(existsSync(notStaged), 'and neither is one that only looks like a stage');
+      assert.ok(!existsSync(stagedLink), 'a stranded auth link is aged by itself, not its target');
+
+      // The model is deliberately NOT here: sessions share this file, so a
+      // per-spawn write is one run reading another's config.
+      assert.equal(
+        readFileSync(join(runHome, 'config.toml'), 'utf8'),
+        'sandbox_mode = "read-only"\n',
+      );
+      assert.equal(codexEnv.env.CODEX_CONFIG, '{"model":"gpt-5.2-codex"}');
+
+      // Written through the link and read back from the original: asserting
+      // the link's own contents would pass just as well on a copy, and a copy
+      // is what strands codex's in-place token refresh.
+      writeFileSync(codexAuthPath(runHome), '{"tokens":"refreshed"}');
+      assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"refreshed"}');
+
+      // No cleanup to call is the point: a home that went with the run is a
+      // rollout nothing can load back.
+      assert.equal(codexEnv.cleanup, undefined);
+      writeFileSync(join(runHome, 'sessions.probe'), 'a rollout would live here');
+      // A rename swaps the inode, so an unchanged one is the proof that the
+      // steady state writes nothing — which is what keeps a concurrent spawn
+      // from ever reading this file half-written.
+      const settled = statSync(join(runHome, 'config.toml')).ino;
+      const second = codex.env('codex/default');
+      assert.equal(statSync(join(runHome, 'config.toml')).ino, settled);
+      assert.ok(existsSync(join(runHome, 'sessions.probe')), 'a second spawn reuses the home');
+      // `default` names no model, so the ambient override must not stand in.
+      assert.equal(second.env.CODEX_CONFIG, undefined);
+
+      assert.equal(codexEnv.env.CODEX_PATH, undefined);
+      assert.equal(codexEnv.env.MODEL_PROVIDER, undefined);
       assert.equal(codexEnv.env.INITIAL_AGENT_MODE, 'read-only');
       assert.equal(codexEnv.env.NO_BROWSER, '1');
+      // A real copy an older build left here is migrated, not kept as the stale
+      // credential it has become.
+      rmSync(codexAuthPath(runHome), { force: true });
+      writeFileSync(codexAuthPath(runHome), '{"tokens":"stale copy"}');
+      codex.env('codex/default');
+      // Content alone would pass on a copy of the right bytes. What migration
+      // is for is giving the refresh somewhere to land again.
+      assert.ok(lstatSync(codexAuthPath(runHome)).isSymbolicLink());
+      writeFileSync(codexAuthPath(runHome), '{"tokens":"after migration"}');
+      assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"after migration"}');
+
+      // And so is a link left pointing at some other home, which is a
+      // credential that either fails or belongs to somebody else.
+      rmSync(codexAuthPath(runHome), { force: true });
+      symlinkSync(join(codexHome, 'someone-else.json'), codexAuthPath(runHome));
+      codex.env('codex/default');
+      assert.equal(readlinkSync(codexAuthPath(runHome)), codexAuthPath(codexHome));
     } finally {
-      codexEnv.cleanup?.();
       for (const [key, value] of savedOverrides) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+      rmSync(codexHome, { recursive: true, force: true });
+      rmSync(runParent, { recursive: true, force: true });
     }
-    rmSync(codexHome, { recursive: true, force: true });
 
-    const codexBefore = readdirSync(tmpdir()).filter((entry) => entry.startsWith(codexLeakPrefix));
     const codexEmptyHome = mkdtempSync(join(tmpdir(), 'symma-test-empty-'));
+    const emptyRun = join(codexEmptyHome, 'run');
     try {
-      assert.throws(() => codexAcpSpec(codexEmptyHome).env('codex/default'));
+      assert.throws(() => codexAcpSpec(codexEmptyHome, emptyRun).env('codex/default'));
+      assert.ok(!existsSync(emptyRun), 'and nothing is built for a home that has none');
     } finally {
       rmSync(codexEmptyHome, { recursive: true, force: true });
     }
-    const codexAfter = readdirSync(tmpdir()).filter((entry) => entry.startsWith(codexLeakPrefix));
-    assert.deepEqual(codexAfter, codexBefore);
 
     const kilo = kiloAcpSpec('{"token":"k"}');
     assert.deepEqual(kilo.args('kilo/default'), ['acp']);

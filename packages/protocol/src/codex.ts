@@ -1,5 +1,18 @@
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  chmodSync,
+  copyFileSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { join, resolve } from 'node:path';
 
 export const CODEX_PROVIDER_ID = 'codex';
 
@@ -38,15 +51,162 @@ export function writeCodexAuth(auth: string, codexHome: string): string {
   return path;
 }
 
+/** Everything the run home holds that does not vary per spawn. */
+const RUN_CONFIG = 'sandbox_mode = "read-only"\n';
+
+/** The two `place()` ever stages, and so the only names `sweepStaging` may
+ * delete a suffixed form of. */
+const STAGED = ['auth.json', 'config.toml'];
+
+/** Windows creates file symlinks only for an admin or under Developer Mode, so
+ * codex there keeps the per-spawn copy this replaced — and with it the problem
+ * the link solves: a refreshed token lands in the copy, and the next spawn
+ * overwrites it from the member's own file. Unchanged from what shipped before;
+ * carrying one back needs a hook that runs after the child exits. */
+const linkable = process.platform !== 'win32';
+
 /**
- * Child env with the temp `CODEX_HOME`. The api-key/access-token envs are stripped
+ * Whether `link` already stands for `target`, which on a linkable platform is
+ * simply whether it points there.
+ *
+ * The Windows copy needs a different question. Rewriting one a running codex
+ * still holds fails the rename outright, and a copy that is newer than the
+ * source is one codex refreshed in place — overwriting it would undo that. So
+ * only a source that has moved on, which is a re-login, is worth the rewrite.
+ *
+ * mtime is how "moved on" is read, so a re-login the clock does not separate
+ * from the copy — coarse timestamps, skew — is one this misses. Another cost
+ * of the copy, on top of the one above it.
+ */
+function isCurrentAuth(link: string, target: string): boolean {
+  if (!linkable) {
+    const copied = statSync(link, { throwIfNoEntry: false });
+    return copied !== undefined && copied.mtimeMs >= statSync(target).mtimeMs;
+  }
+  return (
+    lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink() === true &&
+    readlinkSync(link) === target
+  );
+}
+
+/** Puts a file where nobody can catch it half-written: staged, then renamed,
+ * which is atomic. The pid is what keeps two companion processes sharing a
+ * state dir off each other's staging file. */
+function place(path: string, write: (staged: string) => void): void {
+  const staged = `${path}.${String(process.pid)}`;
+  rmSync(staged, { force: true });
+  write(staged);
+  renameSync(staged, path);
+}
+
+/** Long enough that nothing still being written can be this old: staging and
+ * renaming is two synchronous calls. */
+const STAGING_STALE_MS = 60_000;
+
+/** The pid `place()` suffixed, or undefined for a name it never staged. Exact
+ * rather than a prefix: this decides a delete, and the home is codex's too, so
+ * an `auth.json.backup.123` of its own must not read as ours. */
+function stagedPid(entry: string): number | undefined {
+  for (const name of STAGED) {
+    if (!entry.startsWith(`${name}.`)) continue;
+    const suffix = entry.slice(name.length + 1);
+    if (/^\d+$/.test(suffix)) return Number(suffix);
+  }
+  return undefined;
+}
+
+/**
+ * Clears staging files a killed companion left behind. The home outlives the
+ * process now, so no later run shares that pid to reclaim its own, and on
+ * Windows the file is a plaintext copy of the member's credential.
+ *
+ * Both tests have to pass, because either alone is wrong. Age misses a
+ * companion frozen between its write and its rename, which for this product is
+ * a laptop closing rather than an exotic stall. Liveness misses a pid the OS
+ * has since handed to something else. Taking a live file out from under
+ * another rename is the failure this whole shape exists to avoid.
+ */
+function sweepStaging(home: string): void {
+  const cutoff = Date.now() - STAGING_STALE_MS;
+  for (const entry of readdirSync(home)) {
+    const pid = stagedPid(entry);
+    if (pid === undefined) continue;
+    const path = join(home, entry);
+    // lstat, because a staged auth is itself a symlink: following it would age
+    // the leftover by when the member last logged in, and a fresh login would
+    // keep a dead companion's artifact here indefinitely.
+    if ((lstatSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) >= cutoff) continue;
+    if (!isGone(pid)) continue;
+    rmSync(path, { force: true });
+  }
+}
+
+/** Signal 0 delivers nothing and only asks whether the pid is there. `EPERM`
+ * is a process under another user — still not ours to clear up after. */
+function isGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
+/**
+ * Builds the `CODEX_HOME` symma runs codex in, idempotently.
+ *
+ * It has to outlive the spawn: codex writes its rollout under
+ * `$CODEX_HOME/sessions/`, so a home that dies with the run is a session that
+ * can never be loaded back. And it has to be symma's rather than the member's,
+ * because the read-only config is ours to write and theirs to keep.
+ */
+export function prepareCodexRunHome(codexHome: string, runHome: string): string {
+  // Resolved first because a symlink stores the path it is handed and reads it
+  // back against its own directory, while the check below reads it against the
+  // cwd. A relative argument would make the two disagree, and the check would
+  // pass over a link to nothing.
+  const target = resolve(codexAuthPath(codexHome));
+  const home = resolve(runHome);
+  // A link to nothing is legal, and codex reports it much later as an auth
+  // problem with no hint of where the file was meant to be.
+  if (!statSync(target, { throwIfNoEntry: false })) {
+    throw new Error(`Missing Codex auth at ${target}.`);
+  }
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  // Before either branch below, because the steady state takes neither and a
+  // leftover would otherwise sit here until something happened to need a write.
+  sweepStaging(home);
+
+  // Linked rather than copied: codex refreshes the token in place, so a copy
+  // would strand the refresh here and go stale without saying so. Rewritten
+  // only when it points elsewhere, which also migrates a home an older build
+  // left a real file in.
+  const link = codexAuthPath(home);
+  if (!isCurrentAuth(link, target)) {
+    place(link, (staged) =>
+      linkable ? symlinkSync(target, staged) : copyFileSync(target, staged),
+    );
+  }
+
+  // Compared first, so the steady state writes nothing at all.
+  const config = join(home, 'config.toml');
+  if (!statSync(config, { throwIfNoEntry: false }) || readFileSync(config, 'utf8') !== RUN_CONFIG) {
+    place(config, (staged) => writeFileSync(staged, RUN_CONFIG, { mode: 0o600 }));
+  }
+  // Handed back so `CODEX_HOME` names the directory these went into, rather
+  // than the caller's spelling of it.
+  return home;
+}
+
+/**
+ * Child env with the run `CODEX_HOME`. The api-key/access-token envs are stripped
  * because Codex ranks them ABOVE auth.json — an ambient `OPENAI_API_KEY` would
  * silently switch the run to per-token API billing instead of the subscription.
  */
 export function codexEnvForHome(codexHome: string | undefined): NodeJS.ProcessEnv {
   const home = codexHome?.trim();
   if (!home) {
-    throw new Error('Missing Codex home. A temp CODEX_HOME is required for auth.');
+    throw new Error('Missing Codex home. A CODEX_HOME is required for auth.');
   }
   const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: home };
   delete env.OPENAI_API_KEY;

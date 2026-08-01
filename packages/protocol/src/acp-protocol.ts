@@ -17,14 +17,9 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 
-import { codexAuthPath, codexEnvForHome } from './codex.js';
+import { codexEnvForHome, prepareCodexRunHome } from './codex.js';
 import { CURSOR_CLI_BIN, cursorEnvForKey } from './cursor.js';
-import {
-  buildDevinReadOnlyConfig,
-  DEVIN_CLI_BIN,
-  devinCredentialsPath,
-  tomlString,
-} from './devin.js';
+import { buildDevinReadOnlyConfig, DEVIN_CLI_BIN, devinCredentialsPath } from './devin.js';
 import {
   KILO_CLI_BIN,
   KILO_GATEWAY_FREE_MODEL,
@@ -691,40 +686,29 @@ export function kiloAcpSpec(auth: string): AcpAgentSpec {
   };
 }
 
-export function codexAcpSpec(codexHome: string): AcpAgentSpec {
+/** `codexHome` is the member's own — only `auth.json` is read out of it.
+ * `runHome` is symma's, and persists; see `prepareCodexRunHome`. */
+export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
   return {
     id: 'codex',
     bin: CODEX_ACP_BIN,
     args: () => [],
     env: (model) => {
-      // Same per-spawn CODEX_HOME copy as the CLI driver. Read-only and model
-      // ride config.toml because the adapter takes no argv for them.
-      const dir = mkdtempSync(join(tmpdir(), 'symma-codex-acp-'));
-      try {
-        copyFileSync(codexAuthPath(codexHome), codexAuthPath(dir));
-        const { modelID } = parseModelName(model);
-        const lines = ['sandbox_mode = "read-only"'];
-        if (modelID !== 'default') lines.push(`model = ${tomlString(modelID)}`);
-        writeFileSync(join(dir, 'config.toml'), `${lines.join('\n')}\n`, { mode: 0o600 });
-      } catch (error) {
-        // The cleanup callback is only returned on success; reclaim the dir.
-        rmSync(dir, { recursive: true, force: true });
-        throw error;
-      }
-      const env = codexEnvForHome(dir);
-      // codex-acp runtime overrides (README): CODEX_CONFIG merges into session
-      // config, CODEX_PATH swaps the binary, MODEL_PROVIDER redirects models —
-      // ambient values must not subvert the temp-home setup. INITIAL_AGENT_MODE
-      // is pinned to the adapter's read-only mode as a positive layer.
-      delete env.CODEX_CONFIG;
+      const env = codexEnvForHome(prepareCodexRunHome(codexHome, runHome));
+      // codex-acp runtime overrides (README): CODEX_PATH swaps the binary and
+      // MODEL_PROVIDER redirects models, so ambient values must not reach the
+      // child. CODEX_CONFIG is set rather than stripped — being per process is
+      // what lets the model vary while sessions share one home.
       delete env.CODEX_PATH;
       delete env.MODEL_PROVIDER;
+      const { modelID } = parseModelName(model);
+      if (modelID === 'default') delete env.CODEX_CONFIG;
+      else env.CODEX_CONFIG = JSON.stringify({ model: modelID });
+      // Live-probed against codex-acp 1.1.7: config.toml's `sandbox_mode`
+      // leaves the ACP mode reading `agent`; this is what selects read-only.
       env.INITIAL_AGENT_MODE = 'read-only';
       env.NO_BROWSER = '1';
-      return {
-        env,
-        cleanup: () => rmSync(dir, { recursive: true, force: true }),
-      };
+      return { env };
     },
   };
 }
