@@ -686,12 +686,8 @@ export function kiloAcpSpec(auth: string): AcpAgentSpec {
   };
 }
 
-/**
- * `codexHome` is the member's own, and the only thing read out of it is
- * `auth.json`. `runHome` is symma's, and it persists — see
- * `prepareCodexRunHome` for why a home that dies with the spawn is a session
- * nothing can load back.
- */
+/** `codexHome` is the member's own — only `auth.json` is read out of it.
+ * `runHome` is symma's, and persists; see `prepareCodexRunHome`. */
 export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
   return {
     id: 'codex',
@@ -702,16 +698,15 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
       const env = codexEnvForHome(runHome);
       // codex-acp runtime overrides (README): CODEX_PATH swaps the binary and
       // MODEL_PROVIDER redirects models, so ambient values must not reach the
-      // child. CODEX_CONFIG is set rather than stripped — it is per process,
-      // which is what lets the model vary while sessions share one home.
+      // child. CODEX_CONFIG is set rather than stripped — being per process is
+      // what lets the model vary while sessions share one home.
       delete env.CODEX_PATH;
       delete env.MODEL_PROVIDER;
       const { modelID } = parseModelName(model);
       if (modelID === 'default') delete env.CODEX_CONFIG;
       else env.CODEX_CONFIG = JSON.stringify({ model: modelID });
       // Live-probed against codex-acp 1.1.7: config.toml's `sandbox_mode`
-      // leaves the ACP mode reading `agent`, and this is what selects
-      // read-only. It is the layer, not the belt-and-braces it looks like.
+      // leaves the ACP mode reading `agent`; this is what selects read-only.
       env.INITIAL_AGENT_MODE = 'read-only';
       env.NO_BROWSER = '1';
       return { env };

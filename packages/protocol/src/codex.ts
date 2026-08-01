@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  copyFileSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -49,9 +50,23 @@ export function writeCodexAuth(auth: string, codexHome: string): string {
   return path;
 }
 
-/** Everything the run home holds that does not vary per spawn. The model does,
- * and rides `CODEX_CONFIG` instead — see `codexAcpSpec`. */
+/** Everything the run home holds that does not vary per spawn. */
 const RUN_CONFIG = 'sandbox_mode = "read-only"\n';
+
+/** Windows creates file symlinks only for an admin or under Developer Mode, so
+ * codex there keeps the copy this replaced. The link check below never matches
+ * a copy, so it is rewritten every spawn — which is the staleness answer. */
+const linkable = process.platform !== 'win32';
+
+/** Puts a file where nobody can catch it half-written: staged, then renamed,
+ * which is atomic. The pid is what keeps two companion processes sharing a
+ * state dir off each other's staging file. */
+function place(path: string, write: (staged: string) => void): void {
+  const staged = `${path}.${String(process.pid)}`;
+  rmSync(staged, { force: true });
+  write(staged);
+  renameSync(staged, path);
+}
 
 /**
  * Builds the `CODEX_HOME` symma runs codex in, idempotently.
@@ -59,37 +74,36 @@ const RUN_CONFIG = 'sandbox_mode = "read-only"\n';
  * It has to outlive the spawn: codex writes its rollout under
  * `$CODEX_HOME/sessions/`, so a home that dies with the run is a session that
  * can never be loaded back. And it has to be symma's rather than the member's,
- * because the read-only config below is ours to write and theirs to keep.
+ * because the read-only config is ours to write and theirs to keep.
  */
 export function prepareCodexRunHome(codexHome: string, runHome: string): void {
   const target = codexAuthPath(codexHome);
-  // Fail here rather than leave a link to nothing, which codex reports much
-  // later as an auth problem with no hint of where the file was meant to be.
+  // A link to nothing is legal, and codex reports it much later as an auth
+  // problem with no hint of where the file was meant to be.
   if (!statSync(target, { throwIfNoEntry: false })) {
     throw new Error(`Missing Codex auth at ${target}.`);
   }
   mkdirSync(runHome, { recursive: true, mode: 0o700 });
 
-  // Linked rather than copied: codex refreshes the token in place, and a copy
-  // would go stale without ever saying so. Touched only when it points
-  // somewhere else, which also replaces the real file older builds left here.
+  // Linked rather than copied: codex refreshes the token in place, so a copy
+  // would strand the refresh here and go stale without saying so. Rewritten
+  // only when it points elsewhere, which also migrates a home an older build
+  // left a real file in.
   const link = codexAuthPath(runHome);
-  if (
-    !lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink() ||
-    readlinkSync(link) !== target
-  ) {
-    rmSync(link, { force: true });
-    symlinkSync(target, link);
+  const linked =
+    linkable &&
+    lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink() === true &&
+    readlinkSync(link) === target;
+  if (!linked) {
+    place(link, (staged) =>
+      linkable ? symlinkSync(target, staged) : copyFileSync(target, staged),
+    );
   }
 
-  // Compared before writing, and renamed into place when it is written: two
-  // sessions can spawn at once, and a config.toml one of them catches
-  // mid-write is a sandbox that silently is not there.
+  // Compared first, so the steady state writes nothing at all.
   const config = join(runHome, 'config.toml');
   if (!statSync(config, { throwIfNoEntry: false }) || readFileSync(config, 'utf8') !== RUN_CONFIG) {
-    const staged = `${config}.staging`;
-    writeFileSync(staged, RUN_CONFIG, { mode: 0o600 });
-    renameSync(staged, config);
+    place(config, (staged) => writeFileSync(staged, RUN_CONFIG, { mode: 0o600 }));
   }
 }
 

@@ -680,26 +680,22 @@ describe('acp', () => {
       const codexEnv = codex.env('codex/gpt-5.2-codex');
       assert.equal(codexEnv.env.CODEX_HOME, runHome);
 
-      // Static: the model is deliberately NOT here. Two sessions can spawn at
-      // once and share this file, so anything per-spawn written into it is one
-      // run reading another's config — or a truncated one, mid-write.
+      // The model is deliberately NOT here: sessions share this file, so a
+      // per-spawn write is one run reading another's config.
       assert.equal(
         readFileSync(join(runHome, 'config.toml'), 'utf8'),
         'sandbox_mode = "read-only"\n',
       );
-      // It rides the env instead, which is per process.
       assert.equal(codexEnv.env.CODEX_CONFIG, '{"model":"gpt-5.2-codex"}');
 
-      // Linked, not copied: codex refreshes the token in place, so a copy would
-      // strand the refresh here and go stale without saying so. Written through
-      // the link and read back from the original, because asserting the link's
-      // own contents would pass just as well on a copy.
+      // Written through the link and read back from the original: asserting
+      // the link's own contents would pass just as well on a copy, and a copy
+      // is what strands codex's in-place token refresh.
       writeFileSync(codexAuthPath(runHome), '{"tokens":"refreshed"}');
       assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"refreshed"}');
 
-      // The home outlives the spawn — no cleanup to call — which is the whole
-      // point: codex writes its rollout under it, and a home that went with the
-      // run is a session nothing can load back.
+      // No cleanup to call is the point: a home that went with the run is a
+      // rollout nothing can load back.
       assert.equal(codexEnv.cleanup, undefined);
       writeFileSync(join(runHome, 'sessions.probe'), 'a rollout would live here');
       // A rename swaps the inode, so an unchanged one is the proof that the
@@ -707,14 +703,11 @@ describe('acp', () => {
       // from ever reading this file half-written.
       const settled = statSync(join(runHome, 'config.toml')).ino;
       const second = codex.env('codex/default');
-      assert.equal(second.env.CODEX_HOME, runHome);
       assert.equal(statSync(join(runHome, 'config.toml')).ino, settled);
       assert.ok(existsSync(join(runHome, 'sessions.probe')), 'a second spawn reuses the home');
       // `default` names no model, so the ambient override must not stand in.
       assert.equal(second.env.CODEX_CONFIG, undefined);
 
-      // CODEX_PATH swaps the binary and MODEL_PROVIDER redirects models
-      // (codex-acp README), so neither may reach the child; mode is pinned.
       assert.equal(codexEnv.env.CODEX_PATH, undefined);
       assert.equal(codexEnv.env.MODEL_PROVIDER, undefined);
       assert.equal(codexEnv.env.INITIAL_AGENT_MODE, 'read-only');
@@ -726,8 +719,8 @@ describe('acp', () => {
       }
     }
 
-    // A home an older build left a real copy in is migrated, not left as the
-    // stale credential it has become.
+    // A real copy an older build left here is migrated, not kept as the stale
+    // credential it has become.
     rmSync(codexAuthPath(runHome), { force: true });
     writeFileSync(codexAuthPath(runHome), '{"tokens":"stale copy"}');
     codex.env('codex/default');
@@ -736,8 +729,6 @@ describe('acp', () => {
     rmSync(codexHome, { recursive: true, force: true });
     rmSync(runHome, { recursive: true, force: true });
 
-    // A link to nothing is an auth failure codex reports much later, with no
-    // hint of where the file was meant to be.
     const codexEmptyHome = mkdtempSync(join(tmpdir(), 'symma-test-empty-'));
     const emptyRun = join(codexEmptyHome, 'run');
     try {
