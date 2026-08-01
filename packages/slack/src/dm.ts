@@ -4,8 +4,8 @@
  *
  * The turn is recorded, then run on the member's own machine — or refused in
  * §3's words when that machine cannot take it. Each turn is its own ACP session
- * for now: §4's resume lands next, and a follow-up says plainly that it is
- * starting fresh rather than passing an empty session off as a resume.
+ * — nothing advertises `session/load` — so a follow-up is caught up from this
+ * thread and told that is a transcript rather than a resume (§4).
  */
 import type { TurnTarget } from '@symma/protocol';
 
@@ -53,8 +53,7 @@ export type DmOutcome =
   | 'failed'
   | `refused: ${RefusalReason}`;
 
-/** One prompt on one machine, in one of the directories it offers. No model:
- * §5's override is still whatever the agent defaults to. */
+/** One prompt on one machine, in one of the directories it offers. */
 export interface RunSpec {
   conversation: string;
   endpoint: string;
@@ -64,6 +63,9 @@ export interface RunSpec {
   /** Absent for a machine that advertises no roots — the agent then opens in an
    * empty temp directory, which the acknowledgement says out loud. */
   workspace?: string;
+  /** `provider/model`, always — every spec parses it that way and reads the half
+   * after the slash. A bare `default` is refused before any agent sees it. */
+  model: string;
 }
 
 export interface DmDeps {
@@ -210,6 +212,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       endpoint: decision.endpoint,
       agent: decision.agent,
       token: decision.token,
+      // §5 wants a per-agent default with an override; until the override
+      // exists this is the default, and the prefix is what makes it parse.
+      model: `${decision.agent}/default`,
       prompt: caught ? `${caught.context}\n\n${message.text}` : message.text,
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
     });

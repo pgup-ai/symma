@@ -190,6 +190,7 @@ describe('dm message', () => {
         agent: 'kilo',
         token: 'tok-1',
         prompt: 'what broke?',
+        model: 'kilo/default',
       },
     ]);
     assert.equal(posts.at(-1)!.text, 'the deploy fails on a missing env var');
@@ -197,6 +198,18 @@ describe('dm message', () => {
     // opens in an empty temp dir, which is not what "your own machine" sounds
     // like to someone asking about their repo.
     assert.match(posts[0]!.text, /no access to your files/);
+  });
+
+  it('names the model as `provider/model`, which is the only shape that parses', async () => {
+    // Every spec runs the string through `parseModelName` and reads the half
+    // after the slash, so a bare `default` is refused before any agent sees it —
+    // `Invalid model "default"; expected "provider/model"`. The prefix is not
+    // read by anything, so the agent's own name is the honest one to use.
+    const { deps, runs } = harness();
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+
+    assert.equal(runs[0]!.model, 'kilo/default');
+    assert.match(runs[0]!.model, /^[^/]+\/[^/]+$/, 'parses as provider/model');
   });
 
   it('names the project the answer is about, and runs the turn there', async () => {
