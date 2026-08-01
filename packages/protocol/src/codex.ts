@@ -11,7 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export const CODEX_PROVIDER_ID = 'codex';
 
@@ -99,19 +99,24 @@ function place(path: string, write: (staged: string) => void): void {
  * because the read-only config is ours to write and theirs to keep.
  */
 export function prepareCodexRunHome(codexHome: string, runHome: string): void {
-  const target = codexAuthPath(codexHome);
+  // Resolved first because a symlink stores the path it is handed and reads it
+  // back against its own directory, while the check below reads it against the
+  // cwd. A relative argument would make the two disagree, and the check would
+  // pass over a link to nothing.
+  const target = resolve(codexAuthPath(codexHome));
+  const home = resolve(runHome);
   // A link to nothing is legal, and codex reports it much later as an auth
   // problem with no hint of where the file was meant to be.
   if (!statSync(target, { throwIfNoEntry: false })) {
     throw new Error(`Missing Codex auth at ${target}.`);
   }
-  mkdirSync(runHome, { recursive: true, mode: 0o700 });
+  mkdirSync(home, { recursive: true, mode: 0o700 });
 
   // Linked rather than copied: codex refreshes the token in place, so a copy
   // would strand the refresh here and go stale without saying so. Rewritten
   // only when it points elsewhere, which also migrates a home an older build
   // left a real file in.
-  const link = codexAuthPath(runHome);
+  const link = codexAuthPath(home);
   if (!isCurrentAuth(link, target)) {
     place(link, (staged) =>
       linkable ? symlinkSync(target, staged) : copyFileSync(target, staged),
@@ -119,7 +124,7 @@ export function prepareCodexRunHome(codexHome: string, runHome: string): void {
   }
 
   // Compared first, so the steady state writes nothing at all.
-  const config = join(runHome, 'config.toml');
+  const config = join(home, 'config.toml');
   if (!statSync(config, { throwIfNoEntry: false }) || readFileSync(config, 'utf8') !== RUN_CONFIG) {
     place(config, (staged) => writeFileSync(staged, RUN_CONFIG, { mode: 0o600 }));
   }
