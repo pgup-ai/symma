@@ -12,7 +12,6 @@
       {
         "command": "/connect",
         "description": "Pair a machine with symma",
-        "usage_hint": "",
         "should_escape": false
       }
     ]
