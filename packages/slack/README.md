@@ -25,6 +25,11 @@ a thread and posting a DM are authorized calls, where `/connect` got by on
 
 **3. Install it** to the workspace, and note the team id (`T…`).
 
+Slash commands and the messages tab are granted at install. A command added to
+the manifest _after_ an install is not in the workspace until you reinstall,
+which reads as `/connect is not a valid command` — the app config listing it is
+not the same as the workspace having it.
+
 **4. Run it** beside the gateway:
 
 ```bash
@@ -57,6 +62,7 @@ One slash command, deliberately. A chat surface that grows model, provider,
 directory and shell controls is support and security surface this workflow has
 not earned yet — mentions are the interface, not commands.
 
-A mention supplies context and, later, a destination — never an answer. Work
-happens in the member's DM, and nothing returns to the channel without an
-explicit grant (§5), which is not built yet.
+A mention supplies context and a destination — never an answer. Work happens in
+the member's DM, and nothing returns to the channel without an explicit grant:
+the answer carries a _Share to thread_ button, and pressing it is the only way
+it leaves (§5).
