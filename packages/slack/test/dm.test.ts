@@ -23,7 +23,6 @@ function harness(
     turn?: boolean;
     endpoint?: TurnTarget | null;
     answer?: string;
-    /** What the agent said about itself rather than about the question. */
     notices?: string[];
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot

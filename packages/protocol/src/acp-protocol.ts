@@ -343,8 +343,7 @@ export interface AcpSessionResult {
   /** Assistant text the agent did not label with a `messageId`, in a session
    * where it labelled everything else — an adapter with no channel of its own
    * putting an operational notice in the message stream. codex-acp turns
-   * codex's `warning` and `configWarning` events into exactly this. Kept out of
-   * `text`, because it is not what was asked. */
+   * codex's `warning` and `configWarning` events into exactly this. */
   notices: string[];
 }
 
@@ -361,15 +360,16 @@ export async function driveAcpSession(
   options: AcpSessionOptions,
 ): Promise<AcpSessionResult> {
   const { agent, label, log } = options;
-  const segments: string[] = [];
-  const notices: string[] = [];
+  // Kept with the id they arrived under, because whether an unlabelled one is a
+  // notice depends on whether the session ever labels anything — and a
+  // `tool_call` can flush one before the first labelled chunk says so.
+  const segments: { id: unknown; text: string }[] = [];
   let current = '';
   let lastMessageId: unknown;
   let seenChunk = false;
   let usesMessageIds = false;
   const flush = () => {
-    if (current.trim())
-      (usesMessageIds && lastMessageId === undefined ? notices : segments).push(current);
+    if (current.trim()) segments.push({ id: lastMessageId, text: current });
     current = '';
   };
 
@@ -487,10 +487,12 @@ export async function driveAcpSession(
   // race resolves within one I/O flush), then take the final segment.
   await new Promise((resolve) => setTimeout(resolve, ACP_POST_TURN_DRAIN_MS));
   flush();
+  const aside = (segment: { id: unknown }) => usesMessageIds && segment.id === undefined;
+  const answered = segments.filter((segment) => !aside(segment));
   return {
-    text: (segments[segments.length - 1] ?? '').trim(),
+    text: (answered[answered.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
-    notices: notices.map((notice) => notice.trim()),
+    notices: segments.filter(aside).map((segment) => segment.text.trim()),
   };
 }
 

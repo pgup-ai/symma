@@ -74,6 +74,30 @@ const UNUSABLE: Record<string, Unusable> = {
  * cannot spin the fetch loop, not as a limit anybody should reach. */
 const MAX_PAGES = 20;
 
+/** Slack's own caps on a block message. Exceeding either is a rejected post,
+ * and a rejected post turns a finished run into a reported failure — which is
+ * how an answer gets lost rather than merely mis-rendered. */
+const BLOCK_TEXT_LIMIT = 3000;
+const MESSAGE_BLOCK_LIMIT = 50;
+
+/** The answer as however many sections it needs. Split at a line break near the
+ * limit where there is one, so a fence or a list is less likely to be cut
+ * through the middle. */
+function sections(text: string, budget: number): Record<string, unknown>[] {
+  const parts: string[] = [];
+  let rest = text;
+  while (rest.length > BLOCK_TEXT_LIMIT && parts.length < budget - 1) {
+    const line = rest.lastIndexOf('\n', BLOCK_TEXT_LIMIT);
+    const at = line > BLOCK_TEXT_LIMIT / 2 ? line : BLOCK_TEXT_LIMIT;
+    parts.push(rest.slice(0, at));
+    rest = rest.slice(at);
+  }
+  // Only reachable on an answer past the whole message's budget, where the
+  // choice is a truncated one or none at all.
+  parts.push(rest.length > BLOCK_TEXT_LIMIT ? `${rest.slice(0, BLOCK_TEXT_LIMIT - 1)}…` : rest);
+  return parts.map((part) => ({ type: 'section', text: { type: 'mrkdwn', text: part } }));
+}
+
 /** The one action id the bot listens for, shared by the button and its handler. */
 export const SHARE_ACTION = 'share_to_thread';
 
@@ -149,10 +173,12 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       return channel.id;
     },
     async post(channel, text, threadTs, offerShare, notices) {
-      // Above the answer, which is where the agent put it.
+      // Above the answer, which is where the agent put it. Truncated rather
+      // than dropped: a notice is worth less than the answer it sits over, and
+      // one over the limit would take the whole post down with it.
       const context = (notices ?? []).map((notice) => ({
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: notice }],
+        elements: [{ type: 'mrkdwn', text: notice.slice(0, BLOCK_TEXT_LIMIT) }],
       }));
       const actions = offerShare
         ? [
@@ -187,10 +213,15 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
         text,
         ...(threadTs ? { thread_ts: threadTs } : {}),
         // Blocks replace the body wholesale, so the answer's own section has to
-        // be rebuilt here as soon as anything needs to go with it.
+        // be rebuilt here as soon as anything needs to go with it — and a plain
+        // body has no length limit worth reaching where a section does.
         ...(context.length || actions.length
           ? {
-              blocks: [...context, { type: 'section', text: { type: 'mrkdwn', text } }, ...actions],
+              blocks: [
+                ...context,
+                ...sections(text, MESSAGE_BLOCK_LIMIT - context.length - actions.length),
+                ...actions,
+              ],
             }
           : {}),
       });

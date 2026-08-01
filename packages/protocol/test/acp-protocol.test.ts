@@ -712,16 +712,34 @@ describe('acp', () => {
         text: 'the answer',
         notices: [],
       },
+      {
+        // A tool call between the two flushes the notice before any labelled
+        // chunk exists to say the session labels at all. Classifying then would
+        // file it as an answer, where only the last one is ever returned — so
+        // it would reach neither `text` nor `notices`.
+        label: 'tool call before the first label',
+        chunks: [
+          { text: 'Warning: shortened.' },
+          { tool: true },
+          { messageId: 'm1', text: 'the answer' },
+        ],
+        text: 'the answer',
+        notices: ['Warning: shortened.'],
+      },
     ];
     for (const { label, chunks, text, notices } of cases) {
       const fake = fakeAgentIo({
         onPrompt: (agent) => {
           for (const chunk of chunks) {
-            agent.update({
-              sessionUpdate: 'agent_message_chunk',
-              ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
-              content: { type: 'text', text: chunk.text },
-            });
+            agent.update(
+              chunk.tool
+                ? { sessionUpdate: 'tool_call', toolCallId: 't1', status: 'pending' }
+                : {
+                    sessionUpdate: 'agent_message_chunk',
+                    ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
+                    content: { type: 'text', text: chunk.text },
+                  },
+            );
           }
           agent.finish();
         },

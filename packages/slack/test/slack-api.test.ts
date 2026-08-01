@@ -150,13 +150,47 @@ describe('slack api', () => {
     assert.deepEqual(
       blocks.map((b) => b.type),
       ['context', 'section'],
-      'the notice is above, small and grey, and the answer keeps its own block',
+      'the notice goes above, and the answer keeps a block of its own',
     );
     assert.match(blocks[0]!.elements![0]!.text, /shortened/);
     assert.equal(blocks[1]!.text!.text, 'the answer');
     // The fallback is what Slack notifies and reads out, so it stays the answer
     // alone — a notice is not what the member is being told about.
     assert.equal(sent.get('text'), 'the answer');
+  });
+
+  it('splits an answer Slack would reject rather than losing the post', async () => {
+    // A section caps at 3,000 characters and the message at 50 blocks. Slack
+    // rejects the whole post over either, and `handleDm` reports a rejected
+    // post as a failed run — so the member loses an answer that was produced.
+    const answer = Array.from(
+      { length: 400 },
+      (_, i) => `line ${String(i)} ${'x'.repeat(40)}`,
+    ).join('\n');
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    // Over the limit itself, since an agent's notice is not bounded either.
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', answer, '200.0', undefined, [
+      `Warning: ${'y'.repeat(4000)}`,
+    ]);
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      text?: { text: string };
+      elements?: { text: string }[];
+    }[];
+    assert.ok(blocks.length <= 50, 'inside the message cap');
+    for (const block of blocks) {
+      assert.ok((block.text?.text.length ?? 0) <= 3000, 'every section inside its own');
+      for (const element of block.elements ?? []) {
+        assert.ok(element.text.length <= 3000, 'and so is a notice that arrived too long');
+      }
+    }
+    assert.equal(blocks[0]!.type, 'context', 'the notice still leads');
+    // Nothing is silently dropped on the way: the answer is split, not cut.
+    const rebuilt = blocks
+      .filter((b) => b.type === 'section')
+      .map((b) => b.text!.text)
+      .join('');
+    assert.equal(rebuilt, answer);
   });
 
   it('stays a plain message when there is nothing to set apart', async () => {
