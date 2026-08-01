@@ -1,6 +1,6 @@
 {
   "name": "symma",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connect a chat surface to the coding agents already logged in on your own machine",
   "repository": {
     "type": "git",

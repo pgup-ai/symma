@@ -713,11 +713,21 @@ describe('acp', () => {
         notices: [],
       },
       {
-        // An agent that labels only some of its chunks would otherwise have an
-        // unlabelled final answer filed as an aside and lost — a filter that
-        // can take the answer is a recall hole, so the last one never is one.
-        label: 'answer arrives unlabelled last',
-        chunks: [{ messageId: 'm1', text: 'thinking' }, { text: 'the answer' }],
+        // Position decides nothing: an aside after the answer is still an aside.
+        // Exempting the last segment was tried and is worse — it cannot be told
+        // apart from an agent whose final answer happens to be unlabelled, and
+        // guessing that way replaces a real answer with a warning.
+        label: 'aside arrives last',
+        chunks: [{ messageId: 'm1', text: 'the answer' }, { text: 'Warning: shortened.' }],
+        text: 'the answer',
+        notices: ['Warning: shortened.'],
+      },
+      {
+        // Nothing labelled survived the filter — here because the labelled
+        // chunk carried no text — so the asides are all there is. Returning
+        // silence would be the recall hole; showing one as the answer is not.
+        label: 'nothing labelled had anything in it',
+        chunks: [{ messageId: 'm1', text: '' }, { text: 'the answer' }],
         text: 'the answer',
         notices: [],
       },

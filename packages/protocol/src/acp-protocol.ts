@@ -487,27 +487,26 @@ export async function driveAcpSession(
   // race resolves within one I/O flush), then take the final segment.
   await new Promise((resolve) => setTimeout(resolve, ACP_POST_TURN_DRAIN_MS));
   flush();
-  // Never the last one, whatever it looks like. A precision filter that can
-  // take the answer is a recall hole (AGENTS.md, "auxiliary sessions fail
-  // open"), and an agent that labels only some of its chunks would otherwise
-  // have an unlabelled final answer filed as an aside and lose it entirely. A
-  // trailing notice reading as part of the answer is the cheaper mistake.
-  const aside = (segment: { id: unknown }, index: number) =>
-    usesMessageIds && segment.id === undefined && index < segments.length - 1;
+  const aside = (segment: { id: unknown }) => usesMessageIds && segment.id === undefined;
   // A notice arriving mid-message splits the message it interrupted, so a run
   // of one id rejoins — otherwise the half before the interruption is not the
   // last segment, and the answer comes back with its opening missing.
   const answered: { id: unknown; text: string }[] = [];
-  for (const [index, segment] of segments.entries()) {
-    if (aside(segment, index)) continue;
+  for (const segment of segments) {
+    if (aside(segment)) continue;
     const open = answered[answered.length - 1];
     if (open && segment.id !== undefined && segment.id === open.id) open.text += segment.text;
     else answered.push({ ...segment });
   }
+  // Filtering to nothing means the session labelled something but not what it
+  // answered with. Recall beats precision there (AGENTS.md, "auxiliary sessions
+  // fail open") — an aside shown as the answer is recoverable, a lost answer is
+  // not — so the asides are taken back rather than returning silence.
+  const kept = answered.length ? answered : segments;
   return {
-    text: (answered[answered.length - 1]?.text ?? '').trim(),
+    text: (kept[kept.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
-    notices: segments.filter(aside).map((segment) => segment.text.trim()),
+    notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
   };
 }
 

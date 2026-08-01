@@ -217,6 +217,26 @@ describe('slack api', () => {
     );
     assert.equal(blocks.at(-1)!.type, 'actions', 'with the share button after it');
 
+    // A cut landing between the halves of an emoji would leave a lone surrogate
+    // that renders as a replacement glyph.
+    const emoji = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: emoji.fetchImpl }).post(
+      'D-nel',
+      // The odd prefix is what puts the 3,000th unit inside a pair rather than
+      // between two: without it the boundary lands evenly and proves nothing.
+      `x${'🙂'.repeat(4000)}`,
+      '200.0',
+      undefined,
+      [`x${'🙂'.repeat(4000)}`],
+    );
+    for (const block of JSON.parse(
+      new URLSearchParams(String(emoji.seen[0])).get('blocks') ?? '[]',
+    ) as { text?: { text: string }; elements?: { text: string }[] }[]) {
+      for (const part of [block.text?.text, ...(block.elements ?? []).map((e) => e.text)]) {
+        assert.ok(!/[\uD800-\uDBFF]$/.test(part ?? ''), 'no half a character at the boundary');
+      }
+    }
+
     // And the other way round: an answer long enough to want every block gets
     // them, and the asides are what go.
     const long = answering({ ok: true, channel: 'D-nel', ts: '1.0' });

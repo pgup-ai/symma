@@ -270,14 +270,15 @@ export async function runRemotePrompt(
     log(
       `${label} prompt complete via gateway: stopReason=${result.stopReason} last-message=${result.text.length} chars`,
     );
-    // Fails open: the answer is already in hand, and a sink that throws must
-    // not be what loses it (AGENTS.md, "auxiliary sessions fail open").
-    try {
-      for (const notice of result.notices) config.onNotice?.(notice);
-    } catch (error) {
-      log(
-        `${label}: notice sink threw, dropping ${String(result.notices.length)}: ${String(error)}`,
-      );
+    // Fails open, and one at a time: the answer is already in hand, so neither
+    // a sink that throws nor the notices after it are worth losing it for
+    // (AGENTS.md, "auxiliary sessions fail open").
+    for (const notice of result.notices) {
+      try {
+        config.onNotice?.(notice);
+      } catch (error) {
+        log(`${label}: notice sink threw, dropping one: ${String(error)}`);
+      }
     }
     if (!result.text) {
       throw new Error(

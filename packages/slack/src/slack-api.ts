@@ -80,6 +80,12 @@ const MAX_PAGES = 20;
 const BLOCK_TEXT_LIMIT = 3000;
 const MESSAGE_BLOCK_LIMIT = 50;
 
+/** Slack counts its limits in characters, where JS slices in UTF-16 units — so
+ * a cut landing between the halves of an emoji leaves a lone surrogate that
+ * renders as a replacement glyph. One unit back is always a whole character. */
+const cut = (text: string, at: number): number =>
+  /[\uD800-\uDBFF]/.test(text[at - 1] ?? '') ? at - 1 : at;
+
 /** The answer as however many sections it needs. Split at a line break near the
  * limit where there is one, so a fence or a list is less likely to be cut
  * through the middle. */
@@ -88,13 +94,15 @@ function sections(text: string, budget: number): SectionBlock[] {
   let rest = text;
   while (rest.length > BLOCK_TEXT_LIMIT && parts.length < budget - 1) {
     const line = rest.lastIndexOf('\n', BLOCK_TEXT_LIMIT);
-    const at = line > BLOCK_TEXT_LIMIT / 2 ? line : BLOCK_TEXT_LIMIT;
+    const at = line > BLOCK_TEXT_LIMIT / 2 ? line : cut(rest, BLOCK_TEXT_LIMIT);
     parts.push(rest.slice(0, at));
     rest = rest.slice(at);
   }
   // Only reachable on an answer past the whole message's budget, where the
   // choice is a truncated one or none at all.
-  parts.push(rest.length > BLOCK_TEXT_LIMIT ? `${rest.slice(0, BLOCK_TEXT_LIMIT - 1)}…` : rest);
+  parts.push(
+    rest.length > BLOCK_TEXT_LIMIT ? `${rest.slice(0, cut(rest, BLOCK_TEXT_LIMIT - 1))}…` : rest,
+  );
   return parts.map((part) => ({ type: 'section', text: { type: 'mrkdwn', text: part } }));
 }
 
@@ -208,7 +216,7 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       // than dropped: one over the limit would take the whole post down with it.
       const context = (notices ?? []).slice(0, room - body.length).map((notice) => ({
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: notice.slice(0, BLOCK_TEXT_LIMIT) }],
+        elements: [{ type: 'mrkdwn', text: notice.slice(0, cut(notice, BLOCK_TEXT_LIMIT)) }],
       }));
       const sent = await client.chat.postMessage({
         channel,
