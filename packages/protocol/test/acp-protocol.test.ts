@@ -5,9 +5,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readlinkSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -730,6 +732,13 @@ describe('acp', () => {
     assert.ok(lstatSync(codexAuthPath(runHome)).isSymbolicLink());
     writeFileSync(codexAuthPath(runHome), '{"tokens":"after migration"}');
     assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"after migration"}');
+
+    // And so is a link left pointing at some other home, which is a credential
+    // that either fails or belongs to somebody else.
+    rmSync(codexAuthPath(runHome), { force: true });
+    symlinkSync(join(codexHome, 'someone-else.json'), codexAuthPath(runHome));
+    codex.env('codex/default');
+    assert.equal(readlinkSync(codexAuthPath(runHome)), codexAuthPath(codexHome));
 
     rmSync(codexHome, { recursive: true, force: true });
     rmSync(runHome, { recursive: true, force: true });

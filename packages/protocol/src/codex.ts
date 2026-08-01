@@ -60,6 +60,26 @@ const RUN_CONFIG = 'sandbox_mode = "read-only"\n';
  * carrying one back needs a hook that runs after the child exits. */
 const linkable = process.platform !== 'win32';
 
+/**
+ * Whether `link` already stands for `target`, which on a linkable platform is
+ * simply whether it points there.
+ *
+ * The Windows copy needs a different question. Rewriting one a running codex
+ * still holds fails the rename outright, and a copy that is newer than the
+ * source is one codex refreshed in place — overwriting it would undo that. So
+ * only a source that has moved on, which is a re-login, is worth the rewrite.
+ */
+function isCurrentAuth(link: string, target: string): boolean {
+  if (!linkable) {
+    const copied = statSync(link, { throwIfNoEntry: false });
+    return copied !== undefined && copied.mtimeMs >= statSync(target).mtimeMs;
+  }
+  return (
+    lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink() === true &&
+    readlinkSync(link) === target
+  );
+}
+
 /** Puts a file where nobody can catch it half-written: staged, then renamed,
  * which is atomic. The pid is what keeps two companion processes sharing a
  * state dir off each other's staging file. */
@@ -92,11 +112,7 @@ export function prepareCodexRunHome(codexHome: string, runHome: string): void {
   // only when it points elsewhere, which also migrates a home an older build
   // left a real file in.
   const link = codexAuthPath(runHome);
-  const linked =
-    linkable &&
-    lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink() === true &&
-    readlinkSync(link) === target;
-  if (!linked) {
+  if (!isCurrentAuth(link, target)) {
     place(link, (staged) =>
       linkable ? symlinkSync(target, staged) : copyFileSync(target, staged),
     );
