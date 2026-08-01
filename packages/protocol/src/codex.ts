@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export const CODEX_PROVIDER_ID = 'codex';
 
@@ -54,6 +54,10 @@ export function writeCodexAuth(auth: string, codexHome: string): string {
 /** Everything the run home holds that does not vary per spawn. */
 const RUN_CONFIG = 'sandbox_mode = "read-only"\n';
 
+/** The two `place()` ever stages, and so the only names `sweepStaging` may
+ * delete a suffixed form of. */
+const STAGED = ['auth.json', 'config.toml'];
+
 /** Windows creates file symlinks only for an admin or under Developer Mode, so
  * codex there keeps the per-spawn copy this replaced — and with it the problem
  * the link solves: a refreshed token lands in the copy, and the next spawn
@@ -85,17 +89,34 @@ function isCurrentAuth(link: string, target: string): boolean {
  * which is atomic. The pid is what keeps two companion processes sharing a
  * state dir off each other's staging file. */
 function place(path: string, write: (staged: string) => void): void {
-  // Every pid's leftovers, not just this one's. A companion killed between the
-  // write and the rename leaves its staging file in a home that now outlives
-  // it, no later process shares that pid to reclaim it, and on Windows the file
-  // is a plaintext credential.
-  const prefix = `${basename(path)}.`;
-  for (const entry of readdirSync(dirname(path))) {
-    if (entry.startsWith(prefix)) rmSync(join(dirname(path), entry), { force: true });
-  }
   const staged = `${path}.${String(process.pid)}`;
+  rmSync(staged, { force: true });
   write(staged);
   renameSync(staged, path);
+}
+
+/** Long enough that nothing still being written can be this old: staging and
+ * renaming is two synchronous calls. */
+const STAGING_STALE_MS = 60_000;
+
+/**
+ * Clears staging files a killed companion left behind. The home outlives the
+ * process now, so no later run shares that pid to reclaim its own, and on
+ * Windows the file is a plaintext copy of the member's credential.
+ *
+ * Age is the test, not ownership. A live staging file belongs to another
+ * companion mid-write, and deleting one takes it out from under that rename —
+ * which is the failure this whole shape exists to avoid.
+ */
+function sweepStaging(home: string): void {
+  const cutoff = Date.now() - STAGING_STALE_MS;
+  for (const entry of readdirSync(home)) {
+    if (!STAGED.some((name) => entry.startsWith(`${name}.`)) || !/\.\d+$/.test(entry)) continue;
+    const path = join(home, entry);
+    if ((statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) < cutoff) {
+      rmSync(path, { force: true });
+    }
+  }
 }
 
 /**
@@ -119,6 +140,9 @@ export function prepareCodexRunHome(codexHome: string, runHome: string): string 
     throw new Error(`Missing Codex auth at ${target}.`);
   }
   mkdirSync(home, { recursive: true, mode: 0o700 });
+  // Before either branch below, because the steady state takes neither and a
+  // leftover would otherwise sit here until something happened to need a write.
+  sweepStaging(home);
 
   // Linked rather than copied: codex refreshes the token in place, so a copy
   // would strand the refresh here and go stale without saying so. Rewritten

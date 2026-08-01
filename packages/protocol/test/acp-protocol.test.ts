@@ -10,6 +10,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -691,11 +692,24 @@ describe('acp', () => {
       // outlives the process, so nothing else would ever reclaim it — and on
       // Windows the same shape holds a plaintext credential.
       mkdirSync(runHome, { recursive: true });
-      writeFileSync(join(runHome, 'config.toml.99999'), 'orphaned');
+      const orphan = join(runHome, 'config.toml.99999');
+      writeFileSync(orphan, 'orphaned');
+      // Backdated past the staleness window: a staging file this new belongs to
+      // a companion mid-write, and taking it would break that rename.
+      utimesSync(orphan, new Date(0), new Date(0));
+      const live = join(runHome, 'config.toml.99998');
+      writeFileSync(live, "another companion's, mid-write");
+      // Old, digit-suffixed, and none of symma's business — the sweep deletes,
+      // so it only ever touches the two names it stages.
+      const codexOwned = join(runHome, 'history.jsonl.4');
+      writeFileSync(codexOwned, 'codex wrote this');
+      utimesSync(codexOwned, new Date(0), new Date(0));
 
       const codexEnv = codex.env('codex/gpt-5.2-codex');
       assert.equal(codexEnv.env.CODEX_HOME, runHome);
-      assert.ok(!existsSync(join(runHome, 'config.toml.99999')));
+      assert.ok(!existsSync(orphan), 'a stale staging file is reclaimed');
+      assert.ok(existsSync(live), "a live one is another process's to rename");
+      assert.ok(existsSync(codexOwned), 'and a name symma never stages is not ours to delete');
 
       // The model is deliberately NOT here: sessions share this file, so a
       // per-spawn write is one run reading another's config.
@@ -729,33 +743,31 @@ describe('acp', () => {
       assert.equal(codexEnv.env.MODEL_PROVIDER, undefined);
       assert.equal(codexEnv.env.INITIAL_AGENT_MODE, 'read-only');
       assert.equal(codexEnv.env.NO_BROWSER, '1');
+      // A real copy an older build left here is migrated, not kept as the stale
+      // credential it has become.
+      rmSync(codexAuthPath(runHome), { force: true });
+      writeFileSync(codexAuthPath(runHome), '{"tokens":"stale copy"}');
+      codex.env('codex/default');
+      // Content alone would pass on a copy of the right bytes. What migration
+      // is for is giving the refresh somewhere to land again.
+      assert.ok(lstatSync(codexAuthPath(runHome)).isSymbolicLink());
+      writeFileSync(codexAuthPath(runHome), '{"tokens":"after migration"}');
+      assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"after migration"}');
+
+      // And so is a link left pointing at some other home, which is a
+      // credential that either fails or belongs to somebody else.
+      rmSync(codexAuthPath(runHome), { force: true });
+      symlinkSync(join(codexHome, 'someone-else.json'), codexAuthPath(runHome));
+      codex.env('codex/default');
+      assert.equal(readlinkSync(codexAuthPath(runHome)), codexAuthPath(codexHome));
     } finally {
       for (const [key, value] of savedOverrides) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+      rmSync(codexHome, { recursive: true, force: true });
+      rmSync(runParent, { recursive: true, force: true });
     }
-
-    // A real copy an older build left here is migrated, not kept as the stale
-    // credential it has become.
-    rmSync(codexAuthPath(runHome), { force: true });
-    writeFileSync(codexAuthPath(runHome), '{"tokens":"stale copy"}');
-    codex.env('codex/default');
-    // Content alone would pass on a copy of the right bytes. What migration is
-    // for is giving the refresh somewhere to land again.
-    assert.ok(lstatSync(codexAuthPath(runHome)).isSymbolicLink());
-    writeFileSync(codexAuthPath(runHome), '{"tokens":"after migration"}');
-    assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"after migration"}');
-
-    // And so is a link left pointing at some other home, which is a credential
-    // that either fails or belongs to somebody else.
-    rmSync(codexAuthPath(runHome), { force: true });
-    symlinkSync(join(codexHome, 'someone-else.json'), codexAuthPath(runHome));
-    codex.env('codex/default');
-    assert.equal(readlinkSync(codexAuthPath(runHome)), codexAuthPath(codexHome));
-
-    rmSync(codexHome, { recursive: true, force: true });
-    rmSync(runParent, { recursive: true, force: true });
 
     const codexEmptyHome = mkdtempSync(join(tmpdir(), 'symma-test-empty-'));
     const emptyRun = join(codexEmptyHome, 'run');
