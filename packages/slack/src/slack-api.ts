@@ -173,13 +173,6 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       return channel.id;
     },
     async post(channel, text, threadTs, offerShare, notices) {
-      // Above the answer, which is where the agent put it. Truncated rather
-      // than dropped: a notice is worth less than the answer it sits over, and
-      // one over the limit would take the whole post down with it.
-      const context = (notices ?? []).map((notice) => ({
-        type: 'context',
-        elements: [{ type: 'mrkdwn', text: notice.slice(0, BLOCK_TEXT_LIMIT) }],
-      }));
       const actions = offerShare
         ? [
             {
@@ -206,6 +199,17 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
             },
           ]
         : [];
+      // The answer takes the blocks it needs and the asides take what is left,
+      // in that order — a run that talked about itself a lot must not crowd out
+      // what it was talking alongside.
+      const room = MESSAGE_BLOCK_LIMIT - actions.length;
+      const body = sections(text, room);
+      // Above the answer, which is where the agent put it. Truncated rather
+      // than dropped: one over the limit would take the whole post down with it.
+      const context = (notices ?? []).slice(0, room - body.length).map((notice) => ({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: notice.slice(0, BLOCK_TEXT_LIMIT) }],
+      }));
       const sent = await client.chat.postMessage({
         channel,
         // Sent alongside the blocks as the notification and accessibility text,
@@ -215,15 +219,7 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
         // Blocks replace the body wholesale, so the answer's own section has to
         // be rebuilt here as soon as anything needs to go with it — and a plain
         // body has no length limit worth reaching where a section does.
-        ...(context.length || actions.length
-          ? {
-              blocks: [
-                ...context,
-                ...sections(text, MESSAGE_BLOCK_LIMIT - context.length - actions.length),
-                ...actions,
-              ],
-            }
-          : {}),
+        ...(context.length || actions.length ? { blocks: [...context, ...body, ...actions] } : {}),
       });
       if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
       return { channel: sent.channel, ts: sent.ts };

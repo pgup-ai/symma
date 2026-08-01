@@ -193,6 +193,50 @@ describe('slack api', () => {
     assert.equal(rebuilt, answer);
   });
 
+  it('gives the answer its blocks before the asides get theirs', async () => {
+    // More notices than the message has room for. Slack rejects a post over 50
+    // blocks outright, so an agent that talked about itself a lot would take
+    // down the answer it talked alongside.
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      { conversation: 'conv-1', destination: '<#C-incidents>' },
+      Array.from({ length: 80 }, (_, i) => `notice ${String(i)}`),
+    );
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      text?: { text: string };
+    }[];
+    assert.ok(blocks.length <= 50, `inside the message cap, got ${String(blocks.length)}`);
+    assert.deepEqual(
+      blocks.filter((b) => b.type === 'section').map((b) => b.text!.text),
+      ['the answer'],
+      'and the answer is still there rather than squeezed out',
+    );
+    assert.equal(blocks.at(-1)!.type, 'actions', 'with the share button after it');
+
+    // And the other way round: an answer long enough to want every block gets
+    // them, and the asides are what go.
+    const long = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: long.fetchImpl }).post(
+      'D-nel',
+      'z'.repeat(3000 * 60),
+      '200.0',
+      undefined,
+      ['notice 0', 'notice 1'],
+    );
+    const wide = JSON.parse(new URLSearchParams(String(long.seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+    }[];
+    assert.ok(wide.length <= 50, 'inside the cap');
+    assert.ok(
+      !wide.some((b) => b.type === 'context'),
+      'the asides gave way rather than the answer',
+    );
+  });
+
   it('stays a plain message when there is nothing to set apart', async () => {
     const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
     await slackApi('xoxb-test', { fetch: fetchImpl }).post(

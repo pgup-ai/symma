@@ -713,6 +713,15 @@ describe('acp', () => {
         notices: [],
       },
       {
+        // An agent that labels only some of its chunks would otherwise have an
+        // unlabelled final answer filed as an aside and lost — a filter that
+        // can take the answer is a recall hole, so the last one never is one.
+        label: 'answer arrives unlabelled last',
+        chunks: [{ messageId: 'm1', text: 'thinking' }, { text: 'the answer' }],
+        text: 'the answer',
+        notices: [],
+      },
+      {
         // A notice arriving mid-message splits the message it interrupted. The
         // half before it is then not the last segment, so the answer would come
         // back with its opening missing.

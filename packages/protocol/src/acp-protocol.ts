@@ -487,13 +487,19 @@ export async function driveAcpSession(
   // race resolves within one I/O flush), then take the final segment.
   await new Promise((resolve) => setTimeout(resolve, ACP_POST_TURN_DRAIN_MS));
   flush();
-  const aside = (segment: { id: unknown }) => usesMessageIds && segment.id === undefined;
+  // Never the last one, whatever it looks like. A precision filter that can
+  // take the answer is a recall hole (AGENTS.md, "auxiliary sessions fail
+  // open"), and an agent that labels only some of its chunks would otherwise
+  // have an unlabelled final answer filed as an aside and lose it entirely. A
+  // trailing notice reading as part of the answer is the cheaper mistake.
+  const aside = (segment: { id: unknown }, index: number) =>
+    usesMessageIds && segment.id === undefined && index < segments.length - 1;
   // A notice arriving mid-message splits the message it interrupted, so a run
   // of one id rejoins — otherwise the half before the interruption is not the
   // last segment, and the answer comes back with its opening missing.
   const answered: { id: unknown; text: string }[] = [];
-  for (const segment of segments) {
-    if (aside(segment)) continue;
+  for (const [index, segment] of segments.entries()) {
+    if (aside(segment, index)) continue;
     const open = answered[answered.length - 1];
     if (open && segment.id !== undefined && segment.id === open.id) open.text += segment.text;
     else answered.push({ ...segment });
