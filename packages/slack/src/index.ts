@@ -166,7 +166,7 @@ const depsFor = (user: string) => {
         ...(workspaceLabel ? { workspaceLabel } : {}),
       };
     },
-    run: ({ conversation, endpoint, agent, token, prompt, workspace }: RunSpec) =>
+    run: ({ conversation, endpoint, agent, token, prompt, workspace, model }: RunSpec) =>
       runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -178,9 +178,7 @@ const depsFor = (user: string) => {
           runId: conversation,
           ...(workspace ? { workspace } : {}),
         },
-        // The sentinel every agent spec reads as "whatever you default to".
-        // §5 wants a per-agent default and an override; neither is chosen here.
-        'default',
+        model,
         prompt,
         `slack-${conversation}`,
         log,
