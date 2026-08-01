@@ -82,7 +82,7 @@ export interface DmDeps {
   /** Drives one prompt to its answer on the member's machine. Rejects rather
    * than returning a failure, so the transport's own errors arrive intact.
    * `notices` is what the agent said about itself rather than about the
-   * question — kept apart so it reads as an aside (§4). */
+   * question, kept apart so the answer is not read as carrying it. */
   run: (spec: RunSpec) => Promise<{ text: string; notices: string[] }>;
   /** The DM thread itself, which is the durable transcript a follow-up is
    * caught up from. Undefined when the bot cannot read the channel. */

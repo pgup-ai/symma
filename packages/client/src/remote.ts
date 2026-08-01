@@ -46,9 +46,8 @@ export interface RemoteAcpConfig {
    * that directory instead of an empty temp one. Never a path — resolving it is
    * the companion's job, and its allowlist is the boundary (§4). */
   workspace?: string;
-  /** Where the agent's own operational notices go — the ones it put in the
-   * message stream for want of a channel (`AcpSessionResult.notices`). Absent
-   * drops them, which is what a caller with nowhere to show them should do. */
+  /** Receives `AcpSessionResult.notices` — what the agent said about itself
+   * rather than about the prompt. Absent drops them. */
   onNotice?: (notice: string) => void;
   /** Checked out by the companion so the agent can explore the code it reviews. */
   repo?: string;

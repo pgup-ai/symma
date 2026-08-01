@@ -149,8 +149,7 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       return channel.id;
     },
     async post(channel, text, threadTs, offerShare, notices) {
-      // Context is Slack's small-and-grey, so a member can tell a notice from
-      // the answer without reading it. Above, which is where the agent put it.
+      // Above the answer, which is where the agent put it.
       const context = (notices ?? []).map((notice) => ({
         type: 'context',
         elements: [{ type: 'mrkdwn', text: notice }],

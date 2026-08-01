@@ -42,9 +42,8 @@ export interface LocalAcpPromptOptions {
   timeoutMs?: number;
   /** Observe every frame in both directions — the same tee `driveAcpSession` takes. */
   tee?: AcpSessionOptions['tee'];
-  /** Where the agent's own operational notices go — the ones it put in the
-   * message stream for want of a channel (`AcpSessionResult.notices`). Absent
-   * drops them, which is what a caller with nowhere to show them should do. */
+  /** Receives `AcpSessionResult.notices` — what the agent said about itself
+   * rather than about the prompt. Absent drops them. */
   onNotice?: (notice: string) => void;
 }
 

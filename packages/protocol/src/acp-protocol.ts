@@ -368,8 +368,6 @@ export async function driveAcpSession(
   let seenChunk = false;
   let usesMessageIds = false;
   const flush = () => {
-    // An unlabelled segment beside labelled ones is the agent talking about
-    // itself, not answering — see `AcpSessionResult.notices`.
     if (current.trim())
       (usesMessageIds && lastMessageId === undefined ? notices : segments).push(current);
     current = '';
