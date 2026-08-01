@@ -488,7 +488,16 @@ export async function driveAcpSession(
   await new Promise((resolve) => setTimeout(resolve, ACP_POST_TURN_DRAIN_MS));
   flush();
   const aside = (segment: { id: unknown }) => usesMessageIds && segment.id === undefined;
-  const answered = segments.filter((segment) => !aside(segment));
+  // A notice arriving mid-message splits the message it interrupted, so a run
+  // of one id rejoins — otherwise the half before the interruption is not the
+  // last segment, and the answer comes back with its opening missing.
+  const answered: { id: unknown; text: string }[] = [];
+  for (const segment of segments) {
+    if (aside(segment)) continue;
+    const open = answered[answered.length - 1];
+    if (open && segment.id !== undefined && segment.id === open.id) open.text += segment.text;
+    else answered.push({ ...segment });
+  }
   return {
     text: (answered[answered.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),

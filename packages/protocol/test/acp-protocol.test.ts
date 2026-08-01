@@ -713,6 +713,19 @@ describe('acp', () => {
         notices: [],
       },
       {
+        // A notice arriving mid-message splits the message it interrupted. The
+        // half before it is then not the last segment, so the answer would come
+        // back with its opening missing.
+        label: 'notice inside one message',
+        chunks: [
+          { messageId: 'm1', text: 'the deploy ' },
+          { text: 'Warning: shortened.' },
+          { messageId: 'm1', text: 'fails on a missing env var' },
+        ],
+        text: 'the deploy fails on a missing env var',
+        notices: ['Warning: shortened.'],
+      },
+      {
         // A tool call between the two flushes the notice before any labelled
         // chunk exists to say the session labels at all. Classifying then would
         // file it as an answer, where only the last one is ever returned — so

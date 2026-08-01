@@ -42,9 +42,6 @@ export interface LocalAcpPromptOptions {
   timeoutMs?: number;
   /** Observe every frame in both directions — the same tee `driveAcpSession` takes. */
   tee?: AcpSessionOptions['tee'];
-  /** Receives `AcpSessionResult.notices` — what the agent said about itself
-   * rather than about the prompt. Absent drops them. */
-  onNotice?: (notice: string) => void;
 }
 
 export async function runLocalAcpPrompt(
@@ -54,7 +51,7 @@ export async function runLocalAcpPrompt(
   prompt: string,
   label: string,
   log: (msg: string) => void,
-  { timeoutMs = ACP_PROMPT_TIMEOUT_MS, tee, onNotice }: LocalAcpPromptOptions = {},
+  { timeoutMs = ACP_PROMPT_TIMEOUT_MS, tee }: LocalAcpPromptOptions = {},
 ): Promise<string> {
   const { env, cleanup } = spec.env(model);
   const configOptionModelIds = spec.modelConfigCandidates?.(model);
@@ -146,7 +143,6 @@ export async function runLocalAcpPrompt(
   log(
     `${label} prompt complete via acp:${spec.id}: stopReason=${result.stopReason} last-message=${result.text.length} chars`,
   );
-  for (const notice of result.notices) onNotice?.(notice);
   if (!result.text) {
     throw new Error(
       `acp:${spec.id} ${label} produced no assistant message (stopReason=${result.stopReason}); stderr: ${truncateForLog(stderr, 1000)}`,

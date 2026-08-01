@@ -5,7 +5,7 @@
  * pagination cursors, `ok: false` on a 200, a typed error holding Slack's own
  * code, and `Retry-After` on a 429.
  */
-import { ErrorCode, WebClient, type WebAPIPlatformError } from '@slack/web-api';
+import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } from '@slack/web-api';
 
 import type { ThreadMessage } from './snapshot.js';
 
@@ -83,7 +83,7 @@ const MESSAGE_BLOCK_LIMIT = 50;
 /** The answer as however many sections it needs. Split at a line break near the
  * limit where there is one, so a fence or a list is less likely to be cut
  * through the middle. */
-function sections(text: string, budget: number): Record<string, unknown>[] {
+function sections(text: string, budget: number): SectionBlock[] {
   const parts: string[] = [];
   let rest = text;
   while (rest.length > BLOCK_TEXT_LIMIT && parts.length < budget - 1) {
@@ -234,7 +234,7 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
           channel,
           ts,
           text,
-          blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+          blocks: sections(text, MESSAGE_BLOCK_LIMIT),
         });
       } catch {
         /* the share landed; the button outliving it is the smaller problem */
