@@ -252,10 +252,10 @@ describe('slack api', () => {
       type: string;
     }[];
     assert.ok(wide.length <= 50, 'inside the cap');
-    assert.ok(
-      !wide.some((b) => b.type === 'context'),
-      'the asides gave way rather than the answer',
-    );
+    // One block is held back for them, so what was said is never simply gone.
+    const aside = wide.find((b) => b.type === 'context') as
+      { elements: { text: string }[] } | undefined;
+    assert.match(aside!.elements[0]!.text, /_and 1 more_$/, 'and says what it could not show');
     // The fallback is what Slack notifies and reads out, and it has a cap of
     // its own — bounded here rather than left to whatever Slack does past it.
     const fallback = new URLSearchParams(String(long.seen[0])).get('text') ?? '';
@@ -273,5 +273,16 @@ describe('slack api', () => {
       [],
     );
     assert.equal(new URLSearchParams(String(seen[0])).get('blocks'), null);
+  });
+
+  it('still splits a long answer with nothing beside it', async () => {
+    // The ordinary DM case: no notice, and no thread to share back to. Without
+    // blocks the whole answer rides the fallback, which has a cap of its own.
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', 'z'.repeat(8000), '200.0');
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      text?: { text: string };
+    }[];
+    assert.equal(blocks.map((b) => b.text!.text).join(''), 'z'.repeat(8000));
   });
 });
