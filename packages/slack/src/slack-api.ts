@@ -31,7 +31,9 @@ export interface SlackApi {
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
    * and reporting a failed update as a failed share would be a lie the member
-   * acts on. */
+   * acts on. Any notices go with the rewrite — deliberately: they are an aside
+   * on a message that has been read and acted on, and carrying them would mean
+   * widening this and `share` to hold text neither publishes. */
   settle: (channel: string, ts: string, text: string) => Promise<void>;
   /** 👀 on the member's own message while the run is out, replaced when it
    * lands. Never throws: the mark is a hint, and losing one must not cost them
