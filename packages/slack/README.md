@@ -14,7 +14,8 @@ machine they want to reach.
 and paste [`app-manifest.json`](app-manifest.json). It asks for `commands` to run
 the slash command, `app_mentions:read` to hear a mention, `channels:history` and
 `groups:history` to read the thread it came from, `im:history` to hear a reply in
-the DM, and `chat:write` with `im:write` to answer there. **Re-paste it after a change and reinstall**, or the
+the DM, `chat:write` with `im:write` to answer there, and `reactions:write`
+to mark their message while a run is out. **Re-paste it after a change and reinstall**, or the
 new scopes are not granted.
 
 **2. Make an app-level token.** _Basic Information_ → _App-Level Tokens_ →
@@ -24,6 +25,11 @@ a thread and posting a DM are authorized calls, where `/connect` got by on
 `response_url` carrying its own.
 
 **3. Install it** to the workspace, and note the team id (`T…`).
+
+Slash commands and the messages tab are granted at install. A command added to
+the manifest _after_ an install is not in the workspace until you reinstall,
+which reads as `/connect is not a valid command` — the app config listing it is
+not the same as the workspace having it.
 
 **4. Run it** beside the gateway:
 
@@ -57,6 +63,7 @@ One slash command, deliberately. A chat surface that grows model, provider,
 directory and shell controls is support and security surface this workflow has
 not earned yet — mentions are the interface, not commands.
 
-A mention supplies context and, later, a destination — never an answer. Work
-happens in the member's DM, and nothing returns to the channel without an
-explicit grant (§5), which is not built yet.
+A mention supplies context and a destination — never an answer. Work happens in
+the member's DM, and nothing returns to the channel without an explicit grant:
+the answer carries a _Share to thread_ button, and pressing it is the only way
+it leaves (§5).

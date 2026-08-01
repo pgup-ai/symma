@@ -6,6 +6,7 @@ import type { TurnTarget } from '@symma/protocol';
 import { handleDm, isMemberDm, type DmDeps, type RunSpec } from '../src/dm.js';
 import type { ThreadMessage } from '../src/snapshot.js';
 import type { ConversationRef } from '../src/mention.js';
+import type { MarkState } from '../src/slack-api.js';
 
 const CONVERSATION: ConversationRef = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
 const READY: TurnTarget = {
@@ -30,6 +31,8 @@ function harness(
      * transient Slack error. */
     historyFails?: Error;
     budgetBytes?: number;
+    /** Fails the answer post, which lands after the run is already over. */
+    answerPostFails?: Error;
     /** Where a share would land; absent is a conversation opened in the DM. */
     destination?: { channel: string; thread: string };
   } = {},
@@ -42,6 +45,7 @@ function harness(
   }[] = [];
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
+  const marks: { channel: string; ts: string; state: MarkState }[] = [];
   let asked = 0;
   const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
@@ -66,9 +70,16 @@ function harness(
         ...(threadTs ? { threadTs } : {}),
         ...(offerShare ? { offerShare } : {}),
       });
-      return Promise.resolve({ channel, ts: '300.0' });
+      // The acknowledgement is always first; anything later is the answer.
+      return over.answerPostFails && posts.length > 1
+        ? Promise.reject(over.answerPostFails)
+        : Promise.resolve({ channel, ts: '300.0' });
     },
     destination: () => Promise.resolve(over.destination),
+    mark: (channel, ts, state) => {
+      marks.push({ channel, ts, state });
+      return Promise.resolve();
+    },
     turn: (spec) => {
       turns.push(spec);
       return Promise.resolve({
@@ -82,7 +93,7 @@ function harness(
       return Promise.resolve(selected ?? undefined);
     },
   };
-  return { deps, posts, turns, runs, askedFor, asked: () => asked };
+  return { deps, posts, turns, runs, marks, askedFor, asked: () => asked };
 }
 
 describe('dm message', () => {
@@ -190,6 +201,7 @@ describe('dm message', () => {
         agent: 'kilo',
         token: 'tok-1',
         prompt: 'what broke?',
+        model: 'kilo/default',
       },
     ]);
     assert.equal(posts.at(-1)!.text, 'the deploy fails on a missing env var');
@@ -197,6 +209,17 @@ describe('dm message', () => {
     // opens in an empty temp dir, which is not what "your own machine" sounds
     // like to someone asking about their repo.
     assert.match(posts[0]!.text, /no access to your files/);
+  });
+
+  it('names the model as `provider/model`, which is the only shape that parses', async () => {
+    // Every spec runs the string through `parseModelName` and reads the half
+    // after the slash, so a bare `default` is refused before any agent sees it —
+    // `Invalid model "default"; expected "provider/model"`. The prefix is not
+    // read by anything, so the agent's own name is the honest one to use.
+    const { deps, runs } = harness();
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+
+    assert.equal(runs[0]!.model, 'kilo/default');
   });
 
   it('names the project the answer is about, and runs the turn there', async () => {
@@ -348,6 +371,50 @@ describe('dm message', () => {
     );
     assert.match(posts.at(-1)!.text, /did not finish/);
     assert.equal(posts.at(-1)!.threadTs, '200.0');
+  });
+
+  it('marks the member’s own message for the length of the run', async () => {
+    // Slack offers no way to disable the composer and a run takes minutes, so
+    // the mark is all that stands between a member and a silence that reads as
+    // nothing happening. It goes on their message — the acknowledgement is at
+    // '300.0', and marking that would put it where they are not looking.
+    const { deps, marks } = harness();
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    assert.deepEqual(marks, [
+      { channel: 'D-nel', ts: '250.0', state: 'working' },
+      { channel: 'D-nel', ts: '250.0', state: 'done' },
+    ]);
+  });
+
+  it('marks anything that goes wrong failed, rather than leaving it running', async () => {
+    const states = (marks: { state: MarkState }[]) => marks.map((m) => m.state);
+    const ask = { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' };
+
+    const ran = harness({ fails: new Error('endpoint went away') });
+    await handleDm(ask, ran.deps);
+    assert.deepEqual(states(ran.marks), ['working', 'failed']);
+
+    // The run landed and Slack refused the answer, so this one leaves through
+    // `announcing`. A 👀 that outlives its retry message would be the last
+    // thing the member is told about a turn that is already over.
+    const posted = harness({ answerPostFails: new Error('slack refused it') });
+    await assert.rejects(handleDm(ask, posted.deps));
+    assert.deepEqual(states(posted.marks), ['working', 'failed']);
+  });
+
+  it('leaves a turn it never ran unmarked', async () => {
+    // Everything refused answers in words, immediately — and a ✅ on a message
+    // that was turned away is a lie about what happened to it.
+    const refused = harness({ endpoint: null });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      refused.deps,
+    );
+    assert.deepEqual(refused.marks, []);
+
+    const empty = harness();
+    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: '  ' }, empty.deps);
+    assert.deepEqual(empty.marks, []);
   });
 
   it('has something to post when the run produced nothing', async () => {
