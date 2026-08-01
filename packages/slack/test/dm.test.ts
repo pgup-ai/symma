@@ -31,6 +31,8 @@ function harness(
      * transient Slack error. */
     historyFails?: Error;
     budgetBytes?: number;
+    /** Fails the answer post, which lands after the run is already over. */
+    answerPostFails?: Error;
     /** Where a share would land; absent is a conversation opened in the DM. */
     destination?: { channel: string; thread: string };
   } = {},
@@ -68,7 +70,10 @@ function harness(
         ...(threadTs ? { threadTs } : {}),
         ...(offerShare ? { offerShare } : {}),
       });
-      return Promise.resolve({ channel, ts: '300.0' });
+      // The acknowledgement is always first; anything later is the answer.
+      return over.answerPostFails && posts.length > 1
+        ? Promise.reject(over.answerPostFails)
+        : Promise.resolve({ channel, ts: '300.0' });
     },
     destination: () => Promise.resolve(over.destination),
     mark: (channel, ts, state) => {
@@ -215,7 +220,6 @@ describe('dm message', () => {
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
     assert.equal(runs[0]!.model, 'kilo/default');
-    assert.match(runs[0]!.model, /^[^/]+\/[^/]+$/, 'parses as provider/model');
   });
 
   it('names the project the answer is about, and runs the turn there', async () => {
@@ -382,13 +386,20 @@ describe('dm message', () => {
     ]);
   });
 
-  it('marks a failed run failed rather than done', async () => {
-    const { deps, marks } = harness({ fails: new Error('endpoint went away') });
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
-    assert.deepEqual(
-      marks.map((m) => m.state),
-      ['working', 'failed'],
-    );
+  it('marks anything that goes wrong failed, rather than leaving it running', async () => {
+    const states = (marks: { state: MarkState }[]) => marks.map((m) => m.state);
+    const ask = { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' };
+
+    const ran = harness({ fails: new Error('endpoint went away') });
+    await handleDm(ask, ran.deps);
+    assert.deepEqual(states(ran.marks), ['working', 'failed']);
+
+    // The run landed and Slack refused the answer, so this one leaves through
+    // `announcing`. A 👀 that outlives its retry message would be the last
+    // thing the member is told about a turn that is already over.
+    const posted = harness({ answerPostFails: new Error('slack refused it') });
+    await assert.rejects(handleDm(ask, posted.deps));
+    assert.deepEqual(states(posted.marks), ['working', 'failed']);
   });
 
   it('leaves a turn it never ran unmarked', async () => {

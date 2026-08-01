@@ -240,14 +240,22 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // §5: the answer is a private draft, and the button is the only way it leaves.
   // Nowhere to go back to means no button, rather than one that would refuse
   // itself when pressed.
-  const to = await deps.destination(conversation.id);
-  // Slack refuses an empty message, so a quiet run would be reported as failed.
-  await deps.post(
-    conversation.dmChannel,
-    answer.trim() || 'That finished without producing an answer.',
-    conversation.rootThread,
-    to ? { conversation: conversation.id, destination: `<#${to.channel}>` } : undefined,
-  );
+  try {
+    const to = await deps.destination(conversation.id);
+    // Slack refuses an empty message, so a quiet run would be reported as failed.
+    await deps.post(
+      conversation.dmChannel,
+      answer.trim() || 'That finished without producing an answer.',
+      conversation.rootThread,
+      to ? { conversation: conversation.id, destination: `<#${to.channel}>` } : undefined,
+    );
+  } catch (error) {
+    // The run is over either way, and `announcing` tells them the delivery
+    // failed. Leaving the mark saying it is still going would outlive that
+    // message and be the last thing they are told.
+    await deps.mark(message.channel, message.ts, 'failed');
+    throw error;
+  }
   await deps.mark(message.channel, message.ts, 'done');
   return existing ? 'resumed' : 'opened';
 }

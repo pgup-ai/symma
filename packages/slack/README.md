@@ -14,7 +14,8 @@ machine they want to reach.
 and paste [`app-manifest.json`](app-manifest.json). It asks for `commands` to run
 the slash command, `app_mentions:read` to hear a mention, `channels:history` and
 `groups:history` to read the thread it came from, `im:history` to hear a reply in
-the DM, and `chat:write` with `im:write` to answer there. **Re-paste it after a change and reinstall**, or the
+the DM, `chat:write` with `im:write` to answer there, and `reactions:write`
+to mark their message while a run is out. **Re-paste it after a change and reinstall**, or the
 new scopes are not granted.
 
 **2. Make an app-level token.** _Basic Information_ → _App-Level Tokens_ →

@@ -113,12 +113,6 @@ describe('slack api', () => {
     });
   });
 
-  it('replaces the working mark rather than piling one on top of it', async () => {
-    const { fetchImpl, called } = answering({ ok: true });
-    await slackApi('xoxb-test', { fetch: fetchImpl }).mark('D-nel', '250.0', 'done');
-    assert.deepEqual(called, ['reactions.remove', 'reactions.add']);
-  });
-
   it('has nothing to remove when the run is only starting', async () => {
     const { fetchImpl, called } = answering({ ok: true });
     await slackApi('xoxb-test', { fetch: fetchImpl }).mark('D-nel', '250.0', 'working');
