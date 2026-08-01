@@ -54,8 +54,10 @@ export function writeCodexAuth(auth: string, codexHome: string): string {
 const RUN_CONFIG = 'sandbox_mode = "read-only"\n';
 
 /** Windows creates file symlinks only for an admin or under Developer Mode, so
- * codex there keeps the copy this replaced. The link check below never matches
- * a copy, so it is rewritten every spawn — which is the staleness answer. */
+ * codex there keeps the per-spawn copy this replaced — and with it the problem
+ * the link solves: a refreshed token lands in the copy, and the next spawn
+ * overwrites it from the member's own file. Unchanged from what shipped before;
+ * carrying one back needs a hook that runs after the child exits. */
 const linkable = process.platform !== 'win32';
 
 /** Puts a file where nobody can catch it half-written: staged, then renamed,

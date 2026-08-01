@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -724,7 +725,11 @@ describe('acp', () => {
     rmSync(codexAuthPath(runHome), { force: true });
     writeFileSync(codexAuthPath(runHome), '{"tokens":"stale copy"}');
     codex.env('codex/default');
-    assert.equal(readFileSync(codexAuthPath(runHome), 'utf8'), '{"tokens":"refreshed"}');
+    // Content alone would pass on a copy of the right bytes. What migration is
+    // for is giving the refresh somewhere to land again.
+    assert.ok(lstatSync(codexAuthPath(runHome)).isSymbolicLink());
+    writeFileSync(codexAuthPath(runHome), '{"tokens":"after migration"}');
+    assert.equal(readFileSync(codexAuthPath(codexHome), 'utf8'), '{"tokens":"after migration"}');
 
     rmSync(codexHome, { recursive: true, force: true });
     rmSync(runHome, { recursive: true, force: true });
