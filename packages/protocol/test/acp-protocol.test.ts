@@ -677,7 +677,9 @@ describe('acp', () => {
   it('materializes per-agent read-only and model config', () => {
     const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
     writeFileSync(codexAuthPath(codexHome), '{"tokens":"first"}');
-    const runHome = join(mkdtempSync(join(tmpdir(), 'symma-test-run-')), 'codex');
+    const runParent = mkdtempSync(join(tmpdir(), 'symma-test-run-'));
+    // Nested, so the run home is one prepare has to create for itself.
+    const runHome = join(runParent, 'codex');
     const codex = codexAcpSpec(codexHome, runHome);
     // Seeded so the strip assertions are not vacuous: env() inherits
     // process.env, so a dropped delete would let the ambient value through.
@@ -746,7 +748,7 @@ describe('acp', () => {
     assert.equal(readlinkSync(codexAuthPath(runHome)), codexAuthPath(codexHome));
 
     rmSync(codexHome, { recursive: true, force: true });
-    rmSync(runHome, { recursive: true, force: true });
+    rmSync(runParent, { recursive: true, force: true });
 
     const codexEmptyHome = mkdtempSync(join(tmpdir(), 'symma-test-empty-'));
     const emptyRun = join(codexEmptyHome, 'run');
