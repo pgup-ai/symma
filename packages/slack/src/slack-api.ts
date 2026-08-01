@@ -74,11 +74,17 @@ const UNUSABLE: Record<string, Unusable> = {
  * cannot spin the fetch loop, not as a limit anybody should reach. */
 const MAX_PAGES = 20;
 
-/** Slack's own caps on a block message. Exceeding either is a rejected post,
+/** Slack's own caps on a message. Exceeding either block one is a rejected post,
  * and a rejected post turns a finished run into a reported failure — which is
  * how an answer gets lost rather than merely mis-rendered. */
 const BLOCK_TEXT_LIMIT = 3000;
 const MESSAGE_BLOCK_LIMIT = 50;
+const FALLBACK_TEXT_LIMIT = 40_000;
+
+/** Cut to `limit` and say so, so what is missing is visible rather than a
+ * sentence that stops. */
+const clip = (text: string, limit: number): string =>
+  text.length > limit ? `${text.slice(0, cut(text, limit - 1))}…` : text;
 
 /** Slack counts its limits in characters, where JS slices in UTF-16 units — so
  * a cut landing between the halves of an emoji leaves a lone surrogate that
@@ -100,9 +106,7 @@ function sections(text: string, budget: number): SectionBlock[] {
   }
   // Only reachable on an answer past the whole message's budget, where the
   // choice is a truncated one or none at all.
-  parts.push(
-    rest.length > BLOCK_TEXT_LIMIT ? `${rest.slice(0, cut(rest, BLOCK_TEXT_LIMIT - 1))}…` : rest,
-  );
+  parts.push(clip(rest, BLOCK_TEXT_LIMIT));
   return parts.map((part) => ({ type: 'section', text: { type: 'mrkdwn', text: part } }));
 }
 
@@ -216,13 +220,15 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       // than dropped: one over the limit would take the whole post down with it.
       const context = (notices ?? []).slice(0, room - body.length).map((notice) => ({
         type: 'context',
-        elements: [{ type: 'mrkdwn', text: notice.slice(0, cut(notice, BLOCK_TEXT_LIMIT)) }],
+        elements: [{ type: 'mrkdwn', text: clip(notice, BLOCK_TEXT_LIMIT) }],
       }));
       const sent = await client.chat.postMessage({
         channel,
         // Sent alongside the blocks as the notification and accessibility text,
-        // which Slack uses wherever it will not render them.
-        text,
+        // which Slack uses wherever it will not render them. Bounded here for
+        // the same reason the blocks are: what Slack does past its own limit is
+        // not worth finding out on a member's answer.
+        text: clip(text, FALLBACK_TEXT_LIMIT),
         ...(threadTs ? { thread_ts: threadTs } : {}),
         // Blocks replace the body wholesale, so the answer's own section has to
         // be rebuilt here as soon as anything needs to go with it — and a plain
@@ -237,7 +243,7 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
         await client.chat.update({
           channel,
           ts,
-          text,
+          text: clip(text, FALLBACK_TEXT_LIMIT),
           blocks: sections(text, MESSAGE_BLOCK_LIMIT),
         });
       } catch {

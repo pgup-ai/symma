@@ -153,6 +153,7 @@ describe('slack api', () => {
       'the notice goes above, and the answer keeps a block of its own',
     );
     assert.match(blocks[0]!.elements![0]!.text, /shortened/);
+    assert.doesNotMatch(blocks[0]!.elements![0]!.text, /…$/, 'one that fits is not marked cut');
     assert.equal(blocks[1]!.text!.text, 'the answer');
     // The fallback is what Slack notifies and reads out, so it stays the answer
     // alone — a notice is not what the member is being told about.
@@ -255,6 +256,11 @@ describe('slack api', () => {
       !wide.some((b) => b.type === 'context'),
       'the asides gave way rather than the answer',
     );
+    // The fallback is what Slack notifies and reads out, and it has a cap of
+    // its own — bounded here rather than left to whatever Slack does past it.
+    const fallback = new URLSearchParams(String(long.seen[0])).get('text') ?? '';
+    assert.ok(fallback.length <= 40_000, `inside the text cap, got ${String(fallback.length)}`);
+    assert.match(fallback, /…$/, 'and says it was cut');
   });
 
   it('stays a plain message when there is nothing to set apart', async () => {
