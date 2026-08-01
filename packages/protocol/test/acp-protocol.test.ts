@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   existsSync,
   lstatSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -707,6 +708,12 @@ describe('acp', () => {
       const notStaged = aged('auth.json.backup.123', 'and so did this, despite the shape');
       const midWrite = join(runHome, 'config.toml.99998');
       writeFileSync(midWrite, "another companion's, seconds old");
+      // A staged auth is a symlink, and its target is the member's own file —
+      // freshly written above. Aged through the link it would look current
+      // forever; `lutimes` backdates the link itself, which is what decides.
+      const stagedLink = join(runHome, 'auth.json.99999');
+      symlinkSync(codexAuthPath(codexHome), stagedLink);
+      lutimesSync(stagedLink, new Date(0), new Date(0));
 
       const codexEnv = codex.env('codex/gpt-5.2-codex');
       assert.equal(codexEnv.env.CODEX_HOME, runHome);
@@ -715,6 +722,7 @@ describe('acp', () => {
       assert.ok(existsSync(midWrite), 'nor is one too new to have been abandoned');
       assert.ok(existsSync(notOurs), 'a name symma never stages is not ours to delete');
       assert.ok(existsSync(notStaged), 'and neither is one that only looks like a stage');
+      assert.ok(!existsSync(stagedLink), 'a stranded auth link is aged by itself, not its target');
 
       // The model is deliberately NOT here: sessions share this file, so a
       // per-spawn write is one run reading another's config.

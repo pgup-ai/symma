@@ -73,6 +73,10 @@ const linkable = process.platform !== 'win32';
  * still holds fails the rename outright, and a copy that is newer than the
  * source is one codex refreshed in place — overwriting it would undo that. So
  * only a source that has moved on, which is a re-login, is worth the rewrite.
+ *
+ * mtime is how "moved on" is read, so a re-login the clock does not separate
+ * from the copy — coarse timestamps, skew — is one this misses. Another cost
+ * of the copy, on top of the one above it.
  */
 function isCurrentAuth(link: string, target: string): boolean {
   if (!linkable) {
@@ -128,7 +132,10 @@ function sweepStaging(home: string): void {
     const pid = stagedPid(entry);
     if (pid === undefined) continue;
     const path = join(home, entry);
-    if ((statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) >= cutoff) continue;
+    // lstat, because a staged auth is itself a symlink: following it would age
+    // the leftover by when the member last logged in, and a fresh login would
+    // keep a dead companion's artifact here indefinitely.
+    if ((lstatSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0) >= cutoff) continue;
     if (!isGone(pid)) continue;
     rmSync(path, { force: true });
   }
