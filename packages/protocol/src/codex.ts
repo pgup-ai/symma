@@ -3,6 +3,7 @@ import {
   copyFileSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   renameSync,
@@ -11,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 export const CODEX_PROVIDER_ID = 'codex';
 
@@ -84,8 +85,15 @@ function isCurrentAuth(link: string, target: string): boolean {
  * which is atomic. The pid is what keeps two companion processes sharing a
  * state dir off each other's staging file. */
 function place(path: string, write: (staged: string) => void): void {
+  // Every pid's leftovers, not just this one's. A companion killed between the
+  // write and the rename leaves its staging file in a home that now outlives
+  // it, no later process shares that pid to reclaim it, and on Windows the file
+  // is a plaintext credential.
+  const prefix = `${basename(path)}.`;
+  for (const entry of readdirSync(dirname(path))) {
+    if (entry.startsWith(prefix)) rmSync(join(dirname(path), entry), { force: true });
+  }
   const staged = `${path}.${String(process.pid)}`;
-  rmSync(staged, { force: true });
   write(staged);
   renameSync(staged, path);
 }
@@ -98,7 +106,7 @@ function place(path: string, write: (staged: string) => void): void {
  * can never be loaded back. And it has to be symma's rather than the member's,
  * because the read-only config is ours to write and theirs to keep.
  */
-export function prepareCodexRunHome(codexHome: string, runHome: string): void {
+export function prepareCodexRunHome(codexHome: string, runHome: string): string {
   // Resolved first because a symlink stores the path it is handed and reads it
   // back against its own directory, while the check below reads it against the
   // cwd. A relative argument would make the two disagree, and the check would
@@ -128,6 +136,9 @@ export function prepareCodexRunHome(codexHome: string, runHome: string): void {
   if (!statSync(config, { throwIfNoEntry: false }) || readFileSync(config, 'utf8') !== RUN_CONFIG) {
     place(config, (staged) => writeFileSync(staged, RUN_CONFIG, { mode: 0o600 }));
   }
+  // Handed back so `CODEX_HOME` names the directory these went into, rather
+  // than the caller's spelling of it.
+  return home;
 }
 
 /**

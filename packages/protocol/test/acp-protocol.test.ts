@@ -687,8 +687,15 @@ describe('acp', () => {
     const savedOverrides = overrides.map((key) => [key, process.env[key]] as const);
     for (const key of overrides) process.env[key] = `ambient-${key}`;
     try {
+      // Left by a companion killed between staging and the rename. This home
+      // outlives the process, so nothing else would ever reclaim it — and on
+      // Windows the same shape holds a plaintext credential.
+      mkdirSync(runHome, { recursive: true });
+      writeFileSync(join(runHome, 'config.toml.99999'), 'orphaned');
+
       const codexEnv = codex.env('codex/gpt-5.2-codex');
       assert.equal(codexEnv.env.CODEX_HOME, runHome);
+      assert.ok(!existsSync(join(runHome, 'config.toml.99999')));
 
       // The model is deliberately NOT here: sessions share this file, so a
       // per-spawn write is one run reading another's config.

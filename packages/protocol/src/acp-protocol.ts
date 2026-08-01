@@ -694,8 +694,7 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
     bin: CODEX_ACP_BIN,
     args: () => [],
     env: (model) => {
-      prepareCodexRunHome(codexHome, runHome);
-      const env = codexEnvForHome(runHome);
+      const env = codexEnvForHome(prepareCodexRunHome(codexHome, runHome));
       // codex-acp runtime overrides (README): CODEX_PATH swaps the binary and
       // MODEL_PROVIDER redirects models, so ambient values must not reach the
       // child. CODEX_CONFIG is set rather than stripped — being per process is
