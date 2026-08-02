@@ -317,6 +317,12 @@ describe('slack api', () => {
     // Reopened in the language it was opened with, or the code stops being ts
     // halfway down.
     assert.ok(parts.slice(1).every((part) => part.startsWith('```ts')));
+    // Balanced fences prove nothing about what is between them: every one of
+    // the 7,000 characters has to still be here, with its prose either side.
+    const whole = parts.join('');
+    assert.equal((whole.match(/x/g) ?? []).length, 7000);
+    assert.ok(whole.startsWith('before\n'));
+    assert.ok(whole.endsWith('\nafter'));
   });
 
   it('still splits a long answer with nothing beside it', async () => {
