@@ -340,6 +340,11 @@ export function matchModelOptionValue(
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
+  /** Assistant text the agent did not label with a `messageId`, in a session
+   * where it labelled everything else — an adapter with no channel of its own
+   * putting an operational notice in the message stream. codex-acp turns
+   * codex's `warning` and `configWarning` events into exactly this. */
+  notices: string[];
 }
 
 /**
@@ -355,12 +360,16 @@ export async function driveAcpSession(
   options: AcpSessionOptions,
 ): Promise<AcpSessionResult> {
   const { agent, label, log } = options;
-  const segments: string[] = [];
+  // Kept with the id they arrived under, because whether an unlabelled one is a
+  // notice depends on whether the session ever labels anything — and a
+  // `tool_call` can flush one before the first labelled chunk says so.
+  const segments: { id: unknown; text: string }[] = [];
   let current = '';
   let lastMessageId: unknown;
+  let seenChunk = false;
   let usesMessageIds = false;
   const flush = () => {
-    if (current.trim()) segments.push(current);
+    if (current.trim()) segments.push({ id: lastMessageId, text: current });
     current = '';
   };
 
@@ -372,11 +381,13 @@ export async function driveAcpSession(
       const kind = update.sessionUpdate;
       if (kind === 'agent_message_chunk') {
         const messageId = update.messageId;
-        if (messageId !== undefined) {
-          usesMessageIds = true;
-          if (lastMessageId !== undefined && messageId !== lastMessageId) flush();
-          lastMessageId = messageId;
-        }
+        if (messageId !== undefined) usesMessageIds = true;
+        // `undefined` is an id like any other, so a chunk the agent did not
+        // label starts its own segment rather than joining the answer. Agents
+        // that label nothing see no change: their id never varies.
+        if (seenChunk && messageId !== lastMessageId) flush();
+        seenChunk = true;
+        lastMessageId = messageId;
         const content = update.content as { type?: string; text?: string } | undefined;
         if (content?.type === 'text' && typeof content.text === 'string') current += content.text;
       } else if ((kind === 'tool_call' || kind === 'tool_call_update') && !usesMessageIds) {
@@ -476,9 +487,26 @@ export async function driveAcpSession(
   // race resolves within one I/O flush), then take the final segment.
   await new Promise((resolve) => setTimeout(resolve, ACP_POST_TURN_DRAIN_MS));
   flush();
+  const aside = (segment: { id: unknown }) => usesMessageIds && segment.id === undefined;
+  // A notice arriving mid-message splits the message it interrupted, so a run
+  // of one id rejoins — otherwise the half before the interruption is not the
+  // last segment, and the answer comes back with its opening missing.
+  const answered: { id: unknown; text: string }[] = [];
+  for (const segment of segments) {
+    if (aside(segment)) continue;
+    const open = answered[answered.length - 1];
+    if (open && segment.id !== undefined && segment.id === open.id) open.text += segment.text;
+    else answered.push({ ...segment });
+  }
+  // Filtering to nothing means the session labelled something but not what it
+  // answered with. Recall beats precision there (AGENTS.md, "auxiliary sessions
+  // fail open") — an aside shown as the answer is recoverable, a lost answer is
+  // not — so the asides are taken back rather than returning silence.
+  const kept = answered.length ? answered : segments;
   return {
-    text: (segments[segments.length - 1] ?? '').trim(),
+    text: (kept[kept.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
+    notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
   };
 }
 

@@ -686,6 +686,100 @@ describe('acp', () => {
     }
   });
 
+  it('keeps what the agent said about itself out of the answer', async () => {
+    // codex-acp has no channel for codex's `warning` events, so it puts them in
+    // the message stream as text with no `messageId` — live-observed against
+    // codex-acp 1.1.7. Agents that label nothing must not be caught by the same
+    // rule: for them an absent id is every chunk they send.
+    const cases = [
+      {
+        label: 'labelled',
+        chunks: [
+          { text: 'Warning: skill descriptions were shortened.' },
+          { messageId: 'm1', text: 'the answer' },
+        ],
+        text: 'the answer',
+        notices: ['Warning: skill descriptions were shortened.'],
+      },
+      {
+        label: 'unlabelled',
+        chunks: [{ text: 'the ' }, { text: 'answer' }],
+        text: 'the answer',
+        notices: [],
+      },
+      {
+        // Position decides nothing: an aside after the answer is still an aside.
+        // Exempting the last segment was tried and is worse — it cannot be told
+        // apart from an agent whose final answer happens to be unlabelled, and
+        // guessing that way replaces a real answer with a warning.
+        label: 'aside arrives last',
+        chunks: [{ messageId: 'm1', text: 'the answer' }, { text: 'Warning: shortened.' }],
+        text: 'the answer',
+        notices: ['Warning: shortened.'],
+      },
+      {
+        // Nothing labelled survived the filter — here because the labelled
+        // chunk carried no text — so the asides are all there is. Returning
+        // silence would be the recall hole; showing one as the answer is not.
+        label: 'nothing labelled had anything in it',
+        chunks: [{ messageId: 'm1', text: '' }, { text: 'the answer' }],
+        text: 'the answer',
+        notices: [],
+      },
+      {
+        // A notice arriving mid-message splits the message it interrupted. The
+        // half before it is then not the last segment, so the answer would come
+        // back with its opening missing.
+        label: 'notice inside one message',
+        chunks: [
+          { messageId: 'm1', text: 'the deploy ' },
+          { text: 'Warning: shortened.' },
+          { messageId: 'm1', text: 'fails on a missing env var' },
+        ],
+        text: 'the deploy fails on a missing env var',
+        notices: ['Warning: shortened.'],
+      },
+      {
+        // A tool call between the two flushes the notice before any labelled
+        // chunk exists to say the session labels at all. Classifying then would
+        // file it as an answer, where only the last one is ever returned — so
+        // it would reach neither `text` nor `notices`.
+        label: 'tool call before the first label',
+        chunks: [
+          { text: 'Warning: shortened.' },
+          { tool: true },
+          { messageId: 'm1', text: 'the answer' },
+        ],
+        text: 'the answer',
+        notices: ['Warning: shortened.'],
+      },
+    ];
+    for (const { label, chunks, text, notices } of cases) {
+      const fake = fakeAgentIo({
+        onPrompt: (agent) => {
+          for (const chunk of chunks) {
+            agent.update(
+              chunk.tool
+                ? { sessionUpdate: 'tool_call', toolCallId: 't1', status: 'pending' }
+                : {
+                    sessionUpdate: 'agent_message_chunk',
+                    ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
+                    content: { type: 'text', text: chunk.text },
+                  },
+            );
+          }
+          agent.finish();
+        },
+      });
+      const result = await driveAcpSession(
+        { input: fake.input, output: fake.output },
+        { cwd: '/tmp', prompt: 'hi', agent: 'probe', label, log: () => {} },
+      );
+      assert.equal(result.text, text, label);
+      assert.deepEqual(result.notices, notices, label);
+    }
+  });
+
   // The codex assertions below are POSIX-shaped — a link to write through, and
   // an inode that a rename changes. Both are what the implementation does
   // everywhere CI runs it (`ubuntu-latest`), and neither holds on the Windows

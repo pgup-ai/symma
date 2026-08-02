@@ -1,6 +1,6 @@
 {
   "name": "symma",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connect a chat surface to the coding agents already logged in on your own machine",
   "repository": {
     "type": "git",
@@ -27,7 +27,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@symma/protocol": "0.4.0"
+    "@symma/protocol": "0.5.0"
   },
   "devDependencies": {
     "@symma/gateway": "0.1.0"

@@ -5,7 +5,7 @@
  * pagination cursors, `ok: false` on a 200, a typed error holding Slack's own
  * code, and `Retry-After` on a 429.
  */
-import { ErrorCode, WebClient, type WebAPIPlatformError } from '@slack/web-api';
+import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } from '@slack/web-api';
 
 import type { ThreadMessage } from './snapshot.js';
 
@@ -23,11 +23,17 @@ export interface SlackApi {
     /** §5's action on a finished answer. The button carries the conversation and
      * nothing else — where it may publish is the gateway's to state. */
     offerShare?: { conversation: string; destination: string },
+    /** The agent talking about itself rather than answering. Rendered as a
+     * context block, which is Slack's own small-and-grey — the member should be
+     * able to tell it from the answer without reading it. */
+    notices?: string[],
   ) => Promise<{ channel: string; ts: string }>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
    * and reporting a failed update as a failed share would be a lie the member
-   * acts on. */
+   * acts on. Any notices go with the rewrite — deliberately: they are an aside
+   * on a message that has been read and acted on, and carrying them would mean
+   * widening this and `share` to hold text neither publishes. */
   settle: (channel: string, ts: string, text: string) => Promise<void>;
   /** 👀 on the member's own message while the run is out, replaced when it
    * lands. Never throws: the mark is a hint, and losing one must not cost them
@@ -69,6 +75,55 @@ const UNUSABLE: Record<string, Unusable> = {
 /** Threads cap far below this in practice; it is here so a pathological one
  * cannot spin the fetch loop, not as a limit anybody should reach. */
 const MAX_PAGES = 20;
+
+/** Slack's own caps on a message. Exceeding either block one is a rejected post,
+ * and a rejected post turns a finished run into a reported failure — which is
+ * how an answer gets lost rather than merely mis-rendered. */
+const BLOCK_TEXT_LIMIT = 3000;
+const MESSAGE_BLOCK_LIMIT = 50;
+const FALLBACK_TEXT_LIMIT = 40_000;
+
+/** Cut to `limit` and say so, so what is missing is visible rather than a
+ * sentence that stops. */
+const clip = (text: string, limit: number): string =>
+  text.length > limit ? `${text.slice(0, cut(text, limit - 1))}…` : text;
+
+/** Slack counts its limits in characters, where JS slices in UTF-16 units — so
+ * a cut landing between the halves of an emoji leaves a lone surrogate that
+ * renders as a replacement glyph. One unit back is always a whole character. */
+const cut = (text: string, at: number): number =>
+  /[\uD800-\uDBFF]/.test(text[at - 1]!) ? at - 1 : at;
+
+/** The answer as however many sections it needs, split at a line break near the
+ * limit where there is one. */
+function sections(text: string, budget: number): SectionBlock[] {
+  const parts: string[] = [];
+  let rest = text;
+  while (rest.length > BLOCK_TEXT_LIMIT && parts.length < budget - 1) {
+    // Short of the limit, because the closing fence below has to fit as well.
+    const room = BLOCK_TEXT_LIMIT - 4;
+    const line = rest.lastIndexOf('\n', room);
+    // Only when what is left still fits without it: a tidy break is worth less
+    // than the tail it would cost, since the blocks that remain are counted.
+    const fits = rest.length - line <= (budget - parts.length - 1) * room;
+    const at = line > room / 2 && fits ? line : cut(rest, room);
+    let part = rest.slice(0, at);
+    rest = rest.slice(at);
+    // A cut inside a fence leaves it open, so this section swallows the rest of
+    // itself as code and the next starts with a stray close. Shut here and
+    // reopened there, in the language it was opened with.
+    const fences = part.match(/^```.*$/gm) ?? [];
+    if (fences.length % 2) {
+      part += '\n```';
+      rest = `${fences[fences.length - 1]!}\n${rest}`;
+    }
+    parts.push(part);
+  }
+  // Only reachable on an answer past the whole message's budget, where the
+  // choice is a truncated one or none at all.
+  parts.push(clip(rest, BLOCK_TEXT_LIMIT));
+  return parts.map((part) => ({ type: 'section', text: { type: 'mrkdwn', text: part } }));
+}
 
 /** The one action id the bot listens for, shared by the button and its handler. */
 export const SHARE_ACTION = 'share_to_thread';
@@ -144,41 +199,71 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       if (!channel?.id) throw new Error('conversations.open returned no channel');
       return channel.id;
     },
-    async post(channel, text, threadTs, offerShare) {
+    async post(channel, text, threadTs, offerShare, notices) {
+      const actions = offerShare
+        ? [
+            {
+              type: 'actions',
+              elements: [
+                {
+                  type: 'button',
+                  action_id: SHARE_ACTION,
+                  text: { type: 'plain_text', text: 'Share to thread' },
+                  value: offerShare.conversation,
+                  // §5 wants the destination previewed before it is published,
+                  // and the content is the message this sits on.
+                  confirm: {
+                    title: { type: 'plain_text', text: 'Share this answer?' },
+                    text: {
+                      type: 'mrkdwn',
+                      text: `It will be posted to ${offerShare.destination}, with your name on it.`,
+                    },
+                    confirm: { type: 'plain_text', text: 'Share' },
+                    deny: { type: 'plain_text', text: 'Keep private' },
+                  },
+                },
+              ],
+            },
+          ]
+        : [];
+      // The answer takes the blocks it needs and the asides take what is left,
+      // in that order — a run that talked about itself a lot must not crowd out
+      // what it was talking alongside. One block is held back for them all the
+      // same: an aside gone without trace is worse than an answer a block
+      // shorter, since it is often the part saying something went wrong.
+      const room = MESSAGE_BLOCK_LIMIT - actions.length;
+      const body = sections(text, room - (notices?.length ? 1 : 0));
+      const shown = (notices ?? []).slice(0, room - body.length);
+      const hidden = (notices?.length ?? 0) - shown.length;
+      // Above the answer, which is where the agent put it. Truncated rather
+      // than dropped: one over the limit would take the whole post down with it.
+      const context = shown.map((notice, index) => ({
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text:
+              hidden && index === shown.length - 1
+                ? `${clip(notice, BLOCK_TEXT_LIMIT - 40)}\n_and ${String(hidden)} more_`
+                : clip(notice, BLOCK_TEXT_LIMIT),
+          },
+        ],
+      }));
       const sent = await client.chat.postMessage({
         channel,
         // Sent alongside the blocks as the notification and accessibility text,
-        // which Slack uses wherever it will not render them.
-        text,
+        // which Slack uses wherever it will not render them. Bounded here for
+        // the same reason the blocks are: what Slack does past its own limit is
+        // not worth finding out on a member's answer.
+        text: clip(text, FALLBACK_TEXT_LIMIT),
         ...(threadTs ? { thread_ts: threadTs } : {}),
-        ...(offerShare
-          ? {
-              blocks: [
-                { type: 'section', text: { type: 'mrkdwn', text } },
-                {
-                  type: 'actions',
-                  elements: [
-                    {
-                      type: 'button',
-                      action_id: SHARE_ACTION,
-                      text: { type: 'plain_text', text: 'Share to thread' },
-                      value: offerShare.conversation,
-                      // §5 wants the destination previewed before it is
-                      // published, and the content is the message this sits on.
-                      confirm: {
-                        title: { type: 'plain_text', text: 'Share this answer?' },
-                        text: {
-                          type: 'mrkdwn',
-                          text: `It will be posted to ${offerShare.destination}, with your name on it.`,
-                        },
-                        confirm: { type: 'plain_text', text: 'Share' },
-                        deny: { type: 'plain_text', text: 'Keep private' },
-                      },
-                    },
-                  ],
-                },
-              ],
-            }
+        // Blocks replace the body wholesale, so the answer's own section has to
+        // be rebuilt here as soon as anything needs to go with it — and a plain
+        // body has no length limit worth reaching where a section does.
+        // An answer past one section needs them too, or the plain body is all
+        // that carries it and everything past the fallback's own cap is gone.
+        ...(context.length || actions.length || body.length > 1
+          ? { blocks: [...context, ...body, ...actions] }
           : {}),
       });
       if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
@@ -189,8 +274,8 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
         await client.chat.update({
           channel,
           ts,
-          text,
-          blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+          text: clip(text, FALLBACK_TEXT_LIMIT),
+          blocks: sections(text, MESSAGE_BLOCK_LIMIT),
         });
       } catch {
         /* the share landed; the button outliving it is the smaller problem */

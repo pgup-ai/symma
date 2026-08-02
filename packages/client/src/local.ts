@@ -13,6 +13,7 @@ import {
   truncateForLog,
   type AcpAgentSpec,
   type AcpSessionOptions,
+  type AcpSessionResult,
 } from '@symma/protocol';
 
 const ACP_PROMPT_TIMEOUT_MS = 20 * 60_000;
@@ -72,7 +73,7 @@ export async function runLocalAcpPrompt(
     stderr += `\n[stdin error: ${error.message}]`;
   });
   let timer: NodeJS.Timeout | undefined;
-  let result: { text: string; stopReason: string };
+  let result: AcpSessionResult;
   try {
     result = await Promise.race([
       driveAcpSession(

@@ -130,4 +130,209 @@ describe('slack api', () => {
     await slackApi('xoxb-test', { fetch: fetchImpl }).mark('D-nel', '250.0', 'done');
     assert.deepEqual(called, ['reactions.remove', 'reactions.add']);
   });
+
+  it('sets a notice apart from the answer instead of running them together', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      undefined,
+      ['Warning: skill descriptions were shortened.'],
+    );
+    // The SDK form-encodes this call and JSON-encodes only the complex fields.
+    const sent = new URLSearchParams(String(seen[0]));
+    const blocks = JSON.parse(sent.get('blocks') ?? '[]') as {
+      type: string;
+      elements?: { text: string }[];
+      text?: { text: string };
+    }[];
+    assert.deepEqual(
+      blocks.map((b) => b.type),
+      ['context', 'section'],
+      'the notice goes above, and the answer keeps a block of its own',
+    );
+    assert.match(blocks[0]!.elements![0]!.text, /shortened/);
+    assert.doesNotMatch(blocks[0]!.elements![0]!.text, /…$/, 'one that fits is not marked cut');
+    assert.equal(blocks[1]!.text!.text, 'the answer');
+    // The fallback is what Slack notifies and reads out, so it stays the answer
+    // alone — a notice is not what the member is being told about.
+    assert.equal(sent.get('text'), 'the answer');
+  });
+
+  it('splits an answer Slack would reject rather than losing the post', async () => {
+    // A section caps at 3,000 characters and the message at 50 blocks. Slack
+    // rejects the whole post over either, and `handleDm` reports a rejected
+    // post as a failed run — so the member loses an answer that was produced.
+    const answer = Array.from(
+      { length: 400 },
+      (_, i) => `line ${String(i)} ${'x'.repeat(40)}`,
+    ).join('\n');
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    // Over the limit itself, since an agent's notice is not bounded either.
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', answer, '200.0', undefined, [
+      `Warning: ${'y'.repeat(4000)}`,
+    ]);
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      text?: { text: string };
+      elements?: { text: string }[];
+    }[];
+    assert.ok(blocks.length <= 50, 'inside the message cap');
+    for (const block of blocks) {
+      assert.ok((block.text?.text.length ?? 0) <= 3000, 'every section inside its own');
+      for (const element of block.elements ?? []) {
+        assert.ok(element.text.length <= 3000, 'and so is a notice that arrived too long');
+      }
+    }
+    assert.equal(blocks[0]!.type, 'context', 'the notice still leads');
+    // Nothing is silently dropped on the way: the answer is split, not cut.
+    const rebuilt = blocks
+      .filter((b) => b.type === 'section')
+      .map((b) => b.text!.text)
+      .join('');
+    assert.equal(rebuilt, answer);
+  });
+
+  it('gives the answer its blocks before the asides get theirs', async () => {
+    // More notices than the message has room for. Slack rejects a post over 50
+    // blocks outright, so an agent that talked about itself a lot would take
+    // down the answer it talked alongside.
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      { conversation: 'conv-1', destination: '<#C-incidents>' },
+      Array.from({ length: 80 }, (_, i) => `notice ${String(i)}`),
+    );
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      text?: { text: string };
+    }[];
+    assert.ok(blocks.length <= 50, `inside the message cap, got ${String(blocks.length)}`);
+    assert.deepEqual(
+      blocks.filter((b) => b.type === 'section').map((b) => b.text!.text),
+      ['the answer'],
+      'and the answer is still there rather than squeezed out',
+    );
+    assert.equal(blocks.at(-1)!.type, 'actions', 'with the share button after it');
+
+    // A cut landing between the halves of an emoji would leave a lone surrogate
+    // that renders as a replacement glyph.
+    const emoji = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: emoji.fetchImpl }).post(
+      'D-nel',
+      // The odd prefix is what puts the 3,000th unit inside a pair rather than
+      // between two: without it the boundary lands evenly and proves nothing.
+      `x${'🙂'.repeat(4000)}`,
+      '200.0',
+      undefined,
+      [`x${'🙂'.repeat(4000)}`],
+    );
+    for (const block of JSON.parse(
+      new URLSearchParams(String(emoji.seen[0])).get('blocks') ?? '[]',
+    ) as { text?: { text: string }; elements?: { text: string }[] }[]) {
+      for (const part of [block.text?.text, ...(block.elements ?? []).map((e) => e.text)]) {
+        assert.ok(!/[\uD800-\uDBFF]$/.test(part ?? ''), 'no half a character at the boundary');
+      }
+    }
+
+    // And the other way round: an answer long enough to want every block gets
+    // them, and the asides are what go.
+    const long = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: long.fetchImpl }).post(
+      'D-nel',
+      'z'.repeat(3000 * 60),
+      '200.0',
+      undefined,
+      ['notice 0', 'notice 1'],
+    );
+    const wide = JSON.parse(new URLSearchParams(String(long.seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+    }[];
+    assert.ok(wide.length <= 50, 'inside the cap');
+    // One block is held back for them, so what was said is never simply gone.
+    const aside = wide.find((b) => b.type === 'context') as
+      { elements: { text: string }[] } | undefined;
+    assert.match(aside!.elements[0]!.text, /_and 1 more_$/, 'and says what it could not show');
+    // The fallback is what Slack notifies and reads out, and it has a cap of
+    // its own — bounded here rather than left to whatever Slack does past it.
+    const fallback = new URLSearchParams(String(long.seen[0])).get('text') ?? '';
+    assert.ok(fallback.length <= 40_000, `inside the text cap, got ${String(fallback.length)}`);
+    assert.match(fallback, /…$/, 'and says it was cut');
+  });
+
+  it('stays a plain message when there is nothing to set apart', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      undefined,
+      [],
+    );
+    assert.equal(new URLSearchParams(String(seen[0])).get('blocks'), null);
+  });
+
+  it('does not pay for a tidy break with the answer’s tail', async () => {
+    // Every line break shortens the section it ends, so preferring them costs
+    // blocks — and just past the budget that cost comes out of the answer.
+    const line = `${'w'.repeat(2599)}\n`;
+    // 54 lines: 47 sections when cut at the limit, 54 when cut at the breaks —
+    // so the tidy version is the one that does not fit in 50.
+    const answer = line.repeat(54);
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', answer, '200.0');
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      text?: { text: string };
+    }[];
+    assert.equal(blocks.map((b) => b.text!.text).join(''), answer, 'all of it, tidy or not');
+  });
+
+  it('does not leave a code fence hanging across a split', async () => {
+    // A coding agent's long answer is usually mostly code. A cut inside a fence
+    // leaves the section holding it open — everything after renders as code —
+    // and the next section starting on a stray close.
+    // One long line inside it, so the split lands on the hard cut rather than
+    // on a line break that happens to leave room for the close.
+    const answer = `before\n\`\`\`ts\n${'x'.repeat(7000)}\n\`\`\`\nafter`;
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', answer, '200.0');
+    const parts = (
+      JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+        text: { text: string };
+      }[]
+    ).map((b) => b.text.text);
+    assert.ok(parts.length > 1, 'the fixture actually splits');
+    for (const [index, part] of parts.entries()) {
+      assert.equal(
+        (part.match(/```/g) ?? []).length % 2,
+        0,
+        `section ${String(index)} is balanced`,
+      );
+      // The close it gains has to fit in the same 3,000 as everything else.
+      assert.ok(part.length <= 3000, `section ${String(index)} is ${String(part.length)} long`);
+    }
+    // Reopened in the language it was opened with, or the code stops being ts
+    // halfway down.
+    assert.ok(parts.slice(1).every((part) => part.startsWith('```ts')));
+    // Balanced fences prove nothing about what is between them: every one of
+    // the 7,000 characters has to still be here, with its prose either side.
+    const whole = parts.join('');
+    assert.equal((whole.match(/x/g) ?? []).length, 7000);
+    assert.ok(whole.startsWith('before\n'));
+    assert.ok(whole.endsWith('\nafter'));
+  });
+
+  it('still splits a long answer with nothing beside it', async () => {
+    // The ordinary DM case: no notice, and no thread to share back to. Without
+    // blocks the whole answer rides the fallback, which has a cap of its own.
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', 'z'.repeat(8000), '200.0');
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      text?: { text: string };
+    }[];
+    assert.equal(blocks.map((b) => b.text!.text).join(''), 'z'.repeat(8000));
+  });
 });

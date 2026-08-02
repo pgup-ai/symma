@@ -46,6 +46,9 @@ export interface RemoteAcpConfig {
    * that directory instead of an empty temp one. Never a path — resolving it is
    * the companion's job, and its allowlist is the boundary (§4). */
   workspace?: string;
+  /** Receives `AcpSessionResult.notices` — what the agent said about itself
+   * rather than about the prompt. Absent drops them. */
+  onNotice?: (notice: string) => void;
   /** Checked out by the companion so the agent can explore the code it reviews. */
   repo?: string;
   ref?: string;
@@ -267,6 +270,16 @@ export async function runRemotePrompt(
     log(
       `${label} prompt complete via gateway: stopReason=${result.stopReason} last-message=${result.text.length} chars`,
     );
+    // Fails open, and one at a time: the answer is already in hand, so neither
+    // a sink that throws nor the notices after it are worth losing it for
+    // (AGENTS.md, "auxiliary sessions fail open").
+    for (const notice of result.notices) {
+      try {
+        config.onNotice?.(notice);
+      } catch (error) {
+        log(`${label}: notice sink threw, dropping one: ${String(error)}`);
+      }
+    }
     if (!result.text) {
       throw new Error(
         `${label}: agent produced no assistant message (stopReason=${result.stopReason})`,
