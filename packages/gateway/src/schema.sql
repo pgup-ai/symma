@@ -168,6 +168,9 @@ CREATE TABLE IF NOT EXISTS conversation_resume (
   -- has none — the comparison is on sameness, not on presence.
   workspace_id    text
 );
+-- Postgres indexes the primary key and not the foreign one, so unpairing a
+-- machine would scan every resume any member holds to find its rows.
+CREATE INDEX IF NOT EXISTS conversation_resume_endpoint ON conversation_resume (endpoint_id);
 
 -- #27 shipped `conversations`, so CREATE TABLE IF NOT EXISTS skips it on any
 -- database that already ran that release and these columns would never arrive.

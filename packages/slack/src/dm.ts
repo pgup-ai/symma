@@ -3,10 +3,10 @@
  * is; a top-level message opens one with no source (§4).
  *
  * The turn is recorded, then run on the member's own machine — or refused in
- * §3's words when that machine cannot take it. Each turn is still its own ACP
- * session: `driveAcpSession` can reattach to one now, but nothing here has a
- * session id to hand it, so a follow-up is caught up from this thread and told
- * that is a transcript rather than a resume (§4).
+ * §3's words when that machine cannot take it. A follow-up reattaches to the
+ * session the last turn ran in when the gateway still offers one, and is caught
+ * up from this thread when it does not — both travel, because which applies is
+ * not known until the agent has been asked (§4).
  */
 import type { TurnTarget } from '@symma/protocol';
 
@@ -96,6 +96,7 @@ export interface DmDeps {
    * its answer. */
   remember: (
     conversation: string,
+    turn: string,
     session: string,
     ran: { endpoint: string; agent: string; workspace?: string },
   ) => Promise<void>;
@@ -128,11 +129,11 @@ const REPLAY =
   'so re-read anything you need.';
 
 /**
- * §4's third rung, which is the only one reachable from here: `runRemotePrompt`
- * closes its session when the prompt returns, and nothing remembers the id that
- * would reattach to it, so every follow-up is the "cannot reload" case. The DM
- * thread is the transcript — the messages the member can scroll — under the
- * byte ceiling a mention's context already runs under.
+ * §4's third rung, and still the one every follow-up needs to hand over: a
+ * resume is an offer until the agent answers it, so this is what a turn that
+ * ends up in a fresh session arrives with. The DM thread is the transcript —
+ * the messages the member can scroll — under the byte ceiling a mention's
+ * context already runs under.
  *
  * The member's own message is dropped: Slack returns the whole thread including
  * the one being handled, and the prompt carries it once on its own. A thread
@@ -284,7 +285,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     throw error;
   }
   await deps.mark(message.channel, message.ts, 'done');
-  await deps.remember(conversation.id, answer.session, {
+  await deps.remember(conversation.id, turn, answer.session, {
     endpoint: decision.endpoint,
     agent: decision.agent,
     ...(decision.workspace ? { workspace: decision.workspace } : {}),

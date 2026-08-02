@@ -929,8 +929,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       });
     }
     if (url.pathname === '/api/slack/resume') {
-      const { conversation, session, endpoint, agent, workspace } = body as Record<string, unknown>;
-      if (!str(conversation) || !str(session) || !str(endpoint) || !str(agent)) {
+      const { conversation, session, endpoint, agent, workspace, turn } = body as Record<
+        string,
+        unknown
+      >;
+      if (!str(conversation) || !str(session) || !str(endpoint) || !str(agent) || !str(turn)) {
         return sendJson(res, 400, { error: 'bad request' });
       }
       // The key is what the turn ran under, which is what the gateway told this
@@ -941,6 +944,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         conversation,
         { endpoint, agent, ...(str(workspace) ? { workspace } : {}) },
         session,
+        turn,
       );
       return sendJson(res, 200, {});
     }

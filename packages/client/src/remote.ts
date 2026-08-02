@@ -283,12 +283,14 @@ export async function runRemotePrompt(
     // Fails open, and one at a time: the answer is already in hand, so neither
     // a sink that throws nor the notices after it are worth losing it for
     // (AGENTS.md, "auxiliary sessions fail open").
-    config.onSession?.(result.sessionId);
-    for (const notice of result.notices) {
+    for (const [what, deliver] of [
+      ['session', () => config.onSession?.(result.sessionId)],
+      ...result.notices.map((notice) => ['notice', () => config.onNotice?.(notice)] as const),
+    ] as const) {
       try {
-        config.onNotice?.(notice);
+        deliver();
       } catch (error) {
-        log(`${label}: notice sink threw, dropping one: ${String(error)}`);
+        log(`${label}: ${what} sink threw, dropping one: ${String(error)}`);
       }
     }
     if (!result.text) {

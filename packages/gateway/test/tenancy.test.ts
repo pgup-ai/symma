@@ -1815,7 +1815,13 @@ describe('tenancy', () => {
       });
       assert.ok(conversation);
       const ran = { endpoint: 'yves-mac', agent: 'codex', workspace: 'ws-1' };
-      await store.recordResume(yves.owner, conversation.id, ran, 'acp-1');
+      const turn = async (event: string): Promise<string> => {
+        const id = await store.recordTurn(conversation.id, event);
+        assert.ok(id);
+        return id;
+      };
+      const first = await turn('rsm-Ev-1');
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-1', first);
       assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
 
       // A session id is only meaningful against what minted it, so each of
@@ -1832,12 +1838,19 @@ describe('tenancy', () => {
       // The table has no member of its own, so the read is joined through the
       // conversation — asking by id alone would answer about someone else's.
       assert.equal(await store.resumeFor(zia.owner, conversation.id, ran), undefined);
-      await store.recordResume(zia.owner, conversation.id, ran, 'stolen');
+      await store.recordResume(zia.owner, conversation.id, ran, 'stolen', first);
       assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
 
       // Replaced, not appended: a conversation resumes its latest session or
       // none, and the ones before it are a history nothing reads.
-      await store.recordResume(yves.owner, conversation.id, ran, 'acp-2');
+      const second = await turn('rsm-Ev-2');
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-2', second);
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-2');
+
+      // Two turns can overlap, and the one that finishes last is not always the
+      // one that started last — so the slower of a pair cannot decide what the
+      // next message picks up.
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-late', first);
       assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-2');
       const rows = await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`);
       assert.equal(rows.rows[0].n, 1);

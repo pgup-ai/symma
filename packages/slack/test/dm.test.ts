@@ -86,8 +86,8 @@ function harness(
         : Promise.resolve({ channel, ts: '300.0' });
     },
     destination: () => Promise.resolve(over.destination),
-    remember: (conversation, session, ran) => {
-      remembered.push({ conversation, session, ...ran });
+    remember: (conversation, turn, session, ran) => {
+      remembered.push({ conversation, turn, session, ...ran });
       return Promise.resolve();
     },
     mark: (channel, ts, state) => {
@@ -371,6 +371,9 @@ describe('dm message', () => {
     assert.deepEqual(remembered, [
       {
         conversation: 'conv-1',
+        // Which turn, so a pair that overlapped cannot let the slower one
+        // decide what the next message picks up.
+        turn: 'turn-1',
         session: 'acp-1',
         endpoint: 'ep-1',
         agent: 'kilo',
