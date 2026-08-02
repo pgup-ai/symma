@@ -177,6 +177,12 @@ CREATE INDEX IF NOT EXISTS conversation_resume_endpoint ON conversation_resume (
 -- Declared above for a fresh database and added here for an upgraded one —
 -- ADD COLUMN IF NOT EXISTS is idempotent, which is what keeps this file
 -- re-appliable and the migration runner still unbuilt.
+-- Insertion order, because `created_at` is transaction time and two turns can
+-- share it — and what decides which resume survives must not come down to a
+-- uuid comparison. Added rather than declared above so an upgraded database
+-- gets it too; bigserial backfills the rows already there.
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS seq bigserial;
+
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS seen_through_ts text;
 -- Added nullable and backfilled, because `DEFAULT now()` would stamp every
 -- existing row with the moment of the migration and hand each of them a fresh

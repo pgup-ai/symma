@@ -1846,17 +1846,19 @@ describe('tenancy', () => {
       const second = await turn('rsm-Ev-2');
       await store.recordResume(yves.owner, conversation.id, ran, 'acp-2', second);
       assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-2');
-
-      // Two turns can overlap, and the one that finishes last is not always the
-      // one that started last — so the slower of a pair cannot decide what the
-      // next message picks up.
-      await store.recordResume(yves.owner, conversation.id, ran, 'acp-late', first);
-      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-2');
       const rows = await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`);
       assert.equal(rows.rows[0].n, 1);
 
+      // A late arrival from an earlier turn proves the two overlapped, and
+      // neither session then holds both exchanges — so the fork is dropped and
+      // the next turn falls back to the thread, which has all of it.
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-late', first);
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), undefined);
+
       // Unpair the machine and the ids that only mean anything on it go too,
       // without a line of code to remember that.
+      const third = await turn('rsm-Ev-3');
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-3', third);
       await pool.query(`DELETE FROM endpoints WHERE id = 'yves-mac'`);
       assert.equal(
         (await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`)).rows[0].n,

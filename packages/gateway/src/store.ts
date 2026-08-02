@@ -162,10 +162,10 @@ export interface Store {
   /** Replaces whatever was there: a conversation resumes its latest session or
    * none, and keeping the ones before it would be a history nothing reads.
    *
-   * `turn` is which one is asking. Two turns in a conversation can overlap, and
-   * the one that finishes last is not always the one that started last — so an
-   * older turn arriving late is dropped rather than left to decide what the
-   * next one picks up. */
+   * `turn` is which one is asking, and two turns in a conversation can overlap.
+   * A later arrival from an earlier turn is proof that they did, and neither
+   * session then holds the whole conversation — so the row is cleared instead,
+   * and the next turn is caught up from the thread, which does. */
   recordResume(
     owner: Owner,
     conversation: string,
@@ -590,20 +590,27 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       return row?.session;
     },
     async recordResume(owner, conversation, key, sessionId, turn) {
-      // Selecting nothing is how an older turn is dropped: no row to insert
-      // means no conflict, so the newer turn's session stays.
-      await pool.query(
+      const latest = `SELECT max(t.seq) FROM turns t WHERE t.conversation_id = $2`;
+      const inserted = await pool.query(
         `INSERT INTO conversation_resume (conversation_id, session_id, endpoint_id, agent, workspace_id)
          SELECT $2, $6, $3, $4, $5 FROM conversations c
           WHERE c.id = $2 AND c.user_id = $1
-            AND $7 = (SELECT t.id FROM turns t
-                       WHERE t.conversation_id = $2
-                       ORDER BY t.created_at DESC, t.id DESC LIMIT 1)
+            AND (SELECT t.seq FROM turns t WHERE t.id = $7) = (${latest})
          ON CONFLICT (conversation_id) DO UPDATE
             SET session_id = excluded.session_id, endpoint_id = excluded.endpoint_id,
                 agent = excluded.agent, workspace_id = excluded.workspace_id`,
         [owner, conversation, key.endpoint, key.agent, key.workspace ?? null, sessionId, turn],
       );
+      // Nothing inserted means a newer turn exists, so these two overlapped and
+      // neither session has both exchanges. Whatever is stored is one branch of
+      // a fork: dropped, so the next turn takes the thread instead.
+      if (inserted.rowCount === 0) {
+        await pool.query(
+          `DELETE FROM conversation_resume r USING conversations c
+            WHERE r.conversation_id = c.id AND c.id = $2 AND c.user_id = $1`,
+          [owner, conversation],
+        );
+      }
     },
     async mintClientToken(owner, ttlMinutes) {
       const token = randomUUID();
