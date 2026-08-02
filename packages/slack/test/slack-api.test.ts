@@ -130,6 +130,16 @@ describe('slack api', () => {
       'working',
     );
     assert.match(said[0]!, /marking working.*missing_scope/);
+
+    // And the log is a caller's callback, which is exactly where "never
+    // throws" has to hold — a rejection here fails the whole turn.
+    const bad = answering({ ok: false, error: 'missing_scope' });
+    await slackApi('xoxb-test', {
+      fetch: bad.fetchImpl,
+      log: () => {
+        throw new Error('the logger is broken too');
+      },
+    }).mark('D-nel', '250.0', 'working');
   });
 
   it('never lets a lost mark cost the member the answer it was about', async () => {

@@ -289,7 +289,11 @@ export function slackApi(
       // was never granted loses every one, and silence left nothing to find
       // that with.
       const swallow = (what: string) => (error: unknown) => {
-        options.log?.(`${what}: ${String(error)}`);
+        try {
+          options.log?.(`${what}: ${String(error)}`);
+        } catch {
+          /* a caller's logger is not worth the turn either */
+        }
       };
       // Swallowed one call at a time rather than around the pair: a working
       // mark that is not there is ordinary — its own add may have failed — and

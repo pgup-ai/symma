@@ -707,6 +707,7 @@ describe('acp', () => {
       let loaded = 0;
       const fake = fakeAgentIo({
         capabilities: { loadSession },
+        modes: { currentModeId: 'act', availableModes: [{ id: 'plan' }] },
         onLoad: (agent) => {
           loaded += 1;
           if (refuse) return { error: { code: -32602, message: 'no such session' } };
@@ -721,7 +722,11 @@ describe('acp', () => {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Warning: from last time.' },
           });
-          return { result: { models: {}, modes: {} } };
+          // What a load actually answers with — the same session state a new
+          // one returns, which plan mode and model selection are read off.
+          return {
+            result: { modes: { currentModeId: 'act', availableModes: [{ id: 'plan' }] } },
+          };
         },
         onPrompt: (agent) => {
           agent.update({
@@ -734,9 +739,21 @@ describe('acp', () => {
       });
       const result = await driveAcpSession(
         { input: fake.input, output: fake.output },
-        { cwd: '/tmp', prompt: 'hi', agent: 'probe', label, log: () => {}, resume: 'old-1' },
+        {
+          cwd: '/tmp',
+          prompt: 'hi',
+          agent: 'probe',
+          label,
+          log: () => {},
+          resume: 'old-1',
+          // Fails closed for agents whose read-only layer is plan mode, so a
+          // resume that dropped the loaded session's `modes` would refuse the
+          // turn outright.
+          requirePlanMode: true,
+        },
       );
       assert.equal(loaded, loads, label);
+      assert.deepEqual(fake.setModeIds, ['plan'], label);
       assert.equal(result.sessionId, sessionId, label);
       // The replay is the turn before this one, so none of it belongs to this
       // one — not as the answer, and not as an aside beside it.

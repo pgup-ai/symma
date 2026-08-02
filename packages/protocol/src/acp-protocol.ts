@@ -439,12 +439,16 @@ export async function driveAcpSession(
   let session: Record<string, unknown> | undefined;
   if (options.resume !== undefined && loadable) {
     try {
-      await conn.request('session/load', {
+      const loaded = (await conn.request('session/load', {
         sessionId: options.resume,
         cwd: options.cwd,
         mcpServers: [],
-      });
-      session = { sessionId: options.resume };
+      })) as Record<string, unknown>;
+      // Same `modes` and `configOptions` a new session returns — plan mode and
+      // model selection read them off this, so a resume that dropped them
+      // would fail closed on every agent whose read-only layer is plan mode.
+      // It carries no id of its own; the one asked for is the one it loaded.
+      session = { ...loaded, sessionId: options.resume };
       // `session/load` replays the whole conversation as `session/update`
       // (live-probed, codex-acp 1.1.7), so what has arrived so far is the turn
       // before this one and would otherwise be answered with.
