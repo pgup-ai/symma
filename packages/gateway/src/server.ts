@@ -38,6 +38,7 @@ import {
   type Owner,
   type SessionRef,
   type Store,
+  type TurnStatus,
 } from './store.js';
 import { VIEWER_HTML } from './viewer.js';
 
@@ -119,6 +120,9 @@ function acceptsGzip(header: string): boolean {
 
 const subscribers = new Map<string, Set<ServerResponse>>();
 const journalKey = (runId: string, sessionId: string): string => `${runId}/${sessionId}`;
+
+const isTurnStatus = (value: unknown): value is TurnStatus =>
+  value === 'completed' || value === 'failed' || value === 'cancelled';
 
 // Relay state: companions and clients each hold one SSE leg; sends resolve
 // through the maps so a reconnect rebinds without touching the relay.
@@ -847,10 +851,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         })) ??
         (await find());
       if (!conversation) return sendJson(res, 409, { error: 'conflict' });
-      // An absent turn is a redelivery finding its own work, which the bot
-      // answers by not repeating it — not an error.
-      const turn = await store.recordTurn(conversation.id, slackEventId);
-      return sendJson(res, 200, { conversation, ...(turn ? { turn } : {}) });
+      // A turn is refused for two different reasons and the member is told a
+      // different thing for each, so which one travels: a redelivery finding
+      // its own work, or a thread still working on the message before this.
+      const opened = await store.recordTurn(conversation.id, slackEventId);
+      return sendJson(res, 200, { conversation, ...opened });
     }
     if (url.pathname === '/api/slack/seen') {
       const { conversation, seenThroughTs } = body as {
@@ -928,24 +933,25 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         ...(resume ? { resume } : {}),
       });
     }
-    if (url.pathname === '/api/slack/resume') {
-      const { conversation, session, endpoint, agent, workspace, turn } = body as Record<
+    if (url.pathname === '/api/slack/turn/done') {
+      const { conversation, turn, status, session, endpoint, agent, workspace } = body as Record<
         string,
         unknown
       >;
-      if (!str(conversation) || !str(session) || !str(endpoint) || !str(agent) || !str(turn)) {
+      if (!str(conversation) || !str(turn) || !isTurnStatus(status)) {
         return sendJson(res, 400, { error: 'bad request' });
       }
-      // The key is what the turn ran under, which is what the gateway told this
-      // caller to run it under one request earlier. Stored beside the id so the
-      // next turn can tell whether it still applies.
-      await store.recordResume(
-        owner,
-        conversation,
-        { endpoint, agent, ...(str(workspace) ? { workspace } : {}) },
-        session,
-        turn,
-      );
+      // Closed first, and whatever happens to the resume: a turn that stayed
+      // open would tell the next message this thread is still busy.
+      await store.closeTurn(conversation, turn, status);
+      if (str(session) && str(endpoint) && str(agent)) {
+        await store.recordResume(
+          owner,
+          conversation,
+          { endpoint, agent, ...(str(workspace) ? { workspace } : {}) },
+          session,
+        );
+      }
       return sendJson(res, 200, {});
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });

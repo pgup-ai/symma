@@ -144,7 +144,10 @@ const depsFor = (user: string) => {
     findDm: (dmChannel: string, rootThread: string) =>
       lookup('/api/slack/dm', { dmChannel, rootThread }),
     turn: (spec: Record<string, unknown>) =>
-      ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
+      ask<{ conversation: ConversationRef; turn?: string; refused?: 'duplicate' | 'busy' }>(
+        '/api/slack/turn',
+        { user, ...spec },
+      ),
     endpoint: async (conversation: string) =>
       readTurnTarget(await ask<Partial<TurnTarget>>('/api/slack/endpoint', { user, conversation })),
     run: async ({
@@ -182,22 +185,22 @@ const depsFor = (user: string) => {
       );
       return { text, notices, session };
     },
-    remember: async (
+    finish: async (
       conversation: string,
       turn: string,
-      session: string,
-      ran: { endpoint: string; agent: string; workspace?: string },
+      status: 'completed' | 'failed' | 'cancelled',
+      ran?: { session: string; endpoint: string; agent: string; workspace?: string },
     ) => {
-      // The answer is posted and marked done by the time this runs, so a
-      // gateway that is slow or gone must cost the next turn its history and
-      // nothing else — `send` rejects on a timeout, and an uncaught one here
-      // would tell the member their turn failed after they had read it.
-      await send('/api/slack/resume', { user, conversation, turn, session, ...ran })
+      // The answer is posted by the time this runs, so a gateway that is slow
+      // or gone must cost the next turn its history and nothing else — `send`
+      // rejects on a timeout, and an uncaught one here would tell the member
+      // their turn failed after they had read it.
+      await send('/api/slack/turn/done', { user, conversation, turn, status, ...ran })
         .then((res) => {
           if (!res.ok) throw new Error(String(res.status));
         })
         .catch((error: unknown) => {
-          log(`could not remember ${session} for ${conversation}: ${String(error)}`);
+          log(`could not close ${turn} for ${conversation}: ${String(error)}`);
         });
     },
     destination: async (conversation: string) => {
@@ -251,7 +254,7 @@ const connection = socketMode({
               post: deps.post,
               endpoint: deps.endpoint,
               run: deps.run,
-              remember: deps.remember,
+              finish: deps.finish,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,

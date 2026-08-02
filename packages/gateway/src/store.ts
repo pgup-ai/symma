@@ -31,6 +31,18 @@ export interface PairedEndpoint {
   lastSeenAt: number | null;
 }
 
+/** How a turn ended. `cancelled` covers the ones that never ran at all — a
+ * refusal, or a message with no question in it. */
+export type TurnStatus = 'completed' | 'failed' | 'cancelled';
+
+export type TurnOpened = { turn: string } | { refused: 'duplicate' | 'busy' };
+
+/** How long a turn that never closed keeps a thread to itself. Past it the
+ * process that owned it is gone — `runRemotePrompt` gives up well before — and
+ * a member whose bot crashed mid-turn must not be locked out of their own
+ * thread until somebody notices. */
+const TURN_STALE_MINUTES = 30;
+
 /** What an agent session id is only meaningful against (§4). */
 export interface ResumeKey {
   endpoint: string;
@@ -93,9 +105,14 @@ export interface Store {
       agent?: string;
     },
   ): Promise<Conversation | undefined>;
-  /** Records one invocation. Undefined when this Slack event already made a turn
-   * — which is how a redelivery finds its own work rather than repeating it. */
-  recordTurn(conversation: string, slackEventId: string): Promise<string | undefined>;
+  /** Records one invocation. `duplicate` is this Slack event already having a
+   * turn, which is how a redelivery finds its own work rather than repeating it.
+   * `busy` is a conversation with one still running: a thread is a sequence, and
+   * two turns at once fork the agent session that carries it. */
+  recordTurn(conversation: string, slackEventId: string): Promise<TurnOpened>;
+  /** Ends it, so the next message in the thread is not told it is busy forever.
+   * Every path that opened one closes it, including the ones that never ran. */
+  closeTurn(conversation: string, turn: string, status: TurnStatus): Promise<void>;
   /** Advances the cursor, once the member has actually been shown that far. Kept
    * apart from `recordTurn` because a turn that fails to deliver must not leave
    * the thread marked read: the next mention would filter out what nobody saw,
@@ -162,16 +179,15 @@ export interface Store {
   /** Replaces whatever was there: a conversation resumes its latest session or
    * none, and keeping the ones before it would be a history nothing reads.
    *
-   * `turn` is which one is asking, and two turns in a conversation can overlap.
-   * A later arrival from an earlier turn is proof that they did, and neither
-   * session then holds the whole conversation — so the row is cleared instead,
-   * and the next turn is caught up from the thread, which does. */
+   *
+   * No ordering guard: `recordTurn` refuses a second turn while one is running,
+   * so a conversation's turns are a sequence and the session that finishes last
+   * is the one that started last. */
   recordResume(
     owner: Owner,
     conversation: string,
     key: ResumeKey,
     sessionId: string,
-    turn: string,
   ): Promise<void>;
   /** A client token for this member, good for `ttlMinutes`. The bot holds no
    * credential of its own (§6), so this is how it acts as whoever is asking —
@@ -377,18 +393,36 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async recordTurn(conversation, slackEventId) {
       const turn = await one<{ id: string }>(
-        `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
+        `INSERT INTO turns (id, conversation_id, slack_event_id)
+         SELECT $1, $2, $3
+          WHERE NOT EXISTS (
+            SELECT 1 FROM turns t
+             WHERE t.conversation_id = $2 AND t.status = 'running'
+               AND t.created_at > now() - make_interval(mins => $4))
          ON CONFLICT (slack_event_id) DO NOTHING RETURNING id`,
-        [randomUUID(), conversation, slackEventId],
+        [randomUUID(), conversation, slackEventId, TURN_STALE_MINUTES],
       );
+      // Nothing inserted is either of two answers, and the member is told a
+      // different thing for each — so which one is worth a second query.
+      if (!turn) {
+        const seen = await one<{ id: string }>(`SELECT id FROM turns WHERE slack_event_id = $1`, [
+          slackEventId,
+        ]);
+        return { refused: seen ? 'duplicate' : 'busy' };
+      }
       // Activity is the invocation, not the delivery: a member who mentioned the
       // bot today is using this thread whether or not the answer landed.
-      if (turn) {
-        await pool.query(`UPDATE conversations SET last_activity_at = now() WHERE id = $1`, [
-          conversation,
-        ]);
-      }
-      return turn?.id;
+      await pool.query(`UPDATE conversations SET last_activity_at = now() WHERE id = $1`, [
+        conversation,
+      ]);
+      return { turn: turn.id };
+    },
+    async closeTurn(conversation, turn, status) {
+      await pool.query(`UPDATE turns SET status = $3 WHERE id = $2 AND conversation_id = $1`, [
+        conversation,
+        turn,
+        status,
+      ]);
     },
     async markConversationSeen(conversation, seenThroughTs) {
       // Never backwards: a redelivery or a slow turn must not rewind the thread
@@ -589,28 +623,15 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return row?.session;
     },
-    async recordResume(owner, conversation, key, sessionId, turn) {
-      const latest = `SELECT max(t.seq) FROM turns t WHERE t.conversation_id = $2`;
-      const inserted = await pool.query(
+    async recordResume(owner, conversation, key, sessionId) {
+      await pool.query(
         `INSERT INTO conversation_resume (conversation_id, session_id, endpoint_id, agent, workspace_id)
-         SELECT $2, $6, $3, $4, $5 FROM conversations c
-          WHERE c.id = $2 AND c.user_id = $1
-            AND (SELECT t.seq FROM turns t WHERE t.id = $7) = (${latest})
+         SELECT $2, $6, $3, $4, $5 FROM conversations WHERE id = $2 AND user_id = $1
          ON CONFLICT (conversation_id) DO UPDATE
             SET session_id = excluded.session_id, endpoint_id = excluded.endpoint_id,
                 agent = excluded.agent, workspace_id = excluded.workspace_id`,
-        [owner, conversation, key.endpoint, key.agent, key.workspace ?? null, sessionId, turn],
+        [owner, conversation, key.endpoint, key.agent, key.workspace ?? null, sessionId],
       );
-      // Nothing inserted means a newer turn exists, so these two overlapped and
-      // neither session has both exchanges. Whatever is stored is one branch of
-      // a fork: dropped, so the next turn takes the thread instead.
-      if (inserted.rowCount === 0) {
-        await pool.query(
-          `DELETE FROM conversation_resume r USING conversations c
-            WHERE r.conversation_id = c.id AND c.id = $2 AND c.user_id = $1`,
-          [owner, conversation],
-        );
-      }
     },
     async mintClientToken(owner, ttlMinutes) {
       const token = randomUUID();
@@ -934,6 +955,7 @@ export function localStore(
     conversationForSource: needsDatabase,
     conversationForDm: needsDatabase,
     openConversation: needsDatabase,
+    closeTurn: needsDatabase,
     recordTurn: needsDatabase,
     markConversationSeen: needsDatabase,
     expireConversations: needsDatabase,

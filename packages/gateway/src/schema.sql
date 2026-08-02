@@ -188,15 +188,6 @@ UPDATE conversations SET last_activity_at = created_at WHERE last_activity_at IS
 ALTER TABLE conversations ALTER COLUMN last_activity_at SET DEFAULT now();
 ALTER TABLE conversations ALTER COLUMN last_activity_at SET NOT NULL;
 
--- Insertion order, because `created_at` is transaction time and two turns can
--- share it — and what decides which resume survives must not come down to a
--- uuid comparison. Added rather than declared above so an upgraded database
--- gets it too. The backfill numbers existing rows in heap order, which is not
--- their real order; it does not matter, because every turn recorded after the
--- migration outranks all of them and the comparison is only ever between turns
--- of one conversation happening now.
-ALTER TABLE turns ADD COLUMN IF NOT EXISTS seq bigserial;
-
 -- Added with §4's workspace picker; null on every conversation that predates it,
 -- which reads as "no preference yet" and takes the endpoint's first.
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS workspace_id text;

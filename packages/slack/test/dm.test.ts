@@ -21,6 +21,8 @@ function harness(
   over: {
     existing?: ConversationRef;
     turn?: boolean;
+    /** The thread is still working on the message before this one. */
+    busy?: boolean;
     endpoint?: TurnTarget | null;
     answer?: string;
     notices?: string[];
@@ -48,7 +50,7 @@ function harness(
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
   const marks: { channel: string; ts: string; state: MarkState }[] = [];
-  const remembered: Record<string, string>[] = [];
+  const finished: Record<string, string>[] = [];
   let asked = 0;
   const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
@@ -86,8 +88,8 @@ function harness(
         : Promise.resolve({ channel, ts: '300.0' });
     },
     destination: () => Promise.resolve(over.destination),
-    remember: (conversation, turn, session, ran) => {
-      remembered.push({ conversation, turn, session, ...ran });
+    finish: (conversation, turn, status, ran) => {
+      finished.push({ conversation, turn, status, ...ran });
       return Promise.resolve();
     },
     mark: (channel, ts, state) => {
@@ -98,7 +100,8 @@ function harness(
       turns.push(spec);
       return Promise.resolve({
         conversation: over.existing ?? CONVERSATION,
-        ...(over.turn === false ? {} : { turn: 'turn-1' }),
+        ...(over.busy ? { refused: 'busy' as const } : {}),
+        ...(over.turn === false ? { refused: 'duplicate' as const } : { turn: 'turn-1' }),
       });
     },
     endpoint: (conversation) => {
@@ -107,7 +110,7 @@ function harness(
       return Promise.resolve(selected ?? undefined);
     },
   };
-  return { deps, posts, turns, runs, marks, remembered, askedFor, asked: () => asked };
+  return { deps, posts, turns, runs, marks, finished, askedFor, asked: () => asked };
 }
 
 describe('dm message', () => {
@@ -198,6 +201,46 @@ describe('dm message', () => {
     );
     assert.deepEqual(posts, [], 'the turn is recorded before the post, so a repeat is silent');
     assert.equal(asked(), 0, 'and it costs the gateway nothing to find that out');
+  });
+
+  it('waits rather than running a second turn beside the first', async () => {
+    // Two at once fork the agent session the thread is carried on, and neither
+    // half then holds the whole conversation.
+    const { deps, posts, runs, asked } = harness({ existing: CONVERSATION, busy: true });
+    assert.equal(
+      await handleDm(
+        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+        deps,
+      ),
+      'still working',
+    );
+    assert.match(posts[0]!.text, /Still working on your last one/);
+    assert.deepEqual(runs, []);
+    // And it costs the gateway no credential to find that out.
+    assert.equal(asked(), 0);
+  });
+
+  it('closes the turn on every way out, or the thread stays busy forever', async () => {
+    const ask = { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' };
+    for (const [why, over, message, status] of [
+      ['nothing to ask', {}, { ...ask, text: '  ' }, 'cancelled'],
+      ['refused', { endpoint: null }, ask, 'cancelled'],
+      ['the run failed', { fails: new Error('gone') }, ask, 'failed'],
+    ] as const) {
+      const { deps, finished } = harness(over);
+      await handleDm(message, deps);
+      assert.deepEqual(
+        finished.map((f) => f.status),
+        [status],
+        why,
+      );
+    }
+
+    // Including the one that leaves through `announcing`: the answer landed,
+    // so the turn is over whether or not the member was told.
+    const { deps, finished } = harness({ answerPostFails: new Error('slack refused it') });
+    await assert.rejects(handleDm(ask, deps));
+    assert.equal(finished[0]!.status, 'completed');
   });
 
   it('runs the question on the member’s own machine and posts what came back', async () => {
@@ -353,7 +396,7 @@ describe('dm message', () => {
   });
 
   it('carries a resume the gateway offered, and remembers where the turn ran', async () => {
-    const { deps, posts, runs, remembered } = harness({
+    const { deps, posts, runs, finished } = harness({
       existing: CONVERSATION,
       endpoint: { ...READY, workspace: 'ws-1', resume: 'acp-0' },
       history: [{ ts: '210.0', author: 'U-nel', text: 'why is the deploy failing?' }],
@@ -368,11 +411,10 @@ describe('dm message', () => {
     assert.match(runs[0]!.context!, /why is the deploy failing/);
     assert.match(posts[0]!.text, /Picking up where it left off/);
     // Against what it ran under, since an id means nothing on another machine.
-    assert.deepEqual(remembered, [
+    assert.deepEqual(finished, [
       {
         conversation: 'conv-1',
-        // Which turn, so a pair that overlapped cannot let the slower one
-        // decide what the next message picks up.
+        status: 'completed',
         turn: 'turn-1',
         session: 'acp-1',
         endpoint: 'ep-1',

@@ -1751,7 +1751,7 @@ describe('tenancy', () => {
       // A redelivery finds its own work instead of repeating it, and must not
       // move the cursor — a delta read past '100.9' would skip the messages
       // between, which is the silent context loss §4 forbids.
-      assert.equal(await store.recordTurn(first.id, 'Ev-flow'), undefined);
+      assert.deepEqual(await store.recordTurn(first.id, 'Ev-flow'), { refused: 'duplicate' });
       // And never backwards, so a slow turn cannot re-send what was already read.
       await store.markConversationSeen(first.id, '100.4');
       assert.equal(
@@ -1815,13 +1815,7 @@ describe('tenancy', () => {
       });
       assert.ok(conversation);
       const ran = { endpoint: 'yves-mac', agent: 'codex', workspace: 'ws-1' };
-      const turn = async (event: string): Promise<string> => {
-        const id = await store.recordTurn(conversation.id, event);
-        assert.ok(id);
-        return id;
-      };
-      const first = await turn('rsm-Ev-1');
-      await store.recordResume(yves.owner, conversation.id, ran, 'acp-1', first);
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-1');
       assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
 
       // A session id is only meaningful against what minted it, so each of
@@ -1838,32 +1832,64 @@ describe('tenancy', () => {
       // The table has no member of its own, so the read is joined through the
       // conversation — asking by id alone would answer about someone else's.
       assert.equal(await store.resumeFor(zia.owner, conversation.id, ran), undefined);
-      await store.recordResume(zia.owner, conversation.id, ran, 'stolen', first);
+      await store.recordResume(zia.owner, conversation.id, ran, 'stolen');
       assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
 
       // Replaced, not appended: a conversation resumes its latest session or
       // none, and the ones before it are a history nothing reads.
-      const second = await turn('rsm-Ev-2');
-      await store.recordResume(yves.owner, conversation.id, ran, 'acp-2', second);
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-2');
       assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-2');
       const rows = await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`);
       assert.equal(rows.rows[0].n, 1);
 
-      // A late arrival from an earlier turn proves the two overlapped, and
-      // neither session then holds both exchanges — so the fork is dropped and
-      // the next turn falls back to the thread, which has all of it.
-      await store.recordResume(yves.owner, conversation.id, ran, 'acp-late', first);
-      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), undefined);
-
       // Unpair the machine and the ids that only mean anything on it go too,
       // without a line of code to remember that.
-      const third = await turn('rsm-Ev-3');
-      await store.recordResume(yves.owner, conversation.id, ran, 'acp-3', third);
       await pool.query(`DELETE FROM endpoints WHERE id = 'yves-mac'`);
       assert.equal(
         (await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`)).rows[0].n,
         0,
       );
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('gives a conversation one turn at a time, and says which refusal it is', async () => {
+    const url = pg.getConnectionUri();
+    const abe = await provision(url, { team: 'seq', slackUser: 'abe', endpoint: 'abe-mac' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const conversation = await store.openConversation(abe.owner, {
+        dmChannel: 'D-abe',
+        rootThread: '200.0',
+        endpoint: 'abe-mac',
+        agent: 'codex',
+      });
+      assert.ok(conversation);
+      const first = await store.recordTurn(conversation.id, 'seq-Ev-1');
+      assert.ok('turn' in first);
+
+      // Two turns at once fork the agent session the thread is carried on, so
+      // the second waits — and is told that rather than "already handled",
+      // which is a different thing and gets different words.
+      assert.deepEqual(await store.recordTurn(conversation.id, 'seq-Ev-2'), { refused: 'busy' });
+      assert.deepEqual(await store.recordTurn(conversation.id, 'seq-Ev-1'), {
+        refused: 'duplicate',
+      });
+
+      await store.closeTurn(conversation.id, first.turn, 'completed');
+      const second = await store.recordTurn(conversation.id, 'seq-Ev-2');
+      assert.ok('turn' in second);
+
+      // A bot that died mid-turn must not lock a member out of their own
+      // thread until somebody notices, so an unclosed one stops holding it.
+      await pool.query(
+        `UPDATE turns SET created_at = now() - interval '31 minutes' WHERE id = $1`,
+        [second.turn],
+      );
+      assert.ok('turn' in (await store.recordTurn(conversation.id, 'seq-Ev-3')));
     } finally {
       await pool.end();
       await store.close();
