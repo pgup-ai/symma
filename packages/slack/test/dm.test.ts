@@ -21,6 +21,8 @@ function harness(
   over: {
     existing?: ConversationRef;
     turn?: boolean;
+    /** The thread is still working on the message before this one. */
+    busy?: boolean;
     endpoint?: TurnTarget | null;
     answer?: string;
     notices?: string[];
@@ -34,6 +36,8 @@ function harness(
     budgetBytes?: number;
     /** Fails the answer post, which lands after the run is already over. */
     answerPostFails?: Error;
+    /** Fails every post, including the one an early exit says its piece with. */
+    postFails?: Error;
     /** Where a share would land; absent is a conversation opened in the DM. */
     destination?: { channel: string; thread: string };
   } = {},
@@ -48,6 +52,7 @@ function harness(
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
   const marks: { channel: string; ts: string; state: MarkState }[] = [];
+  const finished: Record<string, string>[] = [];
   let asked = 0;
   const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
@@ -64,7 +69,11 @@ function harness(
       runs.push(spec);
       return over.fails
         ? Promise.reject(over.fails)
-        : Promise.resolve({ text: over.answer ?? 'the answer', notices: over.notices ?? [] });
+        : Promise.resolve({
+            text: over.answer ?? 'the answer',
+            notices: over.notices ?? [],
+            session: 'acp-1',
+          });
     },
     find: () => Promise.resolve(over.existing),
     post: (channel, text, threadTs, offerShare, notices) => {
@@ -75,12 +84,17 @@ function harness(
         ...(offerShare ? { offerShare } : {}),
         ...(notices?.length ? { notices } : {}),
       });
+      if (over.postFails) return Promise.reject(over.postFails);
       // The acknowledgement is always first; anything later is the answer.
       return over.answerPostFails && posts.length > 1
         ? Promise.reject(over.answerPostFails)
         : Promise.resolve({ channel, ts: '300.0' });
     },
     destination: () => Promise.resolve(over.destination),
+    finish: (conversation, turn, status, ran) => {
+      finished.push({ conversation, turn, status, ...ran });
+      return Promise.resolve();
+    },
     mark: (channel, ts, state) => {
       marks.push({ channel, ts, state });
       return Promise.resolve();
@@ -89,7 +103,13 @@ function harness(
       turns.push(spec);
       return Promise.resolve({
         conversation: over.existing ?? CONVERSATION,
-        ...(over.turn === false ? {} : { turn: 'turn-1' }),
+        // Neither refusal carries a turn, which is what the gateway sends and
+        // what a harness handing back both would hide.
+        ...(over.busy
+          ? { refused: 'busy' as const }
+          : over.turn === false
+            ? { refused: 'duplicate' as const }
+            : { turn: 'turn-1' }),
       });
     },
     endpoint: (conversation) => {
@@ -98,7 +118,7 @@ function harness(
       return Promise.resolve(selected ?? undefined);
     },
   };
-  return { deps, posts, turns, runs, marks, askedFor, asked: () => asked };
+  return { deps, posts, turns, runs, marks, finished, askedFor, asked: () => asked };
 }
 
 describe('dm message', () => {
@@ -191,6 +211,52 @@ describe('dm message', () => {
     assert.equal(asked(), 0, 'and it costs the gateway nothing to find that out');
   });
 
+  it('waits rather than running a second turn beside the first', async () => {
+    // Two at once fork the agent session the thread is carried on, and neither
+    // half then holds the whole conversation.
+    const { deps, posts, runs, asked } = harness({ existing: CONVERSATION, busy: true });
+    assert.equal(
+      await handleDm(
+        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+        deps,
+      ),
+      'still working',
+    );
+    assert.match(posts[0]!.text, /Still working on your last one/);
+    assert.deepEqual(runs, []);
+    // And it costs the gateway no credential to find that out.
+    assert.equal(asked(), 0);
+  });
+
+  it('closes the turn on every way out, or the thread stays busy forever', async () => {
+    const ask = { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' };
+    for (const [why, over, message, status] of [
+      ['nothing to ask', {}, { ...ask, text: '  ' }, 'cancelled'],
+      ['refused', { endpoint: null }, ask, 'cancelled'],
+      ['the run failed', { fails: new Error('gone') }, ask, 'failed'],
+    ] as const) {
+      const { deps, finished } = harness(over);
+      await handleDm(message, deps);
+      assert.deepEqual(
+        finished.map((f) => f.status),
+        [status],
+        why,
+      );
+    }
+
+    // Including when the message saying so does not land: the turn is decided
+    // by then, and holding the thread until it goes stale is the worse half.
+    const refused = harness({ endpoint: null, postFails: new Error('slack refused it') });
+    await assert.rejects(handleDm(ask, refused.deps));
+    assert.equal(refused.finished[0]!.status, 'cancelled');
+
+    // And the one that leaves through `announcing`: the answer landed, so the
+    // turn is over whether or not the member was told.
+    const { deps, finished } = harness({ answerPostFails: new Error('slack refused it') });
+    await assert.rejects(handleDm(ask, deps));
+    assert.equal(finished[0]!.status, 'completed');
+  });
+
   it('runs the question on the member’s own machine and posts what came back', async () => {
     const { deps, posts, runs } = harness({ answer: 'the deploy fails on a missing env var' });
     assert.equal(
@@ -271,15 +337,14 @@ describe('dm message', () => {
     );
 
     assert.match(posts[0]!.text, /Catching it up from this thread/);
-    // Ahead of the question, and marked as a transcript rather than state.
-    assert.match(runs[0]!.prompt, /why is the deploy failing\?/);
-    assert.match(runs[0]!.prompt, /transcript, not/);
-    assert.ok(
-      runs[0]!.prompt.endsWith('and now?'),
-      'the question is last, after what came before it',
-    );
-    // Once, not twice: the thread above contains it and so does the prompt.
-    assert.equal(runs[0]!.prompt.match(/and now\?/g)?.length, 1);
+    // Apart from the question, because whether the agent still holds the
+    // session is not known until it has been asked — the driver drops one or
+    // the other once it does.
+    assert.equal(runs[0]!.prompt, 'and now?');
+    assert.match(runs[0]!.context!, /why is the deploy failing\?/);
+    assert.match(runs[0]!.context!, /transcript, not/);
+    // Once, not twice: the thread above contains it and so does the question.
+    assert.equal(runs[0]!.context!.match(/and now\?/g)?.length, undefined);
   });
 
   it('says how much of the thread did not fit', async () => {
@@ -342,6 +407,35 @@ describe('dm message', () => {
     const answered = posts.at(-1)!;
     assert.equal(answered.text, 'the deploy fails on a missing env var');
     assert.deepEqual(answered.notices, ['Warning: skill descriptions were shortened.']);
+  });
+
+  it('carries a resume the gateway offered, and remembers where the turn ran', async () => {
+    const { deps, posts, runs, finished } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', resume: 'acp-0' },
+      history: [{ ts: '210.0', author: 'U-nel', text: 'why is the deploy failing?' }],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      deps,
+    );
+    assert.equal(runs[0]!.resume, 'acp-0');
+    // The thread goes too: the offer is not the outcome, and a resume that the
+    // agent refuses would otherwise arrive with nothing.
+    assert.match(runs[0]!.context!, /why is the deploy failing/);
+    assert.match(posts[0]!.text, /Picking up where it left off/);
+    // Against what it ran under, since an id means nothing on another machine.
+    assert.deepEqual(finished, [
+      {
+        conversation: 'conv-1',
+        status: 'completed',
+        turn: 'turn-1',
+        session: 'acp-1',
+        endpoint: 'ep-1',
+        agent: 'kilo',
+        workspace: 'ws-1',
+      },
+    ]);
   });
 
   it('offers a share only when there is a thread to share back to', async () => {

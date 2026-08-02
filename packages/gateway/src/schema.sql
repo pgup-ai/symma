@@ -151,6 +151,43 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   PRIMARY KEY (conversation_id, ordinal)
 );
 
+-- §4's second rung. Held apart from `conversations` because it is only valid
+-- against the machine, agent and directory it was minted under, and those are
+-- written on that table once at insert — they say where a conversation began,
+-- not where its last turn ran. The endpoint cascade is the point: unpair a
+-- laptop and every session id that only means anything on it goes with it.
+--
+-- Not `conversation_sessions`: that one's `session_id` references the relay's
+-- sessions, and an agent's own id is not one of those.
+-- `status` was never written before this, so every turn a database already
+-- holds is `running` and any conversation with two of them would refuse the
+-- index below — which is every database that has run at all. All but the newest
+-- are retired first; a second run finds nothing to do.
+UPDATE turns SET status = 'cancelled'
+ WHERE status = 'running'
+   AND id NOT IN (SELECT DISTINCT ON (conversation_id) id
+                    FROM turns WHERE status = 'running'
+                   ORDER BY conversation_id, created_at DESC, id DESC);
+
+-- One running turn per conversation, enforced here because a check-and-insert
+-- is not: under READ COMMITTED two concurrent events both see no running turn
+-- and both insert. Partial, so the finished ones are unconstrained.
+CREATE UNIQUE INDEX IF NOT EXISTS turns_one_running_per_conversation
+  ON turns (conversation_id) WHERE status = 'running';
+
+CREATE TABLE IF NOT EXISTS conversation_resume (
+  conversation_id text PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  session_id      text NOT NULL,
+  endpoint_id     text NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+  agent           text NOT NULL,
+  -- Null is the no-workspace mode, which is a match for another turn that also
+  -- has none — the comparison is on sameness, not on presence.
+  workspace_id    text
+);
+-- Postgres indexes the primary key and not the foreign one, so unpairing a
+-- machine would scan every resume any member holds to find its rows.
+CREATE INDEX IF NOT EXISTS conversation_resume_endpoint ON conversation_resume (endpoint_id);
+
 -- #27 shipped `conversations`, so CREATE TABLE IF NOT EXISTS skips it on any
 -- database that already ran that release and these columns would never arrive.
 -- Declared above for a fresh database and added here for an upgraded one —

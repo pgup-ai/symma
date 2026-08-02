@@ -1751,7 +1751,7 @@ describe('tenancy', () => {
       // A redelivery finds its own work instead of repeating it, and must not
       // move the cursor — a delta read past '100.9' would skip the messages
       // between, which is the silent context loss §4 forbids.
-      assert.equal(await store.recordTurn(first.id, 'Ev-flow'), undefined);
+      assert.deepEqual(await store.recordTurn(first.id, 'Ev-flow'), { refused: 'duplicate' });
       // And never backwards, so a slow turn cannot re-send what was already read.
       await store.markConversationSeen(first.id, '100.4');
       assert.equal(
@@ -1794,6 +1794,134 @@ describe('tenancy', () => {
       );
       assert.equal(await store.expireConversations(30), 1);
       assert.equal((await pool.query(mine, [first.id])).rows[0].n, 0);
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('offers a resume only to its owner, and only where it still means anything', async () => {
+    const url = pg.getConnectionUri();
+    const yves = await provision(url, { team: 'rsm', slackUser: 'yves', endpoint: 'yves-mac' });
+    const zia = await provision(url, { team: 'rsm', slackUser: 'zia', endpoint: 'zia-mac' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const conversation = await store.openConversation(yves.owner, {
+        dmChannel: 'D-yves',
+        rootThread: '200.0',
+        endpoint: 'yves-mac',
+        agent: 'codex',
+      });
+      assert.ok(conversation);
+      const ran = { endpoint: 'yves-mac', agent: 'codex', workspace: 'ws-1' };
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-1');
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
+
+      // A session id is only meaningful against what minted it, so each of
+      // these is a different session and none of them is this one.
+      for (const [what, key] of [
+        ['another machine', { ...ran, endpoint: 'zia-mac' }],
+        ['another agent', { ...ran, agent: 'kilo' }],
+        ['another directory', { ...ran, workspace: 'ws-2' }],
+        ['no directory at all', { endpoint: 'yves-mac', agent: 'codex' }],
+      ] as const) {
+        assert.equal(await store.resumeFor(yves.owner, conversation.id, key), undefined, what);
+      }
+
+      // The table has no member of its own, so the read is joined through the
+      // conversation — asking by id alone would answer about someone else's.
+      assert.equal(await store.resumeFor(zia.owner, conversation.id, ran), undefined);
+      await store.recordResume(zia.owner, conversation.id, ran, 'stolen');
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
+
+      // Replaced, not appended: a conversation resumes its latest session or
+      // none, and the ones before it are a history nothing reads.
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-2');
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-2');
+      const rows = await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`);
+      assert.equal(rows.rows[0].n, 1);
+
+      // Unpair the machine and the ids that only mean anything on it go too,
+      // without a line of code to remember that.
+      await pool.query(`DELETE FROM endpoints WHERE id = 'yves-mac'`);
+      assert.equal(
+        (await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`)).rows[0].n,
+        0,
+      );
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
+  it('gives a conversation one turn at a time, and says which refusal it is', async () => {
+    const url = pg.getConnectionUri();
+    const abe = await provision(url, { team: 'seq', slackUser: 'abe', endpoint: 'abe-mac' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const conversation = await store.openConversation(abe.owner, {
+        dmChannel: 'D-abe',
+        rootThread: '200.0',
+        endpoint: 'abe-mac',
+        agent: 'codex',
+      });
+      assert.ok(conversation);
+      // Every turn a database already holds is `running`, because nothing wrote
+      // that column until now — so the index has to be reachable from a state
+      // it would itself refuse. Dropping it is what makes that state buildable.
+      await pool.query(`DROP INDEX turns_one_running_per_conversation`);
+      await pool.query(
+        `INSERT INTO turns (id, conversation_id, slack_event_id, status)
+         VALUES ('legacy-1', $1, 'seq-old-1', 'running'),
+                ('legacy-2', $1, 'seq-old-2', 'running')`,
+        [conversation.id],
+      );
+      await openStore(url, join(import.meta.dirname, '../src/schema.sql')).then((s) => s.close());
+      assert.deepEqual(
+        (
+          await pool.query(
+            `SELECT count(*)::int AS n FROM turns WHERE conversation_id = $1 AND status = 'running'`,
+            [conversation.id],
+          )
+        ).rows[0],
+        { n: 1 },
+        'all but the newest are retired, or the index cannot be created at all',
+      );
+      await pool.query(`UPDATE turns SET status = 'cancelled' WHERE conversation_id = $1`, [
+        conversation.id,
+      ]);
+
+      const first = await store.recordTurn(conversation.id, 'seq-Ev-1');
+      assert.ok('turn' in first);
+
+      // Two turns at once fork the agent session the thread is carried on, so
+      // the second waits — and is told that rather than "already handled",
+      // which is a different thing and gets different words.
+      assert.deepEqual(await store.recordTurn(conversation.id, 'seq-Ev-2'), { refused: 'busy' });
+      assert.deepEqual(await store.recordTurn(conversation.id, 'seq-Ev-1'), {
+        refused: 'duplicate',
+      });
+
+      await store.closeTurn(abe.owner, conversation.id, first.turn, 'completed');
+      const second = await store.recordTurn(conversation.id, 'seq-Ev-2');
+      assert.ok('turn' in second);
+
+      // A conversation id from a caller is a claim, so closing one is scoped
+      // like every other write — otherwise a mistaken id lets somebody else's
+      // next message run beside the turn they already have going.
+      const other = await provision(url, { team: 'seq', slackUser: 'bex', endpoint: 'bex-mac' });
+      await store.closeTurn(other.owner, conversation.id, second.turn, 'completed');
+      assert.deepEqual(await store.recordTurn(conversation.id, 'seq-Ev-x'), { refused: 'busy' });
+
+      // A bot that died mid-turn must not lock a member out of their own
+      // thread until somebody notices, so an unclosed one stops holding it.
+      await pool.query(
+        `UPDATE turns SET created_at = now() - interval '31 minutes' WHERE id = $1`,
+        [second.turn],
+      );
+      assert.ok('turn' in (await store.recordTurn(conversation.id, 'seq-Ev-3')));
     } finally {
       await pool.end();
       await store.close();

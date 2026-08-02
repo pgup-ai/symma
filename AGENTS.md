@@ -48,12 +48,14 @@ is here, and no rule below depends on reading it.
 `/connect`, mentions, DM turns, §3's presence copy, and driving one prompt on
 the member's own machine — in one of §4's allowlisted directories when their
 companion offers any, and an empty temp one when it offers none. The choice is
-per conversation and named in the DM root. Each turn is still its own ACP
-session, so a follow-up is caught up from the DM thread under the same byte
-budget and told that is a transcript rather than a resume (§4's third rung) —
-but only because nothing remembers a session id yet. `driveAcpSession` takes a
-`resume` now, and codex-acp 1.1.7 does advertise `loadSession`; the claim that
-nothing did was never checked and was false. An answer leaves the DM only when the member
+per conversation and named in the DM root. A follow-up reattaches to the agent
+session the last turn ran in when that machine, agent and directory are still
+the ones it was minted under (§4's second rung), and is caught up from the DM
+thread when they are not. Both travel every turn: whether the agent still holds
+the session is not known until it has been asked, so the transcript goes with
+the resume and the driver drops whichever does not apply. A conversation runs
+one turn at a time — two at once fork the session that carries it, and neither
+half then holds the whole thread — so a second message waits and is told so. An answer leaves the DM only when the member
 presses the button (§5): the gateway states where it may go, the shared post
 names who approved it, and a destination gone bad keeps the answer here.
 

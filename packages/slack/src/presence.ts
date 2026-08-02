@@ -36,6 +36,8 @@ export type TurnDecision =
       token: string;
       workspace?: string;
       label?: string;
+      /** An agent session this thread can pick up rather than start over (§4). */
+      resume?: string;
     }
   | { run: false; why: string; because: RefusalReason };
 
@@ -58,6 +60,7 @@ export function decideTurn(target: TurnTarget | undefined): TurnDecision {
           token: target.token,
           ...(target.workspace ? { workspace: target.workspace } : {}),
           ...(target.workspaceLabel ? { label: target.workspaceLabel } : {}),
+          ...(target.resume ? { resume: target.resume } : {}),
         }
       : { run: false, because: 'unusable', why: unusable };
   }

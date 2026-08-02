@@ -3,10 +3,10 @@
  * is; a top-level message opens one with no source (§4).
  *
  * The turn is recorded, then run on the member's own machine — or refused in
- * §3's words when that machine cannot take it. Each turn is still its own ACP
- * session: `driveAcpSession` can reattach to one now, but nothing here has a
- * session id to hand it, so a follow-up is caught up from this thread and told
- * that is a transcript rather than a resume (§4).
+ * §3's words when that machine cannot take it. A follow-up reattaches to the
+ * session the last turn ran in when the gateway still offers one, and is caught
+ * up from this thread when it does not — both travel, because which applies is
+ * not known until the agent has been asked (§4).
  */
 import type { TurnTarget } from '@symma/protocol';
 
@@ -51,6 +51,7 @@ export type DmOutcome =
   | 'resumed'
   | 'opened'
   | 'already handled'
+  | 'still working'
   | 'nothing to ask'
   | 'failed'
   | `refused: ${RefusalReason}`;
@@ -68,6 +69,10 @@ export interface RunSpec {
   /** `provider/model`, always — every spec parses it that way and reads the half
    * after the slash. A bare `default` is refused before any agent sees it. */
   model: string;
+  /** A session to pick up, and what to catch a fresh one up with instead. Both
+   * travel: which applies is not known until the agent has been asked. */
+  resume?: string;
+  context?: string;
 }
 
 export interface DmDeps {
@@ -79,12 +84,24 @@ export interface DmDeps {
     dmChannel: string;
     rootThread: string;
     slackEventId: string;
-  }) => Promise<{ conversation: ConversationRef; turn?: string }>;
+  }) => Promise<{ conversation: ConversationRef; turn?: string; refused?: 'duplicate' | 'busy' }>;
   /** Drives one prompt to its answer on the member's machine. Rejects rather
    * than returning a failure, so the transport's own errors arrive intact.
    * `notices` is what the agent said about itself rather than about the
-   * question, kept apart so the answer is not read as carrying it. */
-  run: (spec: RunSpec) => Promise<{ text: string; notices: string[] }>;
+   * question, kept apart so the answer is not read as carrying it. `session` is
+   * where it ran, for the next turn in this thread to pick up. */
+  run: (spec: RunSpec) => Promise<{ text: string; notices: string[]; session: string }>;
+  /** Ends the turn, and remembers the session it ran in when there was one —
+   * against what it ran under, since an id means nothing on another machine,
+   * agent or directory. Every path that opened a turn calls this, including the
+   * ones that never ran: a turn left open tells the next message the thread is
+   * still busy. Fails open, like every auxiliary write. */
+  finish: (
+    conversation: string,
+    turn: string,
+    status: 'completed' | 'failed' | 'cancelled',
+    ran?: { session: string; endpoint: string; agent: string; workspace?: string },
+  ) => Promise<void>;
   /** The DM thread itself, which is the durable transcript a follow-up is
    * caught up from. Undefined when the bot cannot read the channel. */
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
@@ -114,11 +131,11 @@ const REPLAY =
   'so re-read anything you need.';
 
 /**
- * §4's third rung, which is the only one reachable from here: `runRemotePrompt`
- * closes its session when the prompt returns, and nothing remembers the id that
- * would reattach to it, so every follow-up is the "cannot reload" case. The DM
- * thread is the transcript — the messages the member can scroll — under the
- * byte ceiling a mention's context already runs under.
+ * §4's third rung, and still the one every follow-up needs to hand over: a
+ * resume is an offer until the agent answers it, so this is what a turn that
+ * ends up in a fresh session arrives with. The DM thread is the transcript —
+ * the messages the member can scroll — under the byte ceiling a mention's
+ * context already runs under.
  *
  * The member's own message is dropped: Slack returns the whole thread including
  * the one being handled, and the prompt carries it once on its own. A thread
@@ -167,11 +184,23 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const rootThread = message.threadTs ?? message.ts;
   const existing = await deps.find(message.channel, rootThread);
 
-  const { conversation, turn } = await deps.turn({
+  const { conversation, turn, refused } = await deps.turn({
     dmChannel: message.channel,
     rootThread,
     slackEventId: message.eventId,
   });
+  // A thread is a sequence. Two turns at once fork the agent session that
+  // carries it, and neither half then holds the whole conversation — so the
+  // second one waits, and is told rather than left wondering. Before the guard
+  // below, which a refusal also trips: neither kind carries a turn.
+  if (refused === 'busy') {
+    await deps.post(
+      conversation.dmChannel,
+      'Still working on your last one — send this again when it lands.',
+      conversation.rootThread,
+    );
+    return 'still working';
+  }
   // Recorded before anything is posted, so a Slack redelivery answers with
   // silence rather than a second acknowledgement.
   if (!turn) return 'already handled';
@@ -179,6 +208,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // A file with no caption is an ordinary message with an empty prompt. Caught
   // before the ask below, so it neither mints a token nor starts a run.
   if (!message.text.trim()) {
+    // Closed before the post, not after: this turn is already decided, and a
+    // Slack error here would otherwise hold the thread until it went stale.
+    await deps.finish(conversation.id, turn, 'cancelled');
     await deps.post(
       conversation.dmChannel,
       'Send me a question with that and I will pass it to your agent.',
@@ -191,10 +223,14 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // and, since asking mints a token, costs it no credential either.
   const decision = decideTurn(await deps.endpoint(conversation.id));
   if (!decision.run) {
+    await deps.finish(conversation.id, turn, 'cancelled');
     await deps.post(conversation.dmChannel, decision.why, conversation.rootThread);
     return `refused: ${decision.because}`;
   }
 
+  // Even when a resume is on offer, because whether the agent still has that
+  // session is not known until it has been asked — and arriving without the
+  // thread is the half that cannot be recovered from (§4).
   const caught = existing ? await catchUp(message, conversation, deps) : undefined;
 
   // A run has twenty minutes to answer, so silence that long reads as broken.
@@ -207,15 +243,18 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const scope = decision.label
     ? `On it, in \`${decision.label.replaceAll('`', '')}\`.`
     : 'On it. It has no access to your files, so keep the question self-contained.';
+  // The offer, not the outcome: the agent has not been asked yet, so this says
+  // what will be tried rather than claiming a resume that may not happen.
+  const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
   await deps.post(
     conversation.dmChannel,
-    caught ? `${scope} ${caught.note}` : scope,
+    note ? `${scope} ${note}` : scope,
     conversation.rootThread,
   );
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  let answer: { text: string; notices: string[] };
+  let answer: { text: string; notices: string[]; session: string };
   try {
     answer = await deps.run({
       conversation: conversation.id,
@@ -225,13 +264,16 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // §5 wants a per-agent default with an override; until the override
       // exists this is the default, and the prefix is what makes it parse.
       model: `${decision.agent}/default`,
-      prompt: caught ? `${caught.context}\n\n${message.text}` : message.text,
+      prompt: message.text,
+      ...(caught ? { context: caught.context } : {}),
+      ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
     });
   } catch (error) {
     // Posted into the thread they are watching rather than left to the socket's
     // catch, which answers at the DM root where this reply is not.
     deps.log(`run failed: ${String(error)}`);
+    await deps.finish(conversation.id, turn, 'failed');
     await deps.mark(message.channel, message.ts, 'failed');
     await deps.post(
       conversation.dmChannel,
@@ -241,6 +283,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return 'failed';
   }
 
+  const ran = {
+    session: answer.session,
+    endpoint: decision.endpoint,
+    agent: decision.agent,
+    ...(decision.workspace ? { workspace: decision.workspace } : {}),
+  };
   // §5: the answer is a private draft, and the button is the only way it leaves.
   // Nowhere to go back to means no button, rather than one that would refuse
   // itself when pressed.
@@ -259,8 +307,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // failed. Leaving the mark saying it is still going would outlive that
     // message and be the last thing they are told.
     await deps.mark(message.channel, message.ts, 'failed');
+    await deps.finish(conversation.id, turn, 'completed', ran);
     throw error;
   }
   await deps.mark(message.channel, message.ts, 'done');
+  await deps.finish(conversation.id, turn, 'completed', ran);
   return existing ? 'resumed' : 'opened';
 }

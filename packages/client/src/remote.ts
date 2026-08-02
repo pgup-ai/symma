@@ -49,6 +49,14 @@ export interface RemoteAcpConfig {
   /** Receives `AcpSessionResult.notices` — what the agent said about itself
    * rather than about the prompt. Absent drops them. */
   onNotice?: (notice: string) => void;
+  /** An agent session to reattach to, and what a fresh one would need instead.
+   * Which happened is not known until the load is tried, so both are handed
+   * over and the driver uses the one that applies. */
+  resume?: string;
+  context?: string;
+  /** The session the turn ran in, for a caller that means to resume it next
+   * time. Equal to `resume` when that was honoured. */
+  onSession?: (sessionId: string) => void;
   /** Checked out by the companion so the agent can explore the code it reviews. */
   repo?: string;
   ref?: string;
@@ -260,6 +268,8 @@ export async function runRemotePrompt(
             model,
             ...(ack.modelCandidates ? { configOptionModelIds: ack.modelCandidates } : {}),
             ...(ack.requirePlanMode ? { requirePlanMode: true } : {}),
+            ...(config.resume !== undefined ? { resume: config.resume } : {}),
+            ...(config.context !== undefined ? { context: config.context } : {}),
           },
         ),
         closed.promise,
@@ -271,15 +281,17 @@ export async function runRemotePrompt(
       `${label} prompt complete via gateway: stopReason=${result.stopReason} last-message=${result.text.length} chars`,
     );
     // Fails open, and one at a time: the answer is already in hand, so neither
-    // a sink that throws nor the notices after it are worth losing it for
+    // a sink that throws nor the ones after it are worth losing it for
     // (AGENTS.md, "auxiliary sessions fail open").
-    for (const notice of result.notices) {
+    const deliver = (what: string, sink: () => void): void => {
       try {
-        config.onNotice?.(notice);
+        sink();
       } catch (error) {
-        log(`${label}: notice sink threw, dropping one: ${String(error)}`);
+        log(`${label}: ${what} sink threw, dropping one: ${String(error)}`);
       }
-    }
+    };
+    deliver('session', () => config.onSession?.(result.sessionId));
+    for (const notice of result.notices) deliver('notice', () => config.onNotice?.(notice));
     if (!result.text) {
       throw new Error(
         `${label}: agent produced no assistant message (stopReason=${result.stopReason})`,

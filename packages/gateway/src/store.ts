@@ -31,6 +31,25 @@ export interface PairedEndpoint {
   lastSeenAt: number | null;
 }
 
+/** How a turn ended. `cancelled` covers the ones that never ran at all — a
+ * refusal, or a message with no question in it. */
+export type TurnStatus = 'completed' | 'failed' | 'cancelled';
+
+export type TurnOpened = { turn: string } | { refused: 'duplicate' | 'busy' };
+
+/** How long a turn that never closed keeps a thread to itself. Past it the
+ * process that owned it is gone — `runRemotePrompt` gives up well before — and
+ * a member whose bot crashed mid-turn must not be locked out of their own
+ * thread until somebody notices. */
+const TURN_STALE_MINUTES = 30;
+
+/** What an agent session id is only meaningful against (§4). */
+export interface ResumeKey {
+  endpoint: string;
+  agent: string;
+  workspace?: string;
+}
+
 export interface Conversation {
   id: string;
   dmChannel: string;
@@ -86,9 +105,17 @@ export interface Store {
       agent?: string;
     },
   ): Promise<Conversation | undefined>;
-  /** Records one invocation. Undefined when this Slack event already made a turn
-   * — which is how a redelivery finds its own work rather than repeating it. */
-  recordTurn(conversation: string, slackEventId: string): Promise<string | undefined>;
+  /** Records one invocation. `duplicate` is this Slack event already having a
+   * turn, which is how a redelivery finds its own work rather than repeating it.
+   * `busy` is a conversation with one still running: a thread is a sequence, and
+   * two turns at once fork the agent session that carries it. */
+  recordTurn(conversation: string, slackEventId: string): Promise<TurnOpened>;
+  /** Ends it, so the next message in the thread is not told it is busy forever.
+   * Every path that opened one closes it, including the ones that never ran.
+   * Owner-scoped like every other write here: a conversation id from a caller
+   * is a claim, and closing somebody else's turn would let their next message
+   * run beside the one already going. */
+  closeTurn(owner: Owner, conversation: string, turn: string, status: TurnStatus): Promise<void>;
   /** Advances the cursor, once the member has actually been shown that far. Kept
    * apart from `recordTurn` because a turn that fails to deliver must not leave
    * the thread marked read: the next mention would filter out what nobody saw,
@@ -147,6 +174,24 @@ export interface Store {
   /** Records what this conversation ran on, so the next turn in the thread lands
    * on the same project (§4) rather than wherever the endpoint lists first. */
   bindConversation(owner: Owner, conversation: string, workspaceId: string): Promise<void>;
+  /** The agent session this conversation last ran in, or undefined when it ran
+   * somewhere this one cannot reach. A session id means nothing off the machine
+   * that minted it, and little under a different agent or in another directory,
+   * so the key is matched rather than the conversation alone. */
+  resumeFor(owner: Owner, conversation: string, key: ResumeKey): Promise<string | undefined>;
+  /** Replaces whatever was there: a conversation resumes its latest session or
+   * none, and keeping the ones before it would be a history nothing reads.
+   *
+   *
+   * No ordering guard: `recordTurn` refuses a second turn while one is running,
+   * so a conversation's turns are a sequence and the session that finishes last
+   * is the one that started last. */
+  recordResume(
+    owner: Owner,
+    conversation: string,
+    key: ResumeKey,
+    sessionId: string,
+  ): Promise<void>;
   /** A client token for this member, good for `ttlMinutes`. The bot holds no
    * credential of its own (§6), so this is how it acts as whoever is asking —
    * for one turn, rather than by being handed a standing key to them. */
@@ -350,19 +395,45 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       return landed && { id, dmChannel: spec.dmChannel, rootThread: spec.rootThread };
     },
     async recordTurn(conversation, slackEventId) {
-      const turn = await one<{ id: string }>(
-        `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
-         ON CONFLICT (slack_event_id) DO NOTHING RETURNING id`,
-        [randomUUID(), conversation, slackEventId],
+      // Retired first, so the index below does not hold a thread against a bot
+      // that died mid-turn. Idempotent, which is why it needs no transaction:
+      // the index is what actually decides, and this only widens what it lets
+      // through.
+      await pool.query(
+        `UPDATE turns SET status = 'cancelled'
+          WHERE conversation_id = $1 AND status = 'running'
+            AND created_at < now() - make_interval(mins => $2)`,
+        [conversation, TURN_STALE_MINUTES],
       );
+      let turn: { id: string };
+      try {
+        turn = (await one<{ id: string }>(
+          `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
+           RETURNING id`,
+          [randomUUID(), conversation, slackEventId],
+        ))!;
+      } catch (error) {
+        // Which constraint says which answer, and the member is told a
+        // different thing for each.
+        const constraint = (error as { constraint?: string }).constraint;
+        if (constraint === 'turns_one_per_slack_event') return { refused: 'duplicate' };
+        if (constraint === 'turns_one_running_per_conversation') return { refused: 'busy' };
+        throw error;
+      }
       // Activity is the invocation, not the delivery: a member who mentioned the
       // bot today is using this thread whether or not the answer landed.
-      if (turn) {
-        await pool.query(`UPDATE conversations SET last_activity_at = now() WHERE id = $1`, [
-          conversation,
-        ]);
-      }
-      return turn?.id;
+      await pool.query(`UPDATE conversations SET last_activity_at = now() WHERE id = $1`, [
+        conversation,
+      ]);
+      return { turn: turn.id };
+    },
+    async closeTurn(owner, conversation, turn, status) {
+      await pool.query(
+        `UPDATE turns t SET status = $4
+           FROM conversations c
+          WHERE t.id = $3 AND t.conversation_id = c.id AND c.id = $2 AND c.user_id = $1`,
+        [owner, conversation, turn, status],
+      );
     },
     async markConversationSeen(conversation, seenThroughTs) {
       // Never backwards: a redelivery or a slow turn must not rewind the thread
@@ -546,6 +617,31 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       await pool.query(
         `UPDATE conversations SET workspace_id = $3 WHERE id = $2 AND user_id = $1`,
         [owner, conversation, workspaceId],
+      );
+    },
+    async resumeFor(owner, conversation, key) {
+      // Joined through `conversations` for the owner check: the resume table
+      // has no user of its own, and reading one by id alone would answer about
+      // somebody else's thread.
+      const row = await one<{ session: string }>(
+        `SELECT r.session_id AS session
+           FROM conversation_resume r
+           JOIN conversations c ON c.id = r.conversation_id
+          WHERE c.user_id = $1 AND r.conversation_id = $2
+            AND r.endpoint_id = $3 AND r.agent = $4
+            AND r.workspace_id IS NOT DISTINCT FROM $5`,
+        [owner, conversation, key.endpoint, key.agent, key.workspace ?? null],
+      );
+      return row?.session;
+    },
+    async recordResume(owner, conversation, key, sessionId) {
+      await pool.query(
+        `INSERT INTO conversation_resume (conversation_id, session_id, endpoint_id, agent, workspace_id)
+         SELECT $2, $6, $3, $4, $5 FROM conversations WHERE id = $2 AND user_id = $1
+         ON CONFLICT (conversation_id) DO UPDATE
+            SET session_id = excluded.session_id, endpoint_id = excluded.endpoint_id,
+                agent = excluded.agent, workspace_id = excluded.workspace_id`,
+        [owner, conversation, key.endpoint, key.agent, key.workspace ?? null, sessionId],
       );
     },
     async mintClientToken(owner, ttlMinutes) {
@@ -842,6 +938,8 @@ export function localStore(
     mintClientToken: needsDatabase,
     bindConversation: needsDatabase,
     conversationForId: needsDatabase,
+    recordResume: needsDatabase,
+    resumeFor: needsDatabase,
     expireTokens: needsDatabase,
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;
@@ -868,6 +966,7 @@ export function localStore(
     conversationForSource: needsDatabase,
     conversationForDm: needsDatabase,
     openConversation: needsDatabase,
+    closeTurn: needsDatabase,
     recordTurn: needsDatabase,
     markConversationSeen: needsDatabase,
     expireConversations: needsDatabase,

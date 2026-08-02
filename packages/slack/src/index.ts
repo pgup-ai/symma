@@ -12,6 +12,7 @@ import { handleDm, isMemberDm, type RunSpec } from './dm.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import { slackApi, SHARE_ACTION } from './slack-api.js';
+import { readTurnTarget } from './turn-target.js';
 import { socketMode } from './socket-mode.js';
 
 const log = (message: string): void => {
@@ -143,31 +144,25 @@ const depsFor = (user: string) => {
     findDm: (dmChannel: string, rootThread: string) =>
       lookup('/api/slack/dm', { dmChannel, rootThread }),
     turn: (spec: Record<string, unknown>) =>
-      ask<{ conversation: ConversationRef; turn?: string }>('/api/slack/turn', { user, ...spec }),
-    endpoint: async (conversation: string) => {
-      // Read at the boundary like the lookups above: an empty object is the
-      // gateway saying this member has paired nothing at all. The conversation
-      // goes with it so the gateway can prefer the project this thread already
-      // ran in (§4) rather than whatever the endpoint lists first.
-      const { endpoint, device, state, agent, token, workspace, workspaceLabel } = await ask<
-        Partial<TurnTarget>
-      >('/api/slack/endpoint', { user, conversation });
-      // `device` is deliberately not required — it is empty until a companion
-      // attaches and says what it is, and the copy already covers that. `agent`
-      // and `token` arrive only when the machine can take the turn.
-      if (!endpoint || !state) return undefined;
-      return {
-        endpoint,
-        device: device ?? '',
-        state,
-        ...(agent ? { agent } : {}),
-        ...(token ? { token } : {}),
-        ...(workspace ? { workspace } : {}),
-        ...(workspaceLabel ? { workspaceLabel } : {}),
-      };
-    },
-    run: async ({ conversation, endpoint, agent, token, prompt, workspace, model }: RunSpec) => {
+      ask<{ conversation: ConversationRef; turn?: string; refused?: 'duplicate' | 'busy' }>(
+        '/api/slack/turn',
+        { user, ...spec },
+      ),
+    endpoint: async (conversation: string) =>
+      readTurnTarget(await ask<Partial<TurnTarget>>('/api/slack/endpoint', { user, conversation })),
+    run: async ({
+      conversation,
+      endpoint,
+      agent,
+      token,
+      prompt,
+      workspace,
+      model,
+      resume,
+      context,
+    }: RunSpec) => {
       const notices: string[] = [];
+      let session = '';
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -178,6 +173,9 @@ const depsFor = (user: string) => {
           agent,
           runId: conversation,
           onNotice: (notice) => notices.push(notice),
+          onSession: (id) => (session = id),
+          ...(resume ? { resume } : {}),
+          ...(context ? { context } : {}),
           ...(workspace ? { workspace } : {}),
         },
         model,
@@ -185,7 +183,25 @@ const depsFor = (user: string) => {
         `slack-${conversation}`,
         log,
       );
-      return { text, notices };
+      return { text, notices, session };
+    },
+    finish: async (
+      conversation: string,
+      turn: string,
+      status: 'completed' | 'failed' | 'cancelled',
+      ran?: { session: string; endpoint: string; agent: string; workspace?: string },
+    ) => {
+      // The answer is posted by the time this runs, so a gateway that is slow
+      // or gone must cost the next turn its history and nothing else — `send`
+      // rejects on a timeout, and an uncaught one here would tell the member
+      // their turn failed after they had read it.
+      await send('/api/slack/turn/done', { user, conversation, turn, status, ...ran })
+        .then((res) => {
+          if (!res.ok) throw new Error(String(res.status));
+        })
+        .catch((error: unknown) => {
+          log(`could not close ${turn} for ${conversation}: ${String(error)}`);
+        });
     },
     destination: async (conversation: string) => {
       // `{}` is the gateway saying this conversation began in the DM, or is not
@@ -238,6 +254,7 @@ const connection = socketMode({
               post: deps.post,
               endpoint: deps.endpoint,
               run: deps.run,
+              finish: deps.finish,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,
