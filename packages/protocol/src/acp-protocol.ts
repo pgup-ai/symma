@@ -434,16 +434,36 @@ export async function driveAcpSession(
     conn.request('session/new', { cwd: options.cwd, mcpServers: [] }) as Promise<
       Record<string, unknown>
     >;
+  /**
+   * Spec flow for auth-gated agents (error -32000): authenticate with an
+   * advertised method, retry once. Never called pre-emptively — advertised
+   * methods are often interactive logins, and agents with ambient credentials
+   * (cursor/devin, live-verified) don't gate a session at all.
+   */
+  const withAuth = async (what: string, call: () => Promise<unknown>): Promise<unknown> => {
+    try {
+      return await call();
+    } catch (error) {
+      const methodId = ((init?.authMethods ?? []) as { id?: string }[])[0]?.id;
+      if ((error as { code?: number }).code !== -32000 || !methodId) throw error;
+      log(`acp:${agent} ${label}: ${what} requires auth; retrying after authenticate(${methodId})`);
+      await conn.request('authenticate', { methodId });
+      return call();
+    }
+  };
+
   const loadable =
     (init?.agentCapabilities as { loadSession?: unknown } | undefined)?.loadSession === true;
   let session: Record<string, unknown> | undefined;
   if (options.resume !== undefined && loadable) {
     try {
-      const loaded = (await conn.request('session/load', {
-        sessionId: options.resume,
-        cwd: options.cwd,
-        mcpServers: [],
-      })) as Record<string, unknown>;
+      const loaded = (await withAuth('session/load', () =>
+        conn.request('session/load', {
+          sessionId: options.resume,
+          cwd: options.cwd,
+          mcpServers: [],
+        }),
+      )) as Record<string, unknown>;
       // Same `modes` and `configOptions` a new session returns — plan mode and
       // model selection read them off this, so a resume that dropped them
       // would fail closed on every agent whose read-only layer is plan mode.
@@ -465,23 +485,7 @@ export async function driveAcpSession(
       );
     }
   }
-  if (session === undefined) {
-    try {
-      session = await newSession();
-    } catch (error) {
-      // Spec flow for auth-gated agents (error -32000): authenticate with an
-      // advertised method, retry once. Never called pre-emptively — advertised
-      // methods are often interactive logins, and agents with ambient
-      // credentials (cursor/devin, live-verified) don't gate session/new.
-      const methodId = ((init?.authMethods ?? []) as { id?: string }[])[0]?.id;
-      if ((error as { code?: number }).code !== -32000 || !methodId) throw error;
-      log(
-        `acp:${agent} ${label}: session/new requires auth; retrying after authenticate(${methodId})`,
-      );
-      await conn.request('authenticate', { methodId });
-      session = await newSession();
-    }
-  }
+  session ??= (await withAuth('session/new', newSession)) as Record<string, unknown>;
   const sessionId = session.sessionId;
   if (typeof sessionId !== 'string' || !sessionId) {
     throw new Error(`acp:${agent} ${label}: session/new returned no sessionId`);

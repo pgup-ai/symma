@@ -54,7 +54,7 @@ interface FakeAgentScript {
   capabilities?: Record<string, unknown>;
   /** Answers session/load. Returning an error is an agent that has forgotten
    * the session; the replay it would otherwise send is the script's to write. */
-  onLoad?: (agent: FakeAgentApi) => Record<string, unknown>;
+  onLoad?: (agent: FakeAgentApi, authed: boolean) => Record<string, unknown>;
   onPrompt: (agent: FakeAgentApi) => void;
   onClientResponse?: (id: number, result: unknown, agent: FakeAgentApi) => void;
 }
@@ -122,7 +122,7 @@ function fakeAgentIo(script: FakeAgentScript): {
         },
       });
     } else if (method === 'session/load') {
-      const answer = script.onLoad?.(agent) ?? { result: {} };
+      const answer = script.onLoad?.(agent, authed) ?? { result: {} };
       send({ jsonrpc: '2.0', id, ...answer });
     } else if (method === 'session/set_config_option') {
       setConfigCalls.push(message.params);
@@ -702,15 +702,27 @@ describe('acp', () => {
       { label: 'reattaches', loadSession: true, refuse: false, sessionId: 'old-1', loads: 1 },
       { label: 'agent cannot', loadSession: false, refuse: false, sessionId: 's1', loads: 0 },
       { label: 'agent forgot it', loadSession: true, refuse: true, sessionId: 's1', loads: 1 },
+      // An auth gate is not a refusal: the session is still there, and losing
+      // the reattachment to it would send the turn to a fresh one for nothing.
+      {
+        label: 'agent wants auth first',
+        loadSession: true,
+        refuse: false,
+        authGate: true,
+        sessionId: 'old-1',
+        loads: 2,
+      },
     ];
-    for (const { label, loadSession, refuse, sessionId, loads } of cases) {
+    for (const { label, loadSession, refuse, authGate, sessionId, loads } of cases) {
       let loaded = 0;
       const fake = fakeAgentIo({
         capabilities: { loadSession },
+        ...(authGate ? { authGate: true, authMethods: [{ id: 'api-key' }] } : {}),
         modes: { currentModeId: 'act', availableModes: [{ id: 'plan' }] },
-        onLoad: (agent) => {
+        onLoad: (agent, authed) => {
           loaded += 1;
           if (refuse) return { error: { code: -32602, message: 'no such session' } };
+          if (authGate && !authed) return { error: { code: -32000, message: 'auth required' } };
           agent.update({
             sessionUpdate: 'agent_message_chunk',
             messageId: 'item-2',

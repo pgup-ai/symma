@@ -52,7 +52,7 @@ per conversation and named in the DM root. Each turn is still its own ACP
 session, so a follow-up is caught up from the DM thread under the same byte
 budget and told that is a transcript rather than a resume (§4's third rung) —
 but only because nothing remembers a session id yet. `driveAcpSession` takes a
-`resume` now, and codex-acp does advertise `loadSession`; the claim that
+`resume` now, and codex-acp 1.1.7 does advertise `loadSession`; the claim that
 nothing did was never checked and was false. An answer leaves the DM only when the member
 presses the button (§5): the gateway states where it may go, the shared post
 names who approved it, and a destination gone bad keeps the answer here.
