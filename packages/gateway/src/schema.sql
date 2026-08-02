@@ -177,15 +177,6 @@ CREATE INDEX IF NOT EXISTS conversation_resume_endpoint ON conversation_resume (
 -- Declared above for a fresh database and added here for an upgraded one —
 -- ADD COLUMN IF NOT EXISTS is idempotent, which is what keeps this file
 -- re-appliable and the migration runner still unbuilt.
--- Insertion order, because `created_at` is transaction time and two turns can
--- share it — and what decides which resume survives must not come down to a
--- uuid comparison. Added rather than declared above so an upgraded database
--- gets it too. The backfill numbers existing rows in heap order, which is not
--- their real order; it does not matter, because every turn recorded after the
--- migration outranks all of them and the comparison is only ever between turns
--- of one conversation happening now.
-ALTER TABLE turns ADD COLUMN IF NOT EXISTS seq bigserial;
-
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS seen_through_ts text;
 -- Added nullable and backfilled, because `DEFAULT now()` would stamp every
 -- existing row with the moment of the migration and hand each of them a fresh
@@ -196,6 +187,15 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_activity_at timestamptz;
 UPDATE conversations SET last_activity_at = created_at WHERE last_activity_at IS NULL;
 ALTER TABLE conversations ALTER COLUMN last_activity_at SET DEFAULT now();
 ALTER TABLE conversations ALTER COLUMN last_activity_at SET NOT NULL;
+
+-- Insertion order, because `created_at` is transaction time and two turns can
+-- share it — and what decides which resume survives must not come down to a
+-- uuid comparison. Added rather than declared above so an upgraded database
+-- gets it too. The backfill numbers existing rows in heap order, which is not
+-- their real order; it does not matter, because every turn recorded after the
+-- migration outranks all of them and the comparison is only ever between turns
+-- of one conversation happening now.
+ALTER TABLE turns ADD COLUMN IF NOT EXISTS seq bigserial;
 
 -- Added with §4's workspace picker; null on every conversation that predates it,
 -- which reads as "no preference yet" and takes the endpoint's first.
