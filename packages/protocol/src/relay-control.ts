@@ -80,6 +80,9 @@ export interface TurnTarget extends SelectedEndpoint {
   /** Short-lived and scoped to the member, so the caller can act as them for
    * the length of one turn and no longer. */
   token?: string;
+  /** An agent session this conversation can reattach to, offered only when the
+   * machine, agent and directory are the ones it was minted under (§4). */
+  resume?: string;
 }
 
 /**

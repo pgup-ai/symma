@@ -68,6 +68,10 @@ export interface RunSpec {
   /** `provider/model`, always — every spec parses it that way and reads the half
    * after the slash. A bare `default` is refused before any agent sees it. */
   model: string;
+  /** A session to pick up, and what to catch a fresh one up with instead. Both
+   * travel: which applies is not known until the agent has been asked. */
+  resume?: string;
+  context?: string;
 }
 
 export interface DmDeps {
@@ -83,8 +87,18 @@ export interface DmDeps {
   /** Drives one prompt to its answer on the member's machine. Rejects rather
    * than returning a failure, so the transport's own errors arrive intact.
    * `notices` is what the agent said about itself rather than about the
-   * question, kept apart so the answer is not read as carrying it. */
-  run: (spec: RunSpec) => Promise<{ text: string; notices: string[] }>;
+   * question, kept apart so the answer is not read as carrying it. `session` is
+   * where it ran, for the next turn in this thread to pick up. */
+  run: (spec: RunSpec) => Promise<{ text: string; notices: string[]; session: string }>;
+  /** Remembers the session this turn ran in, against what it ran under — an id
+   * means nothing on another machine, agent or directory. Fails open like every
+   * auxiliary write: losing it costs the next turn its history, not this one
+   * its answer. */
+  remember: (
+    conversation: string,
+    session: string,
+    ran: { endpoint: string; agent: string; workspace?: string },
+  ) => Promise<void>;
   /** The DM thread itself, which is the durable transcript a follow-up is
    * caught up from. Undefined when the bot cannot read the channel. */
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
@@ -195,6 +209,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
+  // Even when a resume is on offer, because whether the agent still has that
+  // session is not known until it has been asked — and arriving without the
+  // thread is the half that cannot be recovered from (§4).
   const caught = existing ? await catchUp(message, conversation, deps) : undefined;
 
   // A run has twenty minutes to answer, so silence that long reads as broken.
@@ -207,15 +224,18 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const scope = decision.label
     ? `On it, in \`${decision.label.replaceAll('`', '')}\`.`
     : 'On it. It has no access to your files, so keep the question self-contained.';
+  // The offer, not the outcome: the agent has not been asked yet, so this says
+  // what will be tried rather than claiming a resume that may not happen.
+  const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
   await deps.post(
     conversation.dmChannel,
-    caught ? `${scope} ${caught.note}` : scope,
+    note ? `${scope} ${note}` : scope,
     conversation.rootThread,
   );
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  let answer: { text: string; notices: string[] };
+  let answer: { text: string; notices: string[]; session: string };
   try {
     answer = await deps.run({
       conversation: conversation.id,
@@ -225,7 +245,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // §5 wants a per-agent default with an override; until the override
       // exists this is the default, and the prefix is what makes it parse.
       model: `${decision.agent}/default`,
-      prompt: caught ? `${caught.context}\n\n${message.text}` : message.text,
+      prompt: message.text,
+      ...(caught ? { context: caught.context } : {}),
+      ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
     });
   } catch (error) {
@@ -262,5 +284,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     throw error;
   }
   await deps.mark(message.channel, message.ts, 'done');
+  await deps.remember(conversation.id, answer.session, {
+    endpoint: decision.endpoint,
+    agent: decision.agent,
+    ...(decision.workspace ? { workspace: decision.workspace } : {}),
+  });
   return existing ? 'resumed' : 'opened';
 }

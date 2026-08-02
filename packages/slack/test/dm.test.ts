@@ -48,6 +48,7 @@ function harness(
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
   const marks: { channel: string; ts: string; state: MarkState }[] = [];
+  const remembered: Record<string, string>[] = [];
   let asked = 0;
   const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
@@ -64,7 +65,11 @@ function harness(
       runs.push(spec);
       return over.fails
         ? Promise.reject(over.fails)
-        : Promise.resolve({ text: over.answer ?? 'the answer', notices: over.notices ?? [] });
+        : Promise.resolve({
+            text: over.answer ?? 'the answer',
+            notices: over.notices ?? [],
+            session: 'acp-1',
+          });
     },
     find: () => Promise.resolve(over.existing),
     post: (channel, text, threadTs, offerShare, notices) => {
@@ -81,6 +86,10 @@ function harness(
         : Promise.resolve({ channel, ts: '300.0' });
     },
     destination: () => Promise.resolve(over.destination),
+    remember: (conversation, session, ran) => {
+      remembered.push({ conversation, session, ...ran });
+      return Promise.resolve();
+    },
     mark: (channel, ts, state) => {
       marks.push({ channel, ts, state });
       return Promise.resolve();
@@ -98,7 +107,7 @@ function harness(
       return Promise.resolve(selected ?? undefined);
     },
   };
-  return { deps, posts, turns, runs, marks, askedFor, asked: () => asked };
+  return { deps, posts, turns, runs, marks, remembered, askedFor, asked: () => asked };
 }
 
 describe('dm message', () => {
@@ -271,15 +280,14 @@ describe('dm message', () => {
     );
 
     assert.match(posts[0]!.text, /Catching it up from this thread/);
-    // Ahead of the question, and marked as a transcript rather than state.
-    assert.match(runs[0]!.prompt, /why is the deploy failing\?/);
-    assert.match(runs[0]!.prompt, /transcript, not/);
-    assert.ok(
-      runs[0]!.prompt.endsWith('and now?'),
-      'the question is last, after what came before it',
-    );
-    // Once, not twice: the thread above contains it and so does the prompt.
-    assert.equal(runs[0]!.prompt.match(/and now\?/g)?.length, 1);
+    // Apart from the question, because whether the agent still holds the
+    // session is not known until it has been asked — the driver drops one or
+    // the other once it does.
+    assert.equal(runs[0]!.prompt, 'and now?');
+    assert.match(runs[0]!.context!, /why is the deploy failing\?/);
+    assert.match(runs[0]!.context!, /transcript, not/);
+    // Once, not twice: the thread above contains it and so does the question.
+    assert.equal(runs[0]!.context!.match(/and now\?/g)?.length, undefined);
   });
 
   it('says how much of the thread did not fit', async () => {
@@ -342,6 +350,33 @@ describe('dm message', () => {
     const answered = posts.at(-1)!;
     assert.equal(answered.text, 'the deploy fails on a missing env var');
     assert.deepEqual(answered.notices, ['Warning: skill descriptions were shortened.']);
+  });
+
+  it('carries a resume the gateway offered, and remembers where the turn ran', async () => {
+    const { deps, posts, runs, remembered } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', resume: 'acp-0' },
+      history: [{ ts: '210.0', author: 'U-nel', text: 'why is the deploy failing?' }],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      deps,
+    );
+    assert.equal(runs[0]!.resume, 'acp-0');
+    // The thread goes too: the offer is not the outcome, and a resume that the
+    // agent refuses would otherwise arrive with nothing.
+    assert.match(runs[0]!.context!, /why is the deploy failing/);
+    assert.match(posts[0]!.text, /Picking up where it left off/);
+    // Against what it ran under, since an id means nothing on another machine.
+    assert.deepEqual(remembered, [
+      {
+        conversation: 'conv-1',
+        session: 'acp-1',
+        endpoint: 'ep-1',
+        agent: 'kilo',
+        workspace: 'ws-1',
+      },
+    ]);
   });
 
   it('offers a share only when there is a thread to share back to', async () => {

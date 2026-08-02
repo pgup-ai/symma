@@ -906,6 +906,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (workspace && conversation && workspace.id !== remembered)
         await store.bindConversation(owner, conversation, workspace.id);
 
+      // §4's second rung, offered only for the machine, agent and directory the
+      // session was minted under — an id means nothing anywhere else, and the
+      // caller is left with the transcript instead of a refusal.
+      const resume = conversation
+        ? await store.resumeFor(owner, conversation, {
+            endpoint: selected.endpoint,
+            agent,
+            ...(workspace ? { workspace: workspace.id } : {}),
+          })
+        : undefined;
+
       // Minted here rather than on every presence check: this route is asked
       // once per turn that is going to run, so a refusal costs no credential.
       const token = await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES);
@@ -914,7 +925,24 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         agent,
         token,
         ...(workspace ? { workspace: workspace.id, workspaceLabel: workspace.label } : {}),
+        ...(resume ? { resume } : {}),
       });
+    }
+    if (url.pathname === '/api/slack/resume') {
+      const { conversation, session, endpoint, agent, workspace } = body as Record<string, unknown>;
+      if (!str(conversation) || !str(session) || !str(endpoint) || !str(agent)) {
+        return sendJson(res, 400, { error: 'bad request' });
+      }
+      // The key is what the turn ran under, which is what the gateway told this
+      // caller to run it under one request earlier. Stored beside the id so the
+      // next turn can tell whether it still applies.
+      await store.recordResume(
+        owner,
+        conversation,
+        { endpoint, agent, ...(str(workspace) ? { workspace } : {}) },
+        session,
+      );
+      return sendJson(res, 200, {});
     }
     if (url.pathname !== '/api/slack/pair') return sendJson(res, 404, { error: 'not found' });
     // Undefined covers the member deactivated — or gone with their workspace —

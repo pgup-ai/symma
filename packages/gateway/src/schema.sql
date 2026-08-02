@@ -151,6 +151,24 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
   PRIMARY KEY (conversation_id, ordinal)
 );
 
+-- §4's second rung. Held apart from `conversations` because it is only valid
+-- against the machine, agent and directory it was minted under, and those are
+-- written on that table once at insert — they say where a conversation began,
+-- not where its last turn ran. The endpoint cascade is the point: unpair a
+-- laptop and every session id that only means anything on it goes with it.
+--
+-- Not `conversation_sessions`: that one's `session_id` references the relay's
+-- sessions, and an agent's own id is not one of those.
+CREATE TABLE IF NOT EXISTS conversation_resume (
+  conversation_id text PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  session_id      text NOT NULL,
+  endpoint_id     text NOT NULL REFERENCES endpoints(id) ON DELETE CASCADE,
+  agent           text NOT NULL,
+  -- Null is the no-workspace mode, which is a match for another turn that also
+  -- has none — the comparison is on sameness, not on presence.
+  workspace_id    text
+);
+
 -- #27 shipped `conversations`, so CREATE TABLE IF NOT EXISTS skips it on any
 -- database that already ran that release and these columns would never arrive.
 -- Declared above for a fresh database and added here for an upgraded one —

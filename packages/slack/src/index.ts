@@ -166,8 +166,19 @@ const depsFor = (user: string) => {
         ...(workspaceLabel ? { workspaceLabel } : {}),
       };
     },
-    run: async ({ conversation, endpoint, agent, token, prompt, workspace, model }: RunSpec) => {
+    run: async ({
+      conversation,
+      endpoint,
+      agent,
+      token,
+      prompt,
+      workspace,
+      model,
+      resume,
+      context,
+    }: RunSpec) => {
       const notices: string[] = [];
+      let session = '';
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -178,6 +189,9 @@ const depsFor = (user: string) => {
           agent,
           runId: conversation,
           onNotice: (notice) => notices.push(notice),
+          onSession: (id) => (session = id),
+          ...(resume ? { resume } : {}),
+          ...(context ? { context } : {}),
           ...(workspace ? { workspace } : {}),
         },
         model,
@@ -185,7 +199,15 @@ const depsFor = (user: string) => {
         `slack-${conversation}`,
         log,
       );
-      return { text, notices };
+      return { text, notices, session };
+    },
+    remember: async (
+      conversation: string,
+      session: string,
+      ran: { endpoint: string; agent: string; workspace?: string },
+    ) => {
+      const res = await send('/api/slack/resume', { user, conversation, session, ...ran });
+      if (!res.ok) log(`could not remember ${session} for ${conversation}: ${String(res.status)}`);
     },
     destination: async (conversation: string) => {
       // `{}` is the gateway saying this conversation began in the DM, or is not
@@ -238,6 +260,7 @@ const connection = socketMode({
               post: deps.post,
               endpoint: deps.endpoint,
               run: deps.run,
+              remember: deps.remember,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,

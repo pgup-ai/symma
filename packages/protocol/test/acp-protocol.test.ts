@@ -55,7 +55,7 @@ interface FakeAgentScript {
   /** Answers session/load. Returning an error is an agent that has forgotten
    * the session; the replay it would otherwise send is the script's to write. */
   onLoad?: (agent: FakeAgentApi, authed: boolean) => Record<string, unknown>;
-  onPrompt: (agent: FakeAgentApi) => void;
+  onPrompt: (agent: FakeAgentApi, prompt: string) => void;
   onClientResponse?: (id: number, result: unknown, agent: FakeAgentApi) => void;
 }
 
@@ -139,7 +139,8 @@ function fakeAgentIo(script: FakeAgentScript): {
       send({ jsonrpc: '2.0', id, result: {} });
     } else if (method === 'session/prompt') {
       promptId = id;
-      script.onPrompt(agent);
+      const blocks = (message.params as { prompt?: { text?: string }[] }).prompt ?? [];
+      script.onPrompt(agent, blocks.map((block) => block.text ?? '').join(''));
     } else if (method === undefined && id !== undefined) {
       script.onClientResponse?.(id, (message as { result?: unknown }).result, agent);
     }
@@ -771,6 +772,41 @@ describe('acp', () => {
       // The replay is the turn before this one, so none of it belongs to this
       // one — not as the answer, and not as an aside beside it.
       assert.equal(result.text, 'the answer to this one', label);
+    }
+
+    // The caller cannot know whether its resume landed until the load is tried,
+    // so it hands over what a fresh session would need either way.
+    for (const [label, loadSession, expected] of [
+      ['a new session is caught up', false, 'earlier\n\nwhat broke?'],
+      ['a resumed one already knows', true, 'what broke?'],
+    ] as const) {
+      let asked = '';
+      const fake = fakeAgentIo({
+        capabilities: { loadSession },
+        onLoad: () => ({ result: {} }),
+        onPrompt: (agent, prompt) => {
+          asked = prompt;
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            messageId: 'm1',
+            content: { type: 'text', text: 'ok' },
+          });
+          agent.finish();
+        },
+      });
+      await driveAcpSession(
+        { input: fake.input, output: fake.output },
+        {
+          cwd: '/tmp',
+          prompt: 'what broke?',
+          context: 'earlier',
+          resume: 'old-1',
+          agent: 'probe',
+          label,
+          log: () => {},
+        },
+      );
+      assert.equal(asked, expected, label);
     }
 
     // Still gated after authenticating is the agent refusing credentials, not

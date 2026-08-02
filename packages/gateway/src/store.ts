@@ -31,6 +31,13 @@ export interface PairedEndpoint {
   lastSeenAt: number | null;
 }
 
+/** What an agent session id is only meaningful against (§4). */
+export interface ResumeKey {
+  endpoint: string;
+  agent: string;
+  workspace?: string;
+}
+
 export interface Conversation {
   id: string;
   dmChannel: string;
@@ -147,6 +154,19 @@ export interface Store {
   /** Records what this conversation ran on, so the next turn in the thread lands
    * on the same project (§4) rather than wherever the endpoint lists first. */
   bindConversation(owner: Owner, conversation: string, workspaceId: string): Promise<void>;
+  /** The agent session this conversation last ran in, or undefined when it ran
+   * somewhere this one cannot reach. A session id means nothing off the machine
+   * that minted it, and little under a different agent or in another directory,
+   * so the key is matched rather than the conversation alone. */
+  resumeFor(owner: Owner, conversation: string, key: ResumeKey): Promise<string | undefined>;
+  /** Replaces whatever was there: a conversation resumes its latest session or
+   * none, and keeping the ones before it would be a history nothing reads. */
+  recordResume(
+    owner: Owner,
+    conversation: string,
+    key: ResumeKey,
+    sessionId: string,
+  ): Promise<void>;
   /** A client token for this member, good for `ttlMinutes`. The bot holds no
    * credential of its own (§6), so this is how it acts as whoever is asking —
    * for one turn, rather than by being handed a standing key to them. */
@@ -548,6 +568,31 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [owner, conversation, workspaceId],
       );
     },
+    async resumeFor(owner, conversation, key) {
+      // Joined through `conversations` for the owner check: the resume table
+      // has no user of its own, and reading one by id alone would answer about
+      // somebody else's thread.
+      const row = await one<{ session: string }>(
+        `SELECT r.session_id AS session
+           FROM conversation_resume r
+           JOIN conversations c ON c.id = r.conversation_id
+          WHERE c.user_id = $1 AND r.conversation_id = $2
+            AND r.endpoint_id = $3 AND r.agent = $4
+            AND r.workspace_id IS NOT DISTINCT FROM $5`,
+        [owner, conversation, key.endpoint, key.agent, key.workspace ?? null],
+      );
+      return row?.session;
+    },
+    async recordResume(owner, conversation, key, sessionId) {
+      await pool.query(
+        `INSERT INTO conversation_resume (conversation_id, session_id, endpoint_id, agent, workspace_id)
+         SELECT $2, $6, $3, $4, $5 FROM conversations WHERE id = $2 AND user_id = $1
+         ON CONFLICT (conversation_id) DO UPDATE
+            SET session_id = excluded.session_id, endpoint_id = excluded.endpoint_id,
+                agent = excluded.agent, workspace_id = excluded.workspace_id`,
+        [owner, conversation, key.endpoint, key.agent, key.workspace ?? null, sessionId],
+      );
+    },
     async mintClientToken(owner, ttlMinutes) {
       const token = randomUUID();
       await pool.query(
@@ -842,6 +887,8 @@ export function localStore(
     mintClientToken: needsDatabase,
     bindConversation: needsDatabase,
     conversationForId: needsDatabase,
+    recordResume: needsDatabase,
+    resumeFor: needsDatabase,
     expireTokens: needsDatabase,
     expireSessions: (olderThanDays, live = []) => {
       const cutoff = Date.now() - olderThanDays * 24 * 60 * 60 * 1000;

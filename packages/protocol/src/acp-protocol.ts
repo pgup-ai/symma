@@ -307,6 +307,11 @@ export interface AcpSessionOptions {
    * advertise `loadSession`. Fails open: a resume that cannot happen costs the
    * caller its history, and must not also cost it the turn. */
   resume?: string;
+  /** Sent ahead of the prompt when — and only when — the session is a new one.
+   * The caller cannot know whether its `resume` landed until the load has been
+   * tried, so it hands over what a fresh session would need and this drops it
+   * where it would be a second copy of what the agent already remembers. */
+  context?: string;
   /** Observe every frame in both directions. The caller decides whether one
    * exists: a relayed session is already journaled by the companion — signed
    * and endpoint-attributed — so it passes none rather than posting the same
@@ -526,7 +531,15 @@ export async function driveAcpSession(
   }
   const result = (await conn.request('session/prompt', {
     sessionId,
-    prompt: [{ type: 'text', text: options.prompt }],
+    prompt: [
+      {
+        type: 'text',
+        text:
+          options.context !== undefined && sessionId !== options.resume
+            ? `${options.context}\n\n${options.prompt}`
+            : options.prompt,
+      },
+    ],
   })) as Record<string, unknown>;
   // opencode-lineage agents can flush trailing session/update frames AFTER the
   // prompt response (anomalyco/opencode#17505, live-hit via kilo). Flushing

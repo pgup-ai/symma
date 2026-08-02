@@ -1800,6 +1800,61 @@ describe('tenancy', () => {
     }
   });
 
+  it('offers a resume only to its owner, and only where it still means anything', async () => {
+    const url = pg.getConnectionUri();
+    const yves = await provision(url, { team: 'rsm', slackUser: 'yves', endpoint: 'yves-mac' });
+    const zia = await provision(url, { team: 'rsm', slackUser: 'zia', endpoint: 'zia-mac' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const pool = new Pool({ connectionString: url });
+    try {
+      const conversation = await store.openConversation(yves.owner, {
+        dmChannel: 'D-yves',
+        rootThread: '200.0',
+        endpoint: 'yves-mac',
+        agent: 'codex',
+      });
+      assert.ok(conversation);
+      const ran = { endpoint: 'yves-mac', agent: 'codex', workspace: 'ws-1' };
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-1');
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
+
+      // A session id is only meaningful against what minted it, so each of
+      // these is a different session and none of them is this one.
+      for (const [what, key] of [
+        ['another machine', { ...ran, endpoint: 'zia-mac' }],
+        ['another agent', { ...ran, agent: 'kilo' }],
+        ['another directory', { ...ran, workspace: 'ws-2' }],
+        ['no directory at all', { endpoint: 'yves-mac', agent: 'codex' }],
+      ] as const) {
+        assert.equal(await store.resumeFor(yves.owner, conversation.id, key), undefined, what);
+      }
+
+      // The table has no member of its own, so the read is joined through the
+      // conversation — asking by id alone would answer about someone else's.
+      assert.equal(await store.resumeFor(zia.owner, conversation.id, ran), undefined);
+      await store.recordResume(zia.owner, conversation.id, ran, 'stolen');
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-1');
+
+      // Replaced, not appended: a conversation resumes its latest session or
+      // none, and the ones before it are a history nothing reads.
+      await store.recordResume(yves.owner, conversation.id, ran, 'acp-2');
+      assert.equal(await store.resumeFor(yves.owner, conversation.id, ran), 'acp-2');
+      const rows = await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`);
+      assert.equal(rows.rows[0].n, 1);
+
+      // Unpair the machine and the ids that only mean anything on it go too,
+      // without a line of code to remember that.
+      await pool.query(`DELETE FROM endpoints WHERE id = 'yves-mac'`);
+      assert.equal(
+        (await pool.query(`SELECT count(*)::int AS n FROM conversation_resume`)).rows[0].n,
+        0,
+      );
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  });
+
   it('adds the conversation columns to a database that predates them', async () => {
     // #27 shipped `conversations` without them, and CREATE TABLE IF NOT EXISTS
     // skips a table that exists — so on that database the columns would never
