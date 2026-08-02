@@ -119,6 +119,29 @@ describe('slack api', () => {
     assert.deepEqual(called, ['reactions.add']);
   });
 
+  it('says so when a mark could not land, rather than only losing it', async () => {
+    // A scope that was never granted refuses every mark, and swallowing in
+    // silence is how that goes undiagnosed — no reaction, and nothing to search.
+    const said: string[] = [];
+    const { fetchImpl } = answering({ ok: false, error: 'missing_scope' });
+    await slackApi('xoxb-test', { fetch: fetchImpl, log: (m) => said.push(m) }).mark(
+      'D-nel',
+      '250.0',
+      'working',
+    );
+    assert.match(said[0]!, /marking working.*missing_scope/);
+
+    // And the log is a caller's callback, which is exactly where "never
+    // throws" has to hold — a rejection here fails the whole turn.
+    const bad = answering({ ok: false, error: 'missing_scope' });
+    await slackApi('xoxb-test', {
+      fetch: bad.fetchImpl,
+      log: () => {
+        throw new Error('the logger is broken too');
+      },
+    }).mark('D-nel', '250.0', 'working');
+  });
+
   it('never lets a lost mark cost the member the answer it was about', async () => {
     // The remove has nothing to take off when the working mark's own add failed,
     // so swallowing the pair together would drop the mark that actually says the

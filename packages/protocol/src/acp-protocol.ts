@@ -303,6 +303,10 @@ export interface AcpSessionOptions {
   /** Fail closed when plan mode is missing or cannot be set (agents with no
    * agent-side sandbox — plan mode is their behavioral read-only layer). */
   requirePlanMode?: boolean;
+  /** Reattach to this session rather than opening one, for agents that
+   * advertise `loadSession`. Fails open: a resume that cannot happen costs the
+   * caller its history, and must not also cost it the turn. */
+  resume?: string;
   /** Observe every frame in both directions. The caller decides whether one
    * exists: a relayed session is already journaled by the companion — signed
    * and endpoint-attributed — so it passes none rather than posting the same
@@ -340,6 +344,10 @@ export function matchModelOptionValue(
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
+  /** The session this turn ran in — `resume` when it was honoured, the new one
+   * when it was not. Compare the two to tell which happened; store it to
+   * resume next time. */
+  sessionId: string;
   /** Assistant text the agent did not label with a `messageId`, in a session
    * where it labelled everything else — an adapter with no channel of its own
    * putting an operational notice in the message stream. codex-acp turns
@@ -426,22 +434,62 @@ export async function driveAcpSession(
     conn.request('session/new', { cwd: options.cwd, mcpServers: [] }) as Promise<
       Record<string, unknown>
     >;
-  let session: Record<string, unknown>;
-  try {
-    session = await newSession();
-  } catch (error) {
-    // Spec flow for auth-gated agents (error -32000): authenticate with an
-    // advertised method, retry once. Never called pre-emptively — advertised
-    // methods are often interactive logins, and agents with ambient
-    // credentials (cursor/devin, live-verified) don't gate session/new.
-    const methodId = ((init?.authMethods ?? []) as { id?: string }[])[0]?.id;
-    if ((error as { code?: number }).code !== -32000 || !methodId) throw error;
-    log(
-      `acp:${agent} ${label}: session/new requires auth; retrying after authenticate(${methodId})`,
-    );
-    await conn.request('authenticate', { methodId });
-    session = await newSession();
+  /**
+   * Spec flow for auth-gated agents (error -32000): authenticate with an
+   * advertised method, retry once. Never called pre-emptively — advertised
+   * methods are often interactive logins, and agents with ambient credentials
+   * (cursor/devin, live-verified) don't gate a session at all.
+   */
+  const withAuth = async (what: string, call: () => Promise<unknown>): Promise<unknown> => {
+    try {
+      return await call();
+    } catch (error) {
+      const methodId = ((init?.authMethods ?? []) as { id?: string }[])[0]?.id;
+      if ((error as { code?: number }).code !== -32000 || !methodId) throw error;
+      log(`acp:${agent} ${label}: ${what} requires auth; retrying after authenticate(${methodId})`);
+      await conn.request('authenticate', { methodId });
+      return call();
+    }
+  };
+
+  const loadable =
+    (init?.agentCapabilities as { loadSession?: unknown } | undefined)?.loadSession === true;
+  let session: Record<string, unknown> | undefined;
+  if (options.resume !== undefined && loadable) {
+    try {
+      const loaded = (await withAuth('session/load', () =>
+        conn.request('session/load', {
+          sessionId: options.resume,
+          cwd: options.cwd,
+          mcpServers: [],
+        }),
+      )) as Record<string, unknown>;
+      // Same `modes` and `configOptions` a new session returns — plan mode and
+      // model selection read them off this, so a resume that dropped them
+      // would fail closed on every agent whose read-only layer is plan mode.
+      // It carries no id of its own; the one asked for is the one it loaded.
+      session = { ...loaded, sessionId: options.resume };
+      // `session/load` replays the whole conversation as `session/update`
+      // (live-probed, codex-acp 1.1.7), so what has arrived so far is the turn
+      // before this one and would otherwise be answered with.
+      segments.length = 0;
+      current = '';
+      lastMessageId = undefined;
+      seenChunk = false;
+      usesMessageIds = false;
+    } catch (error) {
+      // Still gated after authenticating is not a session problem, and a fresh
+      // one would need the same credentials — so it stays the caller's error
+      // rather than becoming a turn that quietly starts over.
+      if ((error as { code?: number }).code === -32000) throw error;
+      // Otherwise fails open: a session the agent has forgotten costs the
+      // caller its history, and must not also cost it the answer.
+      log(
+        `acp:${agent} ${label}: resume ${options.resume} refused (${String(error)}); starting fresh`,
+      );
+    }
   }
+  session ??= (await withAuth('session/new', newSession)) as Record<string, unknown>;
   const sessionId = session.sessionId;
   if (typeof sessionId !== 'string' || !sessionId) {
     throw new Error(`acp:${agent} ${label}: session/new returned no sessionId`);
@@ -506,6 +554,7 @@ export async function driveAcpSession(
   return {
     text: (kept[kept.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
+    sessionId,
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
   };
 }

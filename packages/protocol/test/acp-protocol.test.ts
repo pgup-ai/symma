@@ -51,6 +51,10 @@ interface FakeAgentScript {
   authMethods?: unknown[];
   /** First session/new fails -32000 until authenticate is called. */
   authGate?: boolean;
+  capabilities?: Record<string, unknown>;
+  /** Answers session/load. Returning an error is an agent that has forgotten
+   * the session; the replay it would otherwise send is the script's to write. */
+  onLoad?: (agent: FakeAgentApi, authed: boolean) => Record<string, unknown>;
   onPrompt: (agent: FakeAgentApi) => void;
   onClientResponse?: (id: number, result: unknown, agent: FakeAgentApi) => void;
 }
@@ -94,6 +98,7 @@ function fakeAgentIo(script: FakeAgentScript): {
         result: {
           protocolVersion: 1,
           ...(script.authMethods ? { authMethods: script.authMethods } : {}),
+          ...(script.capabilities ? { agentCapabilities: script.capabilities } : {}),
         },
       });
     } else if (method === 'authenticate') {
@@ -116,6 +121,9 @@ function fakeAgentIo(script: FakeAgentScript): {
           ...(script.configOptions ? { configOptions: script.configOptions } : {}),
         },
       });
+    } else if (method === 'session/load') {
+      const answer = script.onLoad?.(agent, authed) ?? { result: {} };
+      send({ jsonrpc: '2.0', id, ...answer });
     } else if (method === 'session/set_config_option') {
       setConfigCalls.push(message.params);
       const params = message.params as { configId?: string; value?: string };
@@ -684,6 +692,110 @@ describe('acp', () => {
       if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = savedKey;
     }
+  });
+
+  it('reattaches to a session the agent still has, and answers fresh when it does not', async () => {
+    // `session/load` replays the whole conversation as `session/update`
+    // (live-probed against codex-acp 1.1.7), so the previous answer arrives
+    // before this turn's prompt is even sent.
+    const cases = [
+      { label: 'reattaches', loadSession: true, refuse: false, sessionId: 'old-1', loads: 1 },
+      { label: 'agent cannot', loadSession: false, refuse: false, sessionId: 's1', loads: 0 },
+      { label: 'agent forgot it', loadSession: true, refuse: true, sessionId: 's1', loads: 1 },
+      // An auth gate is not a refusal: the session is still there, and losing
+      // the reattachment to it would send the turn to a fresh one for nothing.
+      {
+        label: 'agent wants auth first',
+        loadSession: true,
+        refuse: false,
+        authGate: true,
+        sessionId: 'old-1',
+        loads: 2,
+      },
+    ];
+    for (const { label, loadSession, refuse, authGate, sessionId, loads } of cases) {
+      let loaded = 0;
+      const fake = fakeAgentIo({
+        capabilities: { loadSession },
+        ...(authGate ? { authGate: true, authMethods: [{ id: 'api-key' }] } : {}),
+        modes: { currentModeId: 'act', availableModes: [{ id: 'plan' }] },
+        onLoad: (agent, authed) => {
+          loaded += 1;
+          if (refuse) return { error: { code: -32602, message: 'no such session' } };
+          if (authGate && !authed) return { error: { code: -32000, message: 'auth required' } };
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            messageId: 'item-2',
+            content: { type: 'text', text: 'the answer from last time' },
+          });
+          // Whatever the old session held comes back too, including the asides
+          // the adapter put in its message stream.
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Warning: from last time.' },
+          });
+          // What a load actually answers with — the same session state a new
+          // one returns, which plan mode and model selection are read off.
+          return {
+            result: { modes: { currentModeId: 'act', availableModes: [{ id: 'plan' }] } },
+          };
+        },
+        onPrompt: (agent) => {
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            messageId: 'm9',
+            content: { type: 'text', text: 'the answer to this one' },
+          });
+          agent.finish();
+        },
+      });
+      const result = await driveAcpSession(
+        { input: fake.input, output: fake.output },
+        {
+          cwd: '/tmp',
+          prompt: 'hi',
+          agent: 'probe',
+          label,
+          log: () => {},
+          resume: 'old-1',
+          // Fails closed for agents whose read-only layer is plan mode, so a
+          // resume that dropped the loaded session's `modes` would refuse the
+          // turn outright.
+          requirePlanMode: true,
+        },
+      );
+      assert.equal(loaded, loads, label);
+      assert.deepEqual(fake.setModeIds, ['plan'], label);
+      assert.deepEqual(result.notices, [], label);
+      assert.equal(result.sessionId, sessionId, label);
+      // The replay is the turn before this one, so none of it belongs to this
+      // one — not as the answer, and not as an aside beside it.
+      assert.equal(result.text, 'the answer to this one', label);
+    }
+
+    // Still gated after authenticating is the agent refusing credentials, not
+    // the session being gone — starting over would need the same ones.
+    const gated = fakeAgentIo({
+      capabilities: { loadSession: true },
+      authMethods: [{ id: 'api-key' }],
+      onLoad: () => ({ error: { code: -32000, message: 'auth required' } }),
+      onPrompt: (agent) => {
+        agent.finish();
+      },
+    });
+    await assert.rejects(
+      driveAcpSession(
+        { input: gated.input, output: gated.output },
+        {
+          cwd: '/tmp',
+          prompt: 'hi',
+          agent: 'probe',
+          label: 'gated',
+          log: () => {},
+          resume: 'old-1',
+        },
+      ),
+    );
   });
 
   it('keeps what the agent said about itself out of the answer', async () => {

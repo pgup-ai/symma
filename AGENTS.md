@@ -49,9 +49,11 @@ is here, and no rule below depends on reading it.
 the member's own machine — in one of §4's allowlisted directories when their
 companion offers any, and an empty temp one when it offers none. The choice is
 per conversation and named in the DM root. Each turn is still its own ACP
-session — nothing advertises `session/load` — so a follow-up is caught up from
-the DM thread under the same byte budget, and told that is a transcript rather
-than a resume (§4's third rung). An answer leaves the DM only when the member
+session, so a follow-up is caught up from the DM thread under the same byte
+budget and told that is a transcript rather than a resume (§4's third rung) —
+but only because nothing remembers a session id yet. `driveAcpSession` takes a
+`resume` now, and codex-acp 1.1.7 does advertise `loadSession`; the claim that
+nothing did was never checked and was false. An answer leaves the DM only when the member
 presses the button (§5): the gateway states where it may go, the shared post
 names who approved it, and a destination gone bad keeps the answer here.
 
@@ -132,6 +134,10 @@ turn rather than a standing key.
   canonical package, bin and launch flags — `npx` runs deprecated packages
   without a word, and the registry is what caught claude-code-acp's rename —
   then a live probe of the real CLI before the spec is written (§3's bar).
+- Agent capabilities are read off `initialize`, never assumed. `loadSession`
+  was documented as absent for months on nobody's evidence, and one probe of
+  the binary already in use disproved it. A capability claim in a comment cites
+  the version it was checked against or it is a guess.
 - `PROTOCOL_VERSION` is the wire generation; a gateway serves it and the one
   below (§7.1), and `hello` without one is generation 0. A bump refuses every
   companion two back — laptops we do not control — so teach both sides to
