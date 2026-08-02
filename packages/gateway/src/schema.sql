@@ -180,7 +180,10 @@ CREATE INDEX IF NOT EXISTS conversation_resume_endpoint ON conversation_resume (
 -- Insertion order, because `created_at` is transaction time and two turns can
 -- share it — and what decides which resume survives must not come down to a
 -- uuid comparison. Added rather than declared above so an upgraded database
--- gets it too; bigserial backfills the rows already there.
+-- gets it too. The backfill numbers existing rows in heap order, which is not
+-- their real order; it does not matter, because every turn recorded after the
+-- migration outranks all of them and the comparison is only ever between turns
+-- of one conversation happening now.
 ALTER TABLE turns ADD COLUMN IF NOT EXISTS seq bigserial;
 
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS seen_through_ts text;
