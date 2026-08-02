@@ -207,12 +207,14 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // A file with no caption is an ordinary message with an empty prompt. Caught
   // before the ask below, so it neither mints a token nor starts a run.
   if (!message.text.trim()) {
+    // Closed before the post, not after: this turn is already decided, and a
+    // Slack error here would otherwise hold the thread until it went stale.
+    await deps.finish(conversation.id, turn, 'cancelled');
     await deps.post(
       conversation.dmChannel,
       'Send me a question with that and I will pass it to your agent.',
       conversation.rootThread,
     );
-    await deps.finish(conversation.id, turn, 'cancelled');
     return 'nothing to ask';
   }
 
@@ -220,8 +222,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // and, since asking mints a token, costs it no credential either.
   const decision = decideTurn(await deps.endpoint(conversation.id));
   if (!decision.run) {
-    await deps.post(conversation.dmChannel, decision.why, conversation.rootThread);
     await deps.finish(conversation.id, turn, 'cancelled');
+    await deps.post(conversation.dmChannel, decision.why, conversation.rootThread);
     return `refused: ${decision.because}`;
   }
 

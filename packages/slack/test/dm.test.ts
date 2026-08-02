@@ -36,6 +36,8 @@ function harness(
     budgetBytes?: number;
     /** Fails the answer post, which lands after the run is already over. */
     answerPostFails?: Error;
+    /** Fails every post, including the one an early exit says its piece with. */
+    postFails?: Error;
     /** Where a share would land; absent is a conversation opened in the DM. */
     destination?: { channel: string; thread: string };
   } = {},
@@ -82,6 +84,7 @@ function harness(
         ...(offerShare ? { offerShare } : {}),
         ...(notices?.length ? { notices } : {}),
       });
+      if (over.postFails) return Promise.reject(over.postFails);
       // The acknowledgement is always first; anything later is the answer.
       return over.answerPostFails && posts.length > 1
         ? Promise.reject(over.answerPostFails)
@@ -236,8 +239,14 @@ describe('dm message', () => {
       );
     }
 
-    // Including the one that leaves through `announcing`: the answer landed,
-    // so the turn is over whether or not the member was told.
+    // Including when the message saying so does not land: the turn is decided
+    // by then, and holding the thread until it goes stale is the worse half.
+    const refused = harness({ endpoint: null, postFails: new Error('slack refused it') });
+    await assert.rejects(handleDm(ask, refused.deps));
+    assert.equal(refused.finished[0]!.status, 'cancelled');
+
+    // And the one that leaves through `announcing`: the answer landed, so the
+    // turn is over whether or not the member was told.
     const { deps, finished } = harness({ answerPostFails: new Error('slack refused it') });
     await assert.rejects(handleDm(ask, deps));
     assert.equal(finished[0]!.status, 'completed');

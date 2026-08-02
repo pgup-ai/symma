@@ -111,8 +111,11 @@ export interface Store {
    * two turns at once fork the agent session that carries it. */
   recordTurn(conversation: string, slackEventId: string): Promise<TurnOpened>;
   /** Ends it, so the next message in the thread is not told it is busy forever.
-   * Every path that opened one closes it, including the ones that never ran. */
-  closeTurn(conversation: string, turn: string, status: TurnStatus): Promise<void>;
+   * Every path that opened one closes it, including the ones that never ran.
+   * Owner-scoped like every other write here: a conversation id from a caller
+   * is a claim, and closing somebody else's turn would let their next message
+   * run beside the one already going. */
+  closeTurn(owner: Owner, conversation: string, turn: string, status: TurnStatus): Promise<void>;
   /** Advances the cursor, once the member has actually been shown that far. Kept
    * apart from `recordTurn` because a turn that fails to deliver must not leave
    * the thread marked read: the next mention would filter out what nobody saw,
@@ -392,24 +395,32 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       return landed && { id, dmChannel: spec.dmChannel, rootThread: spec.rootThread };
     },
     async recordTurn(conversation, slackEventId) {
-      const turn = await one<{ id: string }>(
-        `INSERT INTO turns (id, conversation_id, slack_event_id)
-         SELECT $1, $2, $3
-          WHERE NOT EXISTS (
-            SELECT 1 FROM turns t
-             WHERE t.conversation_id = $2 AND t.status = 'running'
-               AND t.created_at > now() - make_interval(mins => $4))
-         ON CONFLICT (slack_event_id) DO NOTHING RETURNING id`,
-        [randomUUID(), conversation, slackEventId, TURN_STALE_MINUTES],
+      // Retired first, so the index below does not hold a thread against a bot
+      // that died mid-turn. Idempotent, which is why it needs no transaction:
+      // the index is what actually decides, and this only widens what it lets
+      // through.
+      await pool.query(
+        `UPDATE turns SET status = 'cancelled'
+          WHERE conversation_id = $1 AND status = 'running'
+            AND created_at < now() - make_interval(mins => $2)`,
+        [conversation, TURN_STALE_MINUTES],
       );
-      // Nothing inserted is either of two answers, and the member is told a
-      // different thing for each — so which one is worth a second query.
-      if (!turn) {
-        const seen = await one<{ id: string }>(`SELECT id FROM turns WHERE slack_event_id = $1`, [
-          slackEventId,
-        ]);
-        return { refused: seen ? 'duplicate' : 'busy' };
+      let turn: { id: string } | undefined;
+      try {
+        turn = await one<{ id: string }>(
+          `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
+           RETURNING id`,
+          [randomUUID(), conversation, slackEventId],
+        );
+      } catch (error) {
+        // Which constraint says which answer, and the member is told a
+        // different thing for each.
+        const constraint = (error as { constraint?: string }).constraint;
+        if (constraint === 'turns_one_per_slack_event') return { refused: 'duplicate' };
+        if (constraint === 'turns_one_running_per_conversation') return { refused: 'busy' };
+        throw error;
       }
+      if (!turn) return { refused: 'duplicate' };
       // Activity is the invocation, not the delivery: a member who mentioned the
       // bot today is using this thread whether or not the answer landed.
       await pool.query(`UPDATE conversations SET last_activity_at = now() WHERE id = $1`, [
@@ -417,12 +428,13 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       ]);
       return { turn: turn.id };
     },
-    async closeTurn(conversation, turn, status) {
-      await pool.query(`UPDATE turns SET status = $3 WHERE id = $2 AND conversation_id = $1`, [
-        conversation,
-        turn,
-        status,
-      ]);
+    async closeTurn(owner, conversation, turn, status) {
+      await pool.query(
+        `UPDATE turns t SET status = $4
+           FROM conversations c
+          WHERE t.id = $3 AND t.conversation_id = c.id AND c.id = $2 AND c.user_id = $1`,
+        [owner, conversation, turn, status],
+      );
     },
     async markConversationSeen(conversation, seenThroughTs) {
       // Never backwards: a redelivery or a slow turn must not rewind the thread

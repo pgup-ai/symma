@@ -943,7 +943,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       }
       // Closed first, and whatever happens to the resume: a turn that stayed
       // open would tell the next message this thread is still busy.
-      await store.closeTurn(conversation, turn, status);
+      await store.closeTurn(owner, conversation, turn, status);
       if (str(session) && str(endpoint) && str(agent)) {
         await store.recordResume(
           owner,

@@ -1879,9 +1879,16 @@ describe('tenancy', () => {
         refused: 'duplicate',
       });
 
-      await store.closeTurn(conversation.id, first.turn, 'completed');
+      await store.closeTurn(abe.owner, conversation.id, first.turn, 'completed');
       const second = await store.recordTurn(conversation.id, 'seq-Ev-2');
       assert.ok('turn' in second);
+
+      // A conversation id from a caller is a claim, so closing one is scoped
+      // like every other write — otherwise a mistaken id lets somebody else's
+      // next message run beside the turn they already have going.
+      const other = await provision(url, { team: 'seq', slackUser: 'bex', endpoint: 'bex-mac' });
+      await store.closeTurn(other.owner, conversation.id, second.turn, 'completed');
+      assert.deepEqual(await store.recordTurn(conversation.id, 'seq-Ev-x'), { refused: 'busy' });
 
       // A bot that died mid-turn must not lock a member out of their own
       // thread until somebody notices, so an unclosed one stops holding it.

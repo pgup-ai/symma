@@ -159,6 +159,12 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
 --
 -- Not `conversation_sessions`: that one's `session_id` references the relay's
 -- sessions, and an agent's own id is not one of those.
+-- One running turn per conversation, enforced here because a check-and-insert
+-- is not: under READ COMMITTED two concurrent events both see no running turn
+-- and both insert. Partial, so the finished ones are unconstrained.
+CREATE UNIQUE INDEX IF NOT EXISTS turns_one_running_per_conversation
+  ON turns (conversation_id) WHERE status = 'running';
+
 CREATE TABLE IF NOT EXISTS conversation_resume (
   conversation_id text PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
   session_id      text NOT NULL,

@@ -283,16 +283,17 @@ export async function runRemotePrompt(
     // Fails open, and one at a time: the answer is already in hand, so neither
     // a sink that throws nor the notices after it are worth losing it for
     // (AGENTS.md, "auxiliary sessions fail open").
-    for (const [what, deliver] of [
-      ['session', () => config.onSession?.(result.sessionId)],
-      ...result.notices.map((notice) => ['notice', () => config.onNotice?.(notice)] as const),
-    ] as const) {
+    // Fails open: the answer is already in hand, so nothing delivered after it
+    // is worth losing it for (AGENTS.md, "auxiliary sessions fail open").
+    const deliver = (what: string, sink: () => void): void => {
       try {
-        deliver();
+        sink();
       } catch (error) {
         log(`${label}: ${what} sink threw, dropping one: ${String(error)}`);
       }
-    }
+    };
+    deliver('session', () => config.onSession?.(result.sessionId));
+    for (const notice of result.notices) deliver('notice', () => config.onNotice?.(notice));
     if (!result.text) {
       throw new Error(
         `${label}: agent produced no assistant message (stopReason=${result.stopReason})`,
