@@ -478,8 +478,12 @@ export async function driveAcpSession(
       seenChunk = false;
       usesMessageIds = false;
     } catch (error) {
-      // Fails open: a session the agent has forgotten costs the caller its
-      // history, and must not also cost it the answer.
+      // Still gated after authenticating is not a session problem, and a fresh
+      // one would need the same credentials — so it stays the caller's error
+      // rather than becoming a turn that quietly starts over.
+      if ((error as { code?: number }).code === -32000) throw error;
+      // Otherwise fails open: a session the agent has forgotten costs the
+      // caller its history, and must not also cost it the answer.
       log(
         `acp:${agent} ${label}: resume ${options.resume} refused (${String(error)}); starting fresh`,
       );

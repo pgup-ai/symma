@@ -766,12 +766,36 @@ describe('acp', () => {
       );
       assert.equal(loaded, loads, label);
       assert.deepEqual(fake.setModeIds, ['plan'], label);
+      assert.deepEqual(result.notices, [], label);
       assert.equal(result.sessionId, sessionId, label);
       // The replay is the turn before this one, so none of it belongs to this
       // one — not as the answer, and not as an aside beside it.
       assert.equal(result.text, 'the answer to this one', label);
-      assert.deepEqual(result.notices, [], label);
     }
+
+    // Still gated after authenticating is the agent refusing credentials, not
+    // the session being gone — starting over would need the same ones.
+    const gated = fakeAgentIo({
+      capabilities: { loadSession: true },
+      authMethods: [{ id: 'api-key' }],
+      onLoad: () => ({ error: { code: -32000, message: 'auth required' } }),
+      onPrompt: (agent) => {
+        agent.finish();
+      },
+    });
+    await assert.rejects(
+      driveAcpSession(
+        { input: gated.input, output: gated.output },
+        {
+          cwd: '/tmp',
+          prompt: 'hi',
+          agent: 'probe',
+          label: 'gated',
+          log: () => {},
+          resume: 'old-1',
+        },
+      ),
+    );
   });
 
   it('keeps what the agent said about itself out of the answer', async () => {
