@@ -1,6 +1,6 @@
 {
   "name": "@symma/protocol",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "ACP framing, session driving, agent specs and signed envelopes",
   "repository": {
     "type": "git",

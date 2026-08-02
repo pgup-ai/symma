@@ -167,7 +167,10 @@ const read = (raw: RawMessage[]): ThreadMessage[] =>
 
 /** `fetch` is injectable so a test can answer without a live workspace; the
  * default client keeps the SDK's own retry, which is what handles a 429. */
-export function slackApi(token: string, options: { fetch?: typeof fetch } = {}): SlackApi {
+export function slackApi(
+  token: string,
+  options: { fetch?: typeof fetch; log?: (message: string) => void } = {},
+): SlackApi {
   const client = new WebClient(token, options.fetch ? { fetch: options.fetch } : {});
   return {
     async threadReplies(channel, thread) {
@@ -282,17 +285,23 @@ export function slackApi(token: string, options: { fetch?: typeof fetch } = {}):
       }
     },
     async mark(channel, ts, state) {
+      // Losing a mark must not cost the answer it hints at — but a scope that
+      // was never granted loses every one, and silence left nothing to find
+      // that with.
+      const swallow = (what: string) => (error: unknown) => {
+        options.log?.(`${what}: ${String(error)}`);
+      };
       // Swallowed one call at a time rather than around the pair: a working
       // mark that is not there is ordinary — its own add may have failed — and
       // must not stop the one that replaces it.
       if (state !== 'working') {
         await client.reactions
           .remove({ channel, timestamp: ts, name: MARK.working })
-          .catch(() => undefined);
+          .catch(swallow('unmarking working'));
       }
       await client.reactions
         .add({ channel, timestamp: ts, name: MARK[state] })
-        .catch(() => undefined);
+        .catch(swallow(`marking ${state}`));
     },
     async share(channel, thread, text) {
       try {

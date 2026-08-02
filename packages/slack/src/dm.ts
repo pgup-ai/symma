@@ -3,9 +3,10 @@
  * is; a top-level message opens one with no source (§4).
  *
  * The turn is recorded, then run on the member's own machine — or refused in
- * §3's words when that machine cannot take it. Each turn is its own ACP session
- * — nothing advertises `session/load` — so a follow-up is caught up from this
- * thread and told that is a transcript rather than a resume (§4).
+ * §3's words when that machine cannot take it. Each turn is still its own ACP
+ * session: `driveAcpSession` can reattach to one now, but nothing here has a
+ * session id to hand it, so a follow-up is caught up from this thread and told
+ * that is a transcript rather than a resume (§4).
  */
 import type { TurnTarget } from '@symma/protocol';
 
@@ -113,11 +114,11 @@ const REPLAY =
   'so re-read anything you need.';
 
 /**
- * §4's third rung, which is the only one reachable: `runRemotePrompt` closes its
- * session when the prompt returns, and nothing here advertises `session/load`,
- * so every follow-up is the "agents that cannot reload" case. The DM thread is
- * the transcript — the messages the member can scroll — under the byte ceiling
- * a mention's context already runs under.
+ * §4's third rung, which is the only one reachable from here: `runRemotePrompt`
+ * closes its session when the prompt returns, and nothing remembers the id that
+ * would reattach to it, so every follow-up is the "cannot reload" case. The DM
+ * thread is the transcript — the messages the member can scroll — under the
+ * byte ceiling a mention's context already runs under.
  *
  * The member's own message is dropped: Slack returns the whole thread including
  * the one being handled, and the prompt carries it once on its own. A thread

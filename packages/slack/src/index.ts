@@ -92,7 +92,7 @@ const mint = async (slackUser: string): Promise<MintResult> => {
   return { ok: true, ...((await res.json()) as { code: string; expiresInMinutes: number }) };
 };
 
-const api = slackApi(botToken);
+const api = slackApi(botToken, { log });
 
 /**
  * Runs a handler and makes sure the member hears about it either way.

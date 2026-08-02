@@ -51,6 +51,10 @@ interface FakeAgentScript {
   authMethods?: unknown[];
   /** First session/new fails -32000 until authenticate is called. */
   authGate?: boolean;
+  capabilities?: Record<string, unknown>;
+  /** Answers session/load. Returning an error is an agent that has forgotten
+   * the session; the replay it would otherwise send is the script's to write. */
+  onLoad?: (agent: FakeAgentApi) => Record<string, unknown>;
   onPrompt: (agent: FakeAgentApi) => void;
   onClientResponse?: (id: number, result: unknown, agent: FakeAgentApi) => void;
 }
@@ -94,6 +98,7 @@ function fakeAgentIo(script: FakeAgentScript): {
         result: {
           protocolVersion: 1,
           ...(script.authMethods ? { authMethods: script.authMethods } : {}),
+          ...(script.capabilities ? { agentCapabilities: script.capabilities } : {}),
         },
       });
     } else if (method === 'authenticate') {
@@ -116,6 +121,9 @@ function fakeAgentIo(script: FakeAgentScript): {
           ...(script.configOptions ? { configOptions: script.configOptions } : {}),
         },
       });
+    } else if (method === 'session/load') {
+      const answer = script.onLoad?.(agent) ?? { result: {} };
+      send({ jsonrpc: '2.0', id, ...answer });
     } else if (method === 'session/set_config_option') {
       setConfigCalls.push(message.params);
       const params = message.params as { configId?: string; value?: string };
@@ -683,6 +691,57 @@ describe('acp', () => {
       opencodeEnv.cleanup?.();
       if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = savedKey;
+    }
+  });
+
+  it('reattaches to a session the agent still has, and answers fresh when it does not', async () => {
+    // `session/load` replays the whole conversation as `session/update`
+    // (live-probed against codex-acp 1.1.7), so the previous answer arrives
+    // before this turn's prompt is even sent.
+    const cases = [
+      { label: 'reattaches', loadSession: true, refuse: false, sessionId: 'old-1', loads: 1 },
+      { label: 'agent cannot', loadSession: false, refuse: false, sessionId: 's1', loads: 0 },
+      { label: 'agent forgot it', loadSession: true, refuse: true, sessionId: 's1', loads: 1 },
+    ];
+    for (const { label, loadSession, refuse, sessionId, loads } of cases) {
+      let loaded = 0;
+      const fake = fakeAgentIo({
+        capabilities: { loadSession },
+        onLoad: (agent) => {
+          loaded += 1;
+          if (refuse) return { error: { code: -32602, message: 'no such session' } };
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            messageId: 'item-2',
+            content: { type: 'text', text: 'the answer from last time' },
+          });
+          // Whatever the old session held comes back too, including the asides
+          // the adapter put in its message stream.
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Warning: from last time.' },
+          });
+          return { result: { models: {}, modes: {} } };
+        },
+        onPrompt: (agent) => {
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            messageId: 'm9',
+            content: { type: 'text', text: 'the answer to this one' },
+          });
+          agent.finish();
+        },
+      });
+      const result = await driveAcpSession(
+        { input: fake.input, output: fake.output },
+        { cwd: '/tmp', prompt: 'hi', agent: 'probe', label, log: () => {}, resume: 'old-1' },
+      );
+      assert.equal(loaded, loads, label);
+      assert.equal(result.sessionId, sessionId, label);
+      // The replay is the turn before this one, so none of it belongs to this
+      // one — not as the answer, and not as an aside beside it.
+      assert.equal(result.text, 'the answer to this one', label);
+      assert.deepEqual(result.notices, [], label);
     }
   });
 
