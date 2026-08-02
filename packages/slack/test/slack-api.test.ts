@@ -290,6 +290,35 @@ describe('slack api', () => {
     assert.equal(blocks.map((b) => b.text!.text).join(''), answer, 'all of it, tidy or not');
   });
 
+  it('does not leave a code fence hanging across a split', async () => {
+    // A coding agent's long answer is usually mostly code. A cut inside a fence
+    // leaves the section holding it open — everything after renders as code —
+    // and the next section starting on a stray close.
+    // One long line inside it, so the split lands on the hard cut rather than
+    // on a line break that happens to leave room for the close.
+    const answer = `before\n\`\`\`ts\n${'x'.repeat(7000)}\n\`\`\`\nafter`;
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post('D-nel', answer, '200.0');
+    const parts = (
+      JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+        text: { text: string };
+      }[]
+    ).map((b) => b.text.text);
+    assert.ok(parts.length > 1, 'the fixture actually splits');
+    for (const [index, part] of parts.entries()) {
+      assert.equal(
+        (part.match(/```/g) ?? []).length % 2,
+        0,
+        `section ${String(index)} is balanced`,
+      );
+      // The close it gains has to fit in the same 3,000 as everything else.
+      assert.ok(part.length <= 3000, `section ${String(index)} is ${String(part.length)} long`);
+    }
+    // Reopened in the language it was opened with, or the code stops being ts
+    // halfway down.
+    assert.ok(parts.slice(1).every((part) => part.startsWith('```ts')));
+  });
+
   it('still splits a long answer with nothing beside it', async () => {
     // The ordinary DM case: no notice, and no thread to share back to. Without
     // blocks the whole answer rides the fallback, which has a cap of its own.

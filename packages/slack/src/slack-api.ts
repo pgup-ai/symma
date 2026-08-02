@@ -94,20 +94,37 @@ const clip = (text: string, limit: number): string =>
 const cut = (text: string, at: number): number =>
   /[\uD800-\uDBFF]/.test(text[at - 1]!) ? at - 1 : at;
 
-/** The answer as however many sections it needs. Split at a line break near the
- * limit where there is one, so a fence or a list is less likely to be cut
- * through the middle. */
+/** The fence a part leaves hanging, in the form it was opened with, or
+ * undefined when it closed everything it opened. */
+function openFence(part: string): string | undefined {
+  const fences = part.match(/^```.*$/gm) ?? [];
+  return fences.length % 2 ? fences[fences.length - 1] : undefined;
+}
+
+/** The answer as however many sections it needs, split at a line break near the
+ * limit where there is one. */
 function sections(text: string, budget: number): SectionBlock[] {
   const parts: string[] = [];
   let rest = text;
   while (rest.length > BLOCK_TEXT_LIMIT && parts.length < budget - 1) {
-    const line = rest.lastIndexOf('\n', BLOCK_TEXT_LIMIT);
+    // Short of the limit, because the closing fence below has to fit as well.
+    const room = BLOCK_TEXT_LIMIT - 4;
+    const line = rest.lastIndexOf('\n', room);
     // Only when what is left still fits without it: a tidy break is worth less
     // than the tail it would cost, since the blocks that remain are counted.
-    const fits = rest.length - line <= (budget - parts.length - 1) * BLOCK_TEXT_LIMIT;
-    const at = line > BLOCK_TEXT_LIMIT / 2 && fits ? line : cut(rest, BLOCK_TEXT_LIMIT);
-    parts.push(rest.slice(0, at));
+    const fits = rest.length - line <= (budget - parts.length - 1) * room;
+    const at = line > room / 2 && fits ? line : cut(rest, room);
+    let part = rest.slice(0, at);
     rest = rest.slice(at);
+    // A cut inside a fence leaves it open, so this section swallows the rest of
+    // itself as code and the next starts with a stray close. Shut here and
+    // reopened there, in the language it was opened with.
+    const hanging = openFence(part);
+    if (hanging !== undefined) {
+      part += '\n```';
+      rest = `${hanging}\n${rest}`;
+    }
+    parts.push(part);
   }
   // Only reachable on an answer past the whole message's budget, where the
   // choice is a truncated one or none at all.
