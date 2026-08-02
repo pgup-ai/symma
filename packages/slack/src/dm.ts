@@ -283,6 +283,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return 'failed';
   }
 
+  const ran = {
+    session: answer.session,
+    endpoint: decision.endpoint,
+    agent: decision.agent,
+    ...(decision.workspace ? { workspace: decision.workspace } : {}),
+  };
   // §5: the answer is a private draft, and the button is the only way it leaves.
   // Nowhere to go back to means no button, rather than one that would refuse
   // itself when pressed.
@@ -301,20 +307,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // failed. Leaving the mark saying it is still going would outlive that
     // message and be the last thing they are told.
     await deps.mark(message.channel, message.ts, 'failed');
-    await deps.finish(conversation.id, turn, 'completed', {
-      session: answer.session,
-      endpoint: decision.endpoint,
-      agent: decision.agent,
-      ...(decision.workspace ? { workspace: decision.workspace } : {}),
-    });
+    await deps.finish(conversation.id, turn, 'completed', ran);
     throw error;
   }
   await deps.mark(message.channel, message.ts, 'done');
-  await deps.finish(conversation.id, turn, 'completed', {
-    session: answer.session,
-    endpoint: decision.endpoint,
-    agent: decision.agent,
-    ...(decision.workspace ? { workspace: decision.workspace } : {}),
-  });
+  await deps.finish(conversation.id, turn, 'completed', ran);
   return existing ? 'resumed' : 'opened';
 }
