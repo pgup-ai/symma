@@ -405,13 +405,13 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
             AND created_at < now() - make_interval(mins => $2)`,
         [conversation, TURN_STALE_MINUTES],
       );
-      let turn: { id: string } | undefined;
+      let turn: { id: string };
       try {
-        turn = await one<{ id: string }>(
+        turn = (await one<{ id: string }>(
           `INSERT INTO turns (id, conversation_id, slack_event_id) VALUES ($1, $2, $3)
            RETURNING id`,
           [randomUUID(), conversation, slackEventId],
-        );
+        ))!;
       } catch (error) {
         // Which constraint says which answer, and the member is told a
         // different thing for each.
@@ -420,7 +420,6 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         if (constraint === 'turns_one_running_per_conversation') return { refused: 'busy' };
         throw error;
       }
-      if (!turn) return { refused: 'duplicate' };
       // Activity is the invocation, not the delivery: a member who mentioned the
       // bot today is using this thread whether or not the answer landed.
       await pool.query(`UPDATE conversations SET last_activity_at = now() WHERE id = $1`, [

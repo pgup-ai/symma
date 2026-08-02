@@ -281,10 +281,8 @@ export async function runRemotePrompt(
       `${label} prompt complete via gateway: stopReason=${result.stopReason} last-message=${result.text.length} chars`,
     );
     // Fails open, and one at a time: the answer is already in hand, so neither
-    // a sink that throws nor the notices after it are worth losing it for
+    // a sink that throws nor the ones after it are worth losing it for
     // (AGENTS.md, "auxiliary sessions fail open").
-    // Fails open: the answer is already in hand, so nothing delivered after it
-    // is worth losing it for (AGENTS.md, "auxiliary sessions fail open").
     const deliver = (what: string, sink: () => void): void => {
       try {
         sink();

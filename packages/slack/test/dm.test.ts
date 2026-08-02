@@ -103,8 +103,13 @@ function harness(
       turns.push(spec);
       return Promise.resolve({
         conversation: over.existing ?? CONVERSATION,
-        ...(over.busy ? { refused: 'busy' as const } : {}),
-        ...(over.turn === false ? { refused: 'duplicate' as const } : { turn: 'turn-1' }),
+        // Neither refusal carries a turn, which is what the gateway sends and
+        // what a harness handing back both would hide.
+        ...(over.busy
+          ? { refused: 'busy' as const }
+          : over.turn === false
+            ? { refused: 'duplicate' as const }
+            : { turn: 'turn-1' }),
       });
     },
     endpoint: (conversation) => {

@@ -189,12 +189,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     rootThread,
     slackEventId: message.eventId,
   });
-  // Recorded before anything is posted, so a Slack redelivery answers with
-  // silence rather than a second acknowledgement.
-  if (refused === 'duplicate' || !turn) return 'already handled';
   // A thread is a sequence. Two turns at once fork the agent session that
   // carries it, and neither half then holds the whole conversation — so the
-  // second one waits, and is told rather than left wondering.
+  // second one waits, and is told rather than left wondering. Before the guard
+  // below, which a refusal also trips: neither kind carries a turn.
   if (refused === 'busy') {
     await deps.post(
       conversation.dmChannel,
@@ -203,6 +201,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     );
     return 'still working';
   }
+  // Recorded before anything is posted, so a Slack redelivery answers with
+  // silence rather than a second acknowledgement.
+  if (!turn) return 'already handled';
 
   // A file with no caption is an ordinary message with an empty prompt. Caught
   // before the ask below, so it neither mints a token nor starts a run.

@@ -159,6 +159,16 @@ CREATE TABLE IF NOT EXISTS conversation_sessions (
 --
 -- Not `conversation_sessions`: that one's `session_id` references the relay's
 -- sessions, and an agent's own id is not one of those.
+-- `status` was never written before this, so every turn a database already
+-- holds is `running` and any conversation with two of them would refuse the
+-- index below — which is every database that has run at all. All but the newest
+-- are retired first; a second run finds nothing to do.
+UPDATE turns SET status = 'cancelled'
+ WHERE status = 'running'
+   AND id NOT IN (SELECT DISTINCT ON (conversation_id) id
+                    FROM turns WHERE status = 'running'
+                   ORDER BY conversation_id, created_at DESC, id DESC);
+
 -- One running turn per conversation, enforced here because a check-and-insert
 -- is not: under READ COMMITTED two concurrent events both see no running turn
 -- and both insert. Partial, so the finished ones are unconstrained.

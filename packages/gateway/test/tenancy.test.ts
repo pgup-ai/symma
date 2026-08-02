@@ -1868,6 +1868,31 @@ describe('tenancy', () => {
         agent: 'codex',
       });
       assert.ok(conversation);
+      // Every turn a database already holds is `running`, because nothing wrote
+      // that column until now — so the index has to be reachable from a state
+      // it would itself refuse. Dropping it is what makes that state buildable.
+      await pool.query(`DROP INDEX turns_one_running_per_conversation`);
+      await pool.query(
+        `INSERT INTO turns (id, conversation_id, slack_event_id, status)
+         VALUES ('legacy-1', $1, 'seq-old-1', 'running'),
+                ('legacy-2', $1, 'seq-old-2', 'running')`,
+        [conversation.id],
+      );
+      await openStore(url, join(import.meta.dirname, '../src/schema.sql')).then((s) => s.close());
+      assert.deepEqual(
+        (
+          await pool.query(
+            `SELECT count(*)::int AS n FROM turns WHERE conversation_id = $1 AND status = 'running'`,
+            [conversation.id],
+          )
+        ).rows[0],
+        { n: 1 },
+        'all but the newest are retired, or the index cannot be created at all',
+      );
+      await pool.query(`UPDATE turns SET status = 'cancelled' WHERE conversation_id = $1`, [
+        conversation.id,
+      ]);
+
       const first = await store.recordTurn(conversation.id, 'seq-Ev-1');
       assert.ok('turn' in first);
 
