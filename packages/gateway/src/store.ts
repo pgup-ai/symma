@@ -179,8 +179,13 @@ export interface Store {
    * on the same project (§4) rather than wherever the endpoint lists first. */
   bindConversation(owner: Owner, conversation: string, workspaceId: string): Promise<void>;
   /** Records the mode this conversation runs under, chosen by its member in
-   * the DM root. Applies from the next turn. */
-  bindConversationMode(owner: Owner, conversation: string, modeId: string): Promise<void>;
+   * the DM root; `null` clears this one row (a workspace change shedding the
+   * old root's pick). Applies from the next turn. */
+  bindConversationMode(owner: Owner, conversation: string, modeId: string | null): Promise<void>;
+  /** Clears the mode across the conversation's whole workspace. A clear
+   * scoped to one row is not enough where it matters — `lastModeFor` would
+   * refill the same dead mode from a sibling thread on the very next turn. */
+  shedWorkspaceMode(owner: Owner, conversation: string): Promise<void>;
   /** What this member last picked for a workspace, so a new thread there
    * starts where they left off rather than back at read-only every time. */
   lastModeFor(owner: Owner, workspaceId: string): Promise<string | undefined>;
@@ -633,11 +638,26 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
     },
     async bindConversationMode(owner, conversation, modeId) {
-      await pool.query(`UPDATE conversations SET mode_id = $3 WHERE id = $2 AND user_id = $1`, [
-        owner,
-        conversation,
-        modeId,
-      ]);
+      // A pick is also activity: the touch is what makes `lastModeFor` mean
+      // "last chosen" rather than "attached to whichever thread spoke most
+      // recently" — a re-pick on a quiet thread must win inheritance. A clear
+      // is not a pick, and bumps nothing.
+      await pool.query(
+        modeId === null
+          ? `UPDATE conversations SET mode_id = NULL WHERE id = $2 AND user_id = $1`
+          : `UPDATE conversations SET mode_id = $3, last_activity_at = now()
+              WHERE id = $2 AND user_id = $1`,
+        modeId === null ? [owner, conversation] : [owner, conversation, modeId],
+      );
+    },
+    async shedWorkspaceMode(owner, conversation) {
+      await pool.query(
+        `UPDATE conversations SET mode_id = NULL
+          WHERE user_id = $1
+            AND (id = $2 OR (workspace_id IS NOT NULL AND workspace_id =
+              (SELECT workspace_id FROM conversations WHERE user_id = $1 AND id = $2)))`,
+        [owner, conversation],
+      );
     },
     async lastModeFor(owner, workspaceId) {
       const row = await one<{ mode: string }>(
@@ -967,6 +987,7 @@ export function localStore(
     mintClientToken: needsDatabase,
     bindConversation: needsDatabase,
     bindConversationMode: needsDatabase,
+    shedWorkspaceMode: needsDatabase,
     lastModeFor: needsDatabase,
     conversationForId: needsDatabase,
     recordResume: needsDatabase,

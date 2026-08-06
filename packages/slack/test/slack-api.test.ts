@@ -228,6 +228,41 @@ describe('slack api', () => {
     assert.deepEqual(select.initial_option, select.options![1]);
   });
 
+  it('bounds the picker to what Slack will post and what can round-trip', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    // 150 modes, one un-postable id (space fails the wire's alphabet) and one
+    // whose encoded value would blow Slack's 150-char option cap — plus a
+    // current mode sitting past the option cap, which loses its highlight
+    // rather than making the whole post invalid.
+    const flood = Array.from({ length: 150 }, (_, i) => ({ id: `mode-${String(i)}` }));
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      undefined,
+      undefined,
+      {
+        conversation: 'conv-1',
+        modes: {
+          currentModeId: 'mode-149',
+          availableModes: [{ id: 'not safe' }, { id: 'x'.repeat(128) }, ...flood],
+        },
+      },
+    );
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      elements?: { type: string; options?: { value: string }[]; initial_option?: unknown }[];
+    }[];
+    const select = blocks
+      .find((b) => b.type === 'actions')
+      ?.elements?.find((e) => e.type === 'static_select');
+    assert.equal(select!.options!.length, 100);
+    assert.ok(
+      select!.options!.every((o) => o.value.length <= 150 && !o.value.includes('not safe')),
+    );
+    assert.equal(select!.initial_option, undefined);
+  });
+
   it('splits an answer Slack would reject rather than losing the post', async () => {
     // A section caps at 3,000 characters and the message at 50 blocks. Slack
     // rejects the whole post over either, and `handleDm` reports a rejected

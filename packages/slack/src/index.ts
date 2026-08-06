@@ -219,6 +219,9 @@ const depsFor = (user: string) => {
     seen: async (conversation: string, seenThroughTs: string) => {
       await ask('/api/slack/seen', { user, conversation, seenThroughTs });
     },
+    shedMode: async (conversation: string) => {
+      await ask('/api/slack/mode', { user, conversation, mode: null });
+    },
   };
 };
 
@@ -259,6 +262,7 @@ const connection = socketMode({
               endpoint: deps.endpoint,
               run: deps.run,
               finish: deps.finish,
+              shedMode: deps.shedMode,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,

@@ -397,6 +397,7 @@ describe('acp', () => {
   });
 
   it('runs the caller-chosen mode and reports the roster', async () => {
+    const permissionAnswers: unknown[] = [];
     const fake = fakeAgentIo({
       modes: {
         currentModeId: 'read-only',
@@ -406,6 +407,18 @@ describe('acp', () => {
         ],
       },
       onPrompt: (agent) => {
+        // The driver's own floor follows the mode: a local caller that asked
+        // for writes must not have this layer deny what the mode promises.
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'edit' },
+          options: [
+            { optionId: 'ao', kind: 'allow_once' },
+            { optionId: 'ro', kind: 'reject_once' },
+          ],
+        });
+      },
+      onClientResponse: (_id, result, agent) => {
+        permissionAnswers.push(result);
         agent.update({
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'ok' },
@@ -422,6 +435,7 @@ describe('acp', () => {
       mode: 'agent',
     });
     assert.deepEqual(fake.setModeIds, ['agent']);
+    assert.deepEqual(permissionAnswers, [{ outcome: { outcome: 'selected', optionId: 'ao' } }]);
     assert.deepEqual(result.modes, {
       currentModeId: 'agent',
       availableModes: [

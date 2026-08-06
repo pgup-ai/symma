@@ -96,6 +96,10 @@ export interface DmDeps {
   run: (
     spec: RunSpec,
   ) => Promise<{ text: string; notices: string[]; session: string; modes?: SessionModes }>;
+  /** Clears the conversation's stored mode. Called when a turn failed because
+   * the agent no longer offers it — the picker that could fix it only rides
+   * answers, so without this the thread would fail every turn from here on. */
+  shedMode: (conversation: string) => Promise<void>;
   /** Ends the turn, and remembers the session it ran in when there was one —
    * against what it ran under, since an id means nothing on another machine,
    * agent or directory. Every path that opened a turn calls this, including the
@@ -247,11 +251,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // spill the rest of the sentence into code. Their own machine and their own
   // DM, so this is rendering and not a trust boundary.
   // The mode is part of the scope: a member who enabled writes should read it
-  // back on every turn, not have to remember what they picked last week.
+  // back on every turn, not have to remember what they picked last week. An
+  // absent mode is named too — read-only is the floor's truth for every
+  // workspace turn that never picked one, old companions included.
   const scope = decision.label
-    ? `On it, in \`${decision.label.replaceAll('`', '')}\`${
-        decision.mode ? ` — \`${decision.mode}\` mode` : ''
-      }.`
+    ? `On it, in \`${decision.label.replaceAll('`', '')}\` — \`${decision.mode ?? 'read-only'}\` mode.`
     : 'On it. It has no access to your files, so keep the question self-contained.';
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
@@ -284,11 +288,21 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // Posted into the thread they are watching rather than left to the socket's
     // catch, which answers at the DM root where this reply is not.
     deps.log(`run failed: ${String(error)}`);
+    // The driver names this failure precisely — matched on its exact shape,
+    // because "agent X not offered" is a different refusal — and it is the one
+    // that would otherwise repeat forever: the stored mode has drifted off the
+    // agent's roster, and nothing that fails a turn can offer the picker that
+    // would fix it.
+    const unoffered =
+      decision.mode !== undefined && /: mode \S+ not offered \(/.test(String(error));
+    if (unoffered) await deps.shedMode(conversation.id).catch(() => undefined);
     await deps.finish(conversation.id, turn, 'failed');
     await deps.mark(message.channel, message.ts, 'failed');
     await deps.post(
       conversation.dmChannel,
-      'That run did not finish. Send it again and I will retry.',
+      unoffered
+        ? `The agent no longer offers \`${decision.mode}\` mode, so I cleared it. Send it again and I will retry read-only.`
+        : 'That run did not finish. Send it again and I will retry.',
       conversation.rootThread,
     );
     return 'failed';

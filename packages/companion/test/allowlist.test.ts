@@ -229,18 +229,22 @@ describe('workspace allowlist', () => {
 
     const answered = async (sessionId: string, body: Record<string, unknown>) => {
       await controlFor('opened', { sessionId, agent: 'perm', workspace: ws, ...body });
-      const answer = await waitFor(
-        async () =>
-          existsSync(answerPath)
-            ? (JSON.parse(readFileSync(answerPath, 'utf8')) as Record<string, unknown>)
-            : undefined,
-        `floor answer for ${sessionId}`,
-      );
-      rmSync(answerPath);
-      // Freed before the next open: the shared companion has two slots, and a
-      // session this test leaves behind starves the shutdown test's open.
-      await open({ kind: 'close', sessionId });
-      return answer;
+      try {
+        const answer = await waitFor(
+          async () =>
+            existsSync(answerPath)
+              ? (JSON.parse(readFileSync(answerPath, 'utf8')) as Record<string, unknown>)
+              : undefined,
+          `floor answer for ${sessionId}`,
+        );
+        rmSync(answerPath);
+        return answer;
+      } finally {
+        // Freed even when the floor never answered: the shared companion has
+        // two slots, and a leaked session would starve the shutdown test's
+        // open with a timeout naming the wrong culprit.
+        await open({ kind: 'close', sessionId });
+      }
     };
 
     assert.deepEqual(await answered('sid-perm-writes', { mode: 'agent' }), {

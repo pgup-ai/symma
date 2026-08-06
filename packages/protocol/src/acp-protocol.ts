@@ -445,7 +445,13 @@ export async function driveAcpSession(
     },
     (method, params) => {
       if (method === 'session/request_permission') {
-        const response = respondToPermissionRequest(params as PermissionRequestParams);
+        // The driver's own floor follows the caller's mode the same way the
+        // companion's does — a local caller that asked for a write-capable
+        // mode must not have this layer silently deny what the mode promises.
+        const response = respondToPermissionRequest(
+          params as PermissionRequestParams,
+          options.mode && options.mode !== 'read-only' ? 'writes' : 'read-only',
+        );
         if (response.outcome.outcome !== 'selected') {
           log(`acp:${agent} ${label}: permission request had no usable option; cancelled`);
         }

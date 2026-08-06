@@ -904,23 +904,36 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const offered = attached?.workspaces ?? [];
       const row = conversation ? await store.conversationForId(owner, conversation) : undefined;
       const workspace = offered.find((w) => w.id === row?.workspaceId) ?? offered[0];
-      // Written back so the thread keeps its project. Only on a change, or every
-      // turn costs a write to say what the row already says.
-      if (workspace && conversation && workspace.id !== row?.workspaceId)
-        await store.bindConversation(owner, conversation, workspace.id);
+      const kept = workspace !== undefined && workspace.id === row?.workspaceId;
 
-      // The mode, by the same rule: the thread's own pick, else what this
-      // member last chose for the workspace. Served only where it can be
-      // honored — a named root, on an endpoint whose hello advertised modes
-      // for the agent — so an old companion is never sent a mode it would
-      // drop on the floor and quietly run read-only against a picker that
-      // said otherwise.
+      // The mode, by the workspace's own rule — except that a workspace change
+      // sheds the thread's pick instead of carrying it: write permission
+      // chosen for one directory must not follow the thread into another. The
+      // new root still inherits what its member last picked *for it*, and
+      // read-only is what is left when they never have. Served only where it
+      // can be honored — a named root, on an endpoint whose hello advertised
+      // modes for the agent — so an old companion is never sent a mode it
+      // would drop on the floor and quietly run read-only against a picker
+      // that said otherwise.
       const modeCapable = attached?.agents.find((a) => a.agent === agent)?.modes === true;
       let mode: string | undefined;
-      if (workspace && modeCapable && conversation) {
-        mode = row?.modeId ?? (await store.lastModeFor(owner, workspace.id));
-        if (mode && mode !== row?.modeId)
-          await store.bindConversationMode(owner, conversation, mode);
+      if (workspace && conversation) {
+        // Read before the workspace rebind below: once this thread's row names
+        // the new root, its own not-yet-shed mode satisfies the inheritance
+        // query and the stale pick follows it in.
+        if (modeCapable)
+          mode = (kept ? row?.modeId : undefined) ?? (await store.lastModeFor(owner, workspace.id));
+      }
+      // Written back so the thread keeps its project. Only on a change, or every
+      // turn costs a write to say what the row already says.
+      if (workspace && conversation && !kept)
+        await store.bindConversation(owner, conversation, workspace.id);
+      if (workspace && conversation) {
+        const stored = row?.modeId ?? null;
+        // An advertisement that lapsed (an older companion reattaching) keeps
+        // the stored pick for when it returns; only a workspace change clears.
+        const next = mode ?? (kept ? stored : null);
+        if (next !== stored) await store.bindConversationMode(owner, conversation, next);
       }
 
       // §4's second rung, offered only for the machine, agent and directory the
@@ -949,13 +962,18 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (url.pathname === '/api/slack/mode') {
       const { conversation, mode } = body as { conversation?: unknown; mode?: unknown };
       // id-safe like everything that crosses to a companion: the value ends up
-      // in a child process env var there.
-      if (!str(conversation) || !isSafeId(mode)) return sendJson(res, 400, { error: 'request' });
+      // in a child process env var there. `null` sheds — the bot clearing a
+      // stored mode the agent stopped offering, across the whole workspace,
+      // or `lastModeFor` refills the dead mode from a sibling thread and the
+      // next turn fails the same way.
+      if (!str(conversation) || (mode !== null && !isSafeId(mode)))
+        return sendJson(res, 400, { error: 'request' });
       // Scoped to the caller's own conversation, like `seen`: the bot speaks
       // for whichever member picked, not for all of them.
       if (!(await store.conversationForId(owner, conversation)))
         return sendJson(res, 404, { error: 'not found' });
-      await store.bindConversationMode(owner, conversation, mode);
+      if (mode === null) await store.shedWorkspaceMode(owner, conversation);
+      else await store.bindConversationMode(owner, conversation, mode);
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/turn/done') {
