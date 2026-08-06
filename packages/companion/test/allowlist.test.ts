@@ -23,6 +23,28 @@ writeFileSync('ran-here.txt', process.cwd());
 process.stdin.resume();
 `;
 
+/** Asks permission for an edit the moment it starts and records the floor's
+ * answer in its cwd — the only way to observe the companion-side floor from
+ * outside, since permission requests are answered there and never relayed. */
+const PERM_AGENT = `import { writeFileSync } from 'node:fs';
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'session/request_permission', params: {
+  toolCall: { kind: 'edit' },
+  options: [{ optionId: 'ao', kind: 'allow_once' }, { optionId: 'ro', kind: 'reject_once' }],
+} }) + '\\n');
+process.stdin.on('data', (c) => {
+  buf += c;
+  let i;
+  while ((i = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, i); buf = buf.slice(i + 1);
+    if (!line.trim()) continue;
+    const m = JSON.parse(line);
+    if (m.id === 7) writeFileSync('perm-answer.json', JSON.stringify(m.result));
+  }
+});
+`;
+
 let gateway: ChildProcess | undefined;
 let companion: ChildProcess | undefined;
 let base: string;
@@ -91,6 +113,8 @@ before(async () => {
   writeFileSync(join(mine, 'source.txt'), 'the work they asked about');
   const agentPath = join(dataDir, 'probe-agent.mjs');
   writeFileSync(agentPath, AGENT);
+  const permAgentPath = join(dataDir, 'perm-agent.mjs');
+  writeFileSync(permAgentPath, PERM_AGENT);
 
   const port = 24000 + Math.floor(Math.random() * 2000);
   base = `http://127.0.0.1:${port}`;
@@ -128,7 +152,7 @@ before(async () => {
         SYMMA_COMPANION_TOKEN: 'endpoint-tok',
         SYMMA_COMPANION_ENDPOINT: 'ws',
         SYMMA_COMPANION_DEVICE: 'test-box',
-        SYMMA_COMPANION_AGENTS: `probe=${process.execPath} ${agentPath}`,
+        SYMMA_COMPANION_AGENTS: `probe=${process.execPath} ${agentPath},perm=${process.execPath} ${permAgentPath}`,
         // One real directory and one that is not there, so the skip is covered
         // by the same boot as the advertisement.
         SYMMA_COMPANION_WORKSPACES: `${mine}, /nowhere/at/all`,
@@ -185,6 +209,47 @@ describe('workspace allowlist', () => {
       repo: 'https://example.invalid/repo.git',
     });
     assert.match(both.reason ?? '', /cannot both be given/);
+  });
+
+  it('refuses a write-capable mode outside a named workspace', async () => {
+    const refused = await controlFor('refused', {
+      sessionId: 'sid-mode-temp',
+      agent: 'perm',
+      mode: 'agent',
+    });
+    assert.match(refused.reason ?? '', /mode agent requires a named workspace/);
+  });
+
+  it('answers the floor by mode: writes allowed only where the owner picked them', async () => {
+    const presence = (
+      (await (await fetch(`${base}/api/endpoints`, { headers: auth })).json()) as EndpointPresence[]
+    ).find((entry) => entry.endpoint === 'ws')!;
+    const ws = presence.workspaces![0]!.id;
+    const answerPath = join(mine, 'perm-answer.json');
+
+    const answered = async (sessionId: string, body: Record<string, unknown>) => {
+      await controlFor('opened', { sessionId, agent: 'perm', workspace: ws, ...body });
+      const answer = await waitFor(
+        async () =>
+          existsSync(answerPath)
+            ? (JSON.parse(readFileSync(answerPath, 'utf8')) as Record<string, unknown>)
+            : undefined,
+        `floor answer for ${sessionId}`,
+      );
+      rmSync(answerPath);
+      // Freed before the next open: the shared companion has two slots, and a
+      // session this test leaves behind starves the shutdown test's open.
+      await open({ kind: 'close', sessionId });
+      return answer;
+    };
+
+    assert.deepEqual(await answered('sid-perm-writes', { mode: 'agent' }), {
+      outcome: { outcome: 'selected', optionId: 'ao' },
+    });
+    // Same agent, same root, no mode: the read-only floor stands.
+    assert.deepEqual(await answered('sid-perm-ro', {}), {
+      outcome: { outcome: 'selected', optionId: 'ro' },
+    });
   });
 
   // Last, because proving the shutdown path means ending the companion.

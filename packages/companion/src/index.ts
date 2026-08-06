@@ -2,9 +2,11 @@
 /**
  * Companion: dials OUT to the gateway (no listeners) and bridges local ACP
  * agent binaries — with the machine's own ambient auth — to relayed sessions.
- * Frames pass verbatim; the only local interception is the permission
- * deny-floor, enforced here independently of any client so a remote party can
- * never authorize writes on this machine.
+ * Frames pass verbatim; the only local interception is the permission floor,
+ * enforced here independently of any client: outside an allowlisted workspace
+ * a remote party can never authorize writes on this machine, and inside one
+ * writes happen only under a session mode the owner chose — never granted
+ * from inside a session (§4).
  * Spec: docs/design/m2-acp-gateway.md (M2a).
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -416,6 +418,9 @@ interface LiveSession {
   model?: string;
   seq: number;
   workspace: string;
+  /** The owner picked a write-capable mode for this session, so the floor
+   * answers `writes` instead of the read-only policy. */
+  allowWrites: boolean;
   cleanup?: () => void;
 }
 
@@ -501,7 +506,10 @@ function hello(): HelloControl {
     kind: 'hello',
     endpoint: endpointId,
     device,
-    agents: [...agents.keys()].map((agent) => ({ agent })),
+    agents: [...agents.entries()].map(([agent, spec]) => ({
+      agent,
+      ...(spec.modes ? { modes: true } : {}),
+    })),
     maxSessions,
     version: PROTOCOL_VERSION,
     // Advertising nothing is the ordinary case, and the one every session has
@@ -598,6 +606,12 @@ async function openSession(control: OpenControl): Promise<void> {
   // Cloning a review checkout on top of someone's working tree is not what
   // either caller meant, and the loser would be their uncommitted work.
   if (chosen && control.repo) return refuse('a workspace and a repo cannot both be given');
+  // §4: a write-capable mode only means something inside a root this machine's
+  // owner allowlisted at the keyboard; anywhere else it is refused rather than
+  // quietly downgraded to a tier the caller was not shown.
+  const mode = control.mode;
+  if (mode && mode !== 'read-only' && !chosen)
+    return refuse(`mode ${mode} requires a named workspace`);
 
   const model = control.model ?? 'default';
   const workspace = chosen ? chosen.path : tempWorkspace();
@@ -641,7 +655,10 @@ async function openSession(control: OpenControl): Promise<void> {
   let env: NodeJS.ProcessEnv;
   let cleanup: (() => void) | undefined;
   try {
-    ({ env, cleanup } = spec.env(model));
+    ({ env, cleanup } = spec.env(model, {
+      ...(mode ? { mode } : {}),
+      workspace: Boolean(chosen),
+    }));
   } catch (error) {
     discard(workspace);
     return refuse(`agent setup failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -678,16 +695,21 @@ async function openSession(control: OpenControl): Promise<void> {
     ...(control.model ? { model: control.model } : {}),
     seq: 0,
     workspace,
+    // The workspace requirement was enforced above, so a write-capable mode
+    // here is one the owner chose for a root they allowlisted.
+    allowWrites: Boolean(mode && mode !== 'read-only'),
     cleanup,
   };
   sessions.set(control.sessionId, session);
 
   const read = createNdjsonReader((frame) => {
-    // Deny-floor: permission requests are answered HERE with the read-only
-    // policy and never forwarded — a remote client cannot grant writes.
+    // The floor: permission requests are answered HERE and never forwarded —
+    // a remote client cannot grant anything. The policy is the session's, set
+    // once at open from the mode the owner picked.
     if (frame.method === 'session/request_permission' && frame.id !== undefined) {
       const response = respondToPermissionRequest(
         (frame.params ?? {}) as Parameters<typeof respondToPermissionRequest>[0],
+        session.allowWrites ? 'writes' : 'read-only',
       );
       child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: response })}\n`);
       return;
