@@ -182,7 +182,7 @@ const as = (token: string, path: string, init?: RequestInit): Promise<Response> 
 const attach = async (
   token: string,
   endpoint: string,
-  agents = ['kilo'],
+  agents: (string | { agent: string; modes?: boolean })[] = ['kilo'],
   workspaces?: { id: string; label: string }[],
 ): Promise<() => void> => {
   const abort = new AbortController();
@@ -196,7 +196,7 @@ const attach = async (
       kind: 'hello',
       endpoint,
       device: endpoint,
-      agents: agents.map((agent) => ({ agent })),
+      agents: agents.map((agent) => (typeof agent === 'string' ? { agent } : agent)),
       maxSessions: 2,
       ...(workspaces ? { workspaces } : {}),
     })}\n`,
@@ -1316,6 +1316,73 @@ describe('tenancy', () => {
         const off = await attach(ivy.endpointToken, 'ivy-box', ['kilo'], [both[0]!]);
         return (await ask(conversation)).workspace === 'aaaaaaaaaaaa' ? off : (off(), undefined);
       }, 'the endpoint reattached offering only one');
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
+  it('serves a mode only where the agent advertises it, and hands it down per workspace', async () => {
+    const url = pg.getConnectionUri();
+    const wes = await provision(url, { team: 'ws', slackUser: 'wes', endpoint: 'wes-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const ask = async (conversation: string): Promise<Record<string, string>> =>
+      (await (
+        await fetch(`${base}/api/slack/endpoint`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+          body: JSON.stringify({ team: 'ws', user: 'wes', conversation }),
+        })
+      ).json()) as Record<string, string>;
+    const setMode = (user: string, conversation: string, mode: string): Promise<Response> =>
+      fetch(`${base}/api/slack/mode`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user, conversation, mode }),
+      });
+    let detach: (() => void) | undefined;
+    try {
+      const roots = [{ id: 'cccccccccccc', label: 'symma' }];
+      detach = await attach(wes.endpointToken, 'wes-box', [{ agent: 'kilo', modes: true }], roots);
+      const first = await waitFor(async () => {
+        const opened = await store.openConversation(wes.owner, {
+          dmChannel: 'D-wes',
+          rootThread: '1.0',
+        });
+        return opened?.id;
+      }, 'a conversation to set a mode on');
+
+      // Nothing picked yet is read-only, which travels as absence.
+      assert.equal((await ask(first)).mode, undefined);
+      assert.equal((await setMode('wes', first, 'agent')).status, 200);
+      assert.equal((await ask(first)).mode, 'agent');
+
+      // A fresh thread in the same workspace starts where its member left off.
+      const second = (await store.openConversation(wes.owner, {
+        dmChannel: 'D-wes',
+        rootThread: '2.0',
+      }))!.id;
+      assert.equal((await ask(second)).mode, 'agent');
+
+      // Another member cannot set this conversation's mode — same scoping rule
+      // as `seen`: an id alone is not authorization.
+      await provision(url, { team: 'ws', slackUser: 'naomi', endpoint: 'naomi-box' });
+      const foreign = await fetch(`${base}/api/slack/mode`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'naomi', conversation: first, mode: 'agent' }),
+      });
+      assert.equal(foreign.status, 404);
+
+      // An endpoint whose hello never advertised modes is never served one,
+      // even with the row bound: an old companion would drop the field and run
+      // read-only against a picker that said otherwise.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(wes.endpointToken, 'wes-box', ['kilo'], roots);
+        const served = await ask(first);
+        return served.mode === undefined ? off : (off(), undefined);
+      }, 'the endpoint reattached without modes');
     } finally {
       detach?.();
       await store.close();
