@@ -1027,6 +1027,32 @@ describe('acp', () => {
     }
   });
 
+  it('runs a named workspace from the member own home, mode pinned', () => {
+    const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
+    const runParent = mkdtempSync(join(tmpdir(), 'symma-test-run-'));
+    const runHome = join(runParent, 'codex');
+    try {
+      writeFileSync(codexAuthPath(codexHome), '{"tokens":"t"}');
+      const codex = codexAcpSpec(codexHome, runHome);
+      assert.equal(codex.modes, true);
+      const opened = codex.env('codex/default', { mode: 'agent', workspace: true });
+      // The member's own home — their config, MCP servers and history — with
+      // nothing of ours written into it, and no run home built on the side.
+      assert.equal(opened.env.CODEX_HOME, codexHome);
+      assert.ok(!existsSync(join(codexHome, 'config.toml')), 'their home is not ours to configure');
+      assert.ok(!existsSync(runHome), 'no run home for a session that does not use it');
+      assert.equal(opened.env.INITIAL_AGENT_MODE, 'agent');
+      // A temp-dir open is the isolated path, mode or not: a mode outside a
+      // named workspace was refused before the spawn.
+      const temp = codex.env('codex/default', { workspace: false });
+      assert.equal(temp.env.CODEX_HOME, runHome);
+      assert.equal(temp.env.INITIAL_AGENT_MODE, 'read-only');
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+      rmSync(runParent, { recursive: true, force: true });
+    }
+  });
+
   // The codex assertions below are POSIX-shaped — a link to write through, and
   // an inode that a rename changes. Both are what the implementation does
   // everywhere CI runs it (`ubuntu-latest`), and neither holds on the Windows

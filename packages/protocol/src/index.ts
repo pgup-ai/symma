@@ -18,6 +18,7 @@ export {
   matchModelOptionValue,
   respondToPermissionRequest,
   type AcpAgentSpec,
+  type AgentOpen,
   type AcpSessionIo,
   type AcpSessionOptions,
   type AcpSessionResult,

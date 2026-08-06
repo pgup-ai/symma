@@ -743,13 +743,21 @@ async function selectModelConfigOption(
   }
 }
 
+/** What the companion knows at spawn that a spec may branch on: the caller's
+ * session mode, and whether the session runs in an allowlisted workspace
+ * rather than a temp directory. */
+export interface AgentOpen {
+  mode?: string;
+  workspace?: boolean;
+}
+
 export interface AcpAgentSpec {
   /** Backend id this spec serves; the engine name becomes `acp:<id>`. */
   id: string;
   bin: string;
   args(model: string): string[];
   /** Per-spawn env + optional cleanup (temp auth copies, config files). */
-  env(model: string): { env: NodeJS.ProcessEnv; cleanup?: () => void };
+  env(model: string, open?: AgentOpen): { env: NodeJS.ProcessEnv; cleanup?: () => void };
   /** Ordered model-id candidates for the agent's ACP model config option —
    * for agents (devin, kilo) whose CLI flags/env/config never reach the ACP
    * session. Empty result skips selection; kilo always returns candidates
@@ -758,6 +766,8 @@ export interface AcpAgentSpec {
   modelConfigCandidates?(model: string): string[];
   /** See AcpSessionOptions.requirePlanMode. */
   requirePlanMode?: boolean;
+  /** Advertised in hello: sessions honor a caller-chosen mode (§4). */
+  modes?: boolean;
 }
 export function cursorAcpSpec(apiKey: string): AcpAgentSpec {
   return {
@@ -852,8 +862,14 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
     id: 'codex',
     bin: CODEX_ACP_BIN,
     args: () => [],
-    env: (model) => {
-      const env = codexEnvForHome(prepareCodexRunHome(codexHome, runHome));
+    env: (model, open) => {
+      // A named workspace runs from the member's own home — their config, MCP
+      // servers, skills and session history, the parity §4's inversion is for.
+      // The isolated run home stays for temp-dir sessions, whose read-only
+      // config is ours to write; theirs is not ours to touch.
+      const env = codexEnvForHome(
+        open?.workspace ? codexHome : prepareCodexRunHome(codexHome, runHome),
+      );
       // codex-acp runtime overrides (README): CODEX_PATH swaps the binary and
       // MODEL_PROVIDER redirects models, so ambient values must not reach the
       // child. CODEX_CONFIG is set rather than stripped — being per process is
@@ -863,12 +879,14 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
       const { modelID } = parseModelName(model);
       if (modelID === 'default') delete env.CODEX_CONFIG;
       else env.CODEX_CONFIG = JSON.stringify({ model: modelID });
-      // Live-probed against codex-acp 1.1.7: config.toml's `sandbox_mode`
-      // leaves the ACP mode reading `agent`; this is what selects read-only.
-      env.INITIAL_AGENT_MODE = 'read-only';
+      // Always pinned: live-probed on codex-acp 1.1.7, an unpinned session
+      // opens in `agent` — write-capable — not read-only and not the config's
+      // sandbox default.
+      env.INITIAL_AGENT_MODE = open?.mode ?? 'read-only';
       env.NO_BROWSER = '1';
       return { env };
     },
+    modes: true,
   };
 }
 
