@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -76,7 +76,9 @@ before(async () => {
   writeFileSync(agentPath, AGENT);
   file = join(home, '.local', 'share', 'symma-companion', 'workspaces.json');
 
-  const port = 25000 + Math.floor(Math.random() * 2000);
+  // 27000+: disjoint from the e2e (22000+), allowlist and remote (24000+)
+  // ranges — the suites run concurrently, and a shared port is a flaky boot.
+  const port = 27000 + Math.floor(Math.random() * 2000);
   base = `http://127.0.0.1:${port}`;
   gateway = spawn(
     process.execPath,
@@ -140,25 +142,39 @@ describe('workspace persistence', () => {
       companion = boot(mine);
       await advertises(1);
       assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { workspaces: [mine] });
+
+      companion.kill('SIGKILL');
+      await offline();
+
+      // Present-but-empty is a revocation, not an absence: the operator
+      // disabling the variable must unlist every root — and the copy too, or
+      // the next env-free reboot restores what they just revoked.
+      companion = boot('');
+      await advertises(0);
+      assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { workspaces: [] });
     } finally {
       companion.kill('SIGKILL');
     }
   });
 
-  it('boots past a corrupt copy rather than dying at module scope', async () => {
+  it('sets a corrupt copy aside rather than dying at module scope', async () => {
     // The previous test's kill has to land first, or the poll below reads the
     // dying companion's presence as this boot's.
     await offline();
     writeFileSync(file, 'not json');
     const companion = boot();
     try {
-      // Online with nothing advertised: the file was ignored with a log line,
-      // not allowed to throw before the companion could attach at all.
+      // Online with nothing advertised: the file must not throw before the
+      // companion could attach at all.
       const seen = await waitFor(async () => {
         const now = await endpointNow();
         return now?.online ? now : undefined;
       }, 'online past the corrupt file');
       assert.equal(seen.workspaces, undefined);
+      // Quarantined, not merely ignored: an env-free boot cannot rebuild the
+      // copy, so the bad file would otherwise repeat this silently forever.
+      assert.equal(existsSync(file), false, 'the bad copy is out of the way');
+      assert.equal(readFileSync(`${file}.bad`, 'utf8'), 'not json');
     } finally {
       companion.kill('SIGKILL');
       await offline();

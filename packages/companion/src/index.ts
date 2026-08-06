@@ -160,9 +160,22 @@ const agentNames = (
  */
 const workspacesPath = join(stateDir, 'workspaces.json');
 
-/** What a previous start persisted. Malformed is logged and ignored, like a
- * pairing file that yields nothing — never thrown, which at module scope
- * would be a companion that cannot boot past its own config. */
+/** A copy that cannot be read is set aside as `.bad` rather than merely
+ * ignored: an env-free boot cannot rebuild it, so leaving it in place is the
+ * same silent zero-root boot on every reboot — the rename makes the state
+ * visible on disk and stops the log repeating. Never thrown, which at module
+ * scope would be a companion that cannot boot past its own config. */
+function quarantineWorkspaces(why: string): string[] {
+  try {
+    renameSync(workspacesPath, `${workspacesPath}.bad`);
+  } catch {
+    /* best effort */
+  }
+  log(`set aside ${workspacesPath} (${why}); start with SYMMA_COMPANION_WORKSPACES to rebuild it`);
+  return [];
+}
+
+/** What a previous start persisted. */
 function savedWorkspaceEntries(): string[] {
   if (!existsSync(workspacesPath)) return [];
   try {
@@ -171,21 +184,23 @@ function savedWorkspaceEntries(): string[] {
     if (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'))
       return entries as string[];
   } catch (error) {
-    log(`ignoring ${workspacesPath}: ${error instanceof Error ? error.message : String(error)}`);
-    return [];
+    return quarantineWorkspaces(error instanceof Error ? error.message : String(error));
   }
-  log(`ignoring ${workspacesPath}: no workspaces array in it`);
-  return [];
+  return quarantineWorkspaces('no workspaces array in it');
 }
 
-// Resolved at authoring time, when the shell's cwd is the one a relative
-// entry meant; the login service would resolve it against `/`.
-const envWorkspaceEntries = (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
+// Presence decides, not blankness — a divergence from pairing's pick() on
+// purpose: an allowlist's explicit empty is a revocation to honor and to
+// persist, where a credential's empty is only ever noise. Entries resolve at
+// authoring time, when the shell's cwd is the one a relative entry meant; the
+// login service would resolve it against `/`.
+const workspacesVar = process.env.SYMMA_COMPANION_WORKSPACES;
+const envWorkspaceEntries = (workspacesVar ?? '')
   .split(',')
   .map((raw) => raw.trim())
   .filter(Boolean)
   .map((entry) => resolve(entry));
-if (envWorkspaceEntries.length) {
+if (workspacesVar !== undefined) {
   // Persisted before validation, not after: the entries are the member's
   // intent, and a root unmounted at this boot must come back at the next one
   // rather than vanish from the copy. Compared first so the steady state
@@ -203,7 +218,7 @@ if (envWorkspaceEntries.length) {
   }
 }
 const workspaces = new Map<string, { id: string; label: string; path: string }>();
-for (const path of envWorkspaceEntries.length ? envWorkspaceEntries : savedWorkspaceEntries()) {
+for (const path of workspacesVar !== undefined ? envWorkspaceEntries : savedWorkspaceEntries()) {
   // Skipped with a reason rather than fatal, the same way an absent agent is:
   // one bad line in a config must not stop the machine answering at all. That
   // has to hold for every way a stat can fail — `throwIfNoEntry` covers the
