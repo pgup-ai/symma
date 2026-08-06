@@ -160,33 +160,53 @@ const agentNames = (
  */
 const workspacesPath = join(stateDir, 'workspaces.json');
 
-/** A copy that cannot be read is set aside as `.bad` rather than merely
+/** A copy that cannot be parsed is set aside as `.bad` rather than merely
  * ignored: an env-free boot cannot rebuild it, so leaving it in place is the
  * same silent zero-root boot on every reboot — the rename makes the state
- * visible on disk and stops the log repeating. Never thrown, which at module
+ * visible on disk and stops the log repeating. Renamed only while the file
+ * still holds the bytes that failed to parse: state dirs are shared between
+ * concurrent starts (see `sweepStaging`), and another one may have just
+ * rewritten it valid. A rename that failed is said, not claimed — the on-disk
+ * state has to match what the operator is told. Never thrown, which at module
  * scope would be a companion that cannot boot past its own config. */
-function quarantineWorkspaces(why: string): string[] {
+function quarantineWorkspaces(raw: string, why: string): string[] {
   try {
-    renameSync(workspacesPath, `${workspacesPath}.bad`);
-  } catch {
-    /* best effort */
+    if (readFileSync(workspacesPath, 'utf8') === raw) {
+      renameSync(workspacesPath, `${workspacesPath}.bad`);
+      log(
+        `set aside ${workspacesPath} (${why}); start with SYMMA_COMPANION_WORKSPACES to rebuild it`,
+      );
+    }
+  } catch (error) {
+    log(
+      `cannot set aside ${workspacesPath} (${why}): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
-  log(`set aside ${workspacesPath} (${why}); start with SYMMA_COMPANION_WORKSPACES to rebuild it`);
   return [];
 }
 
 /** What a previous start persisted. */
 function savedWorkspaceEntries(): string[] {
   if (!existsSync(workspacesPath)) return [];
+  let raw: string;
   try {
-    const entries = (JSON.parse(readFileSync(workspacesPath, 'utf8')) as { workspaces?: unknown })
-      .workspaces;
+    raw = readFileSync(workspacesPath, 'utf8');
+  } catch (error) {
+    // Unreadable at the filesystem level: nothing to compare, and a rename
+    // would fail the same way.
+    log(`ignoring ${workspacesPath}: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+  try {
+    const entries = (JSON.parse(raw) as { workspaces?: unknown }).workspaces;
     if (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'))
       return entries as string[];
   } catch (error) {
-    return quarantineWorkspaces(error instanceof Error ? error.message : String(error));
+    return quarantineWorkspaces(raw, error instanceof Error ? error.message : String(error));
   }
-  return quarantineWorkspaces('no workspaces array in it');
+  return quarantineWorkspaces(raw, 'no workspaces array in it');
 }
 
 // Presence decides, not blankness — a divergence from pairing's pick() on

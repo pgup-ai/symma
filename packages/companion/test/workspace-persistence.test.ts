@@ -76,9 +76,10 @@ before(async () => {
   writeFileSync(agentPath, AGENT);
   file = join(home, '.local', 'share', 'symma-companion', 'workspaces.json');
 
-  // 27000+: disjoint from the e2e (22000+), allowlist and remote (24000+)
-  // ranges — the suites run concurrently, and a shared port is a flaky boot.
-  const port = 27000 + Math.floor(Math.random() * 2000);
+  // 30000+: above every range the other suites bind (18000+, 22000+, 24000+,
+  // 26000+ and 28000+) — they run concurrently, and a shared port is a flaky
+  // boot.
+  const port = 30000 + Math.floor(Math.random() * 2000);
   base = `http://127.0.0.1:${port}`;
   gateway = spawn(
     process.execPath,
