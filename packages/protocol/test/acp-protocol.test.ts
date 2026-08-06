@@ -396,6 +396,64 @@ describe('acp', () => {
     });
   });
 
+  it('runs the caller-chosen mode and reports the roster', async () => {
+    const fake = fakeAgentIo({
+      modes: {
+        currentModeId: 'read-only',
+        availableModes: [
+          { id: 'read-only', name: 'Read-only' },
+          { id: 'agent', name: 'Agent', description: 'Read and edit files.' },
+        ],
+      },
+      onPrompt: (agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      mode: 'agent',
+    });
+    assert.deepEqual(fake.setModeIds, ['agent']);
+    assert.deepEqual(result.modes, {
+      currentModeId: 'agent',
+      availableModes: [
+        { id: 'read-only', name: 'Read-only' },
+        { id: 'agent', name: 'Agent', description: 'Read and edit files.' },
+      ],
+    });
+  });
+
+  it('refuses a mode the agent does not offer, naming the roster', async () => {
+    const fake = fakeAgentIo({
+      modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },
+      onPrompt: () => {
+        throw new Error('must not prompt');
+      },
+    });
+    // Silently downgrading would run a different permission tier than the one
+    // the member was shown, in either direction — so the turn fails instead.
+    await assert.rejects(
+      driveAcpSession(fake, {
+        cwd: '/tmp',
+        prompt: 'p',
+        agent: 'codex',
+        label: 't',
+        log: noLog,
+        mode: 'agent',
+      }),
+      /mode agent not offered \(offers: read-only\)/,
+    );
+    assert.deepEqual(fake.setModeIds, []);
+  });
+
   it('drives a session end-to-end and returns the last assistant segment', async () => {
     const permissionAnswers: unknown[] = [];
     const fake = fakeAgentIo({

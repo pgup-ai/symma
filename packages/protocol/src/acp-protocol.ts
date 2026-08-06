@@ -319,6 +319,10 @@ export interface AcpSessionOptions {
   /** Fail closed when plan mode is missing or cannot be set (agents with no
    * agent-side sandbox — plan mode is their behavioral read-only layer). */
   requirePlanMode?: boolean;
+  /** Session mode to run under, one of the agent's `availableModes`. Fails the
+   * turn when not offered — no silent downgrade in either direction. Absent
+   * keeps the review path's behavior: plan mode forced when offered. */
+  mode?: string;
   /** Reattach to this session rather than opening one, for agents that
    * advertise `loadSession`. Fails open: a resume that cannot happen costs the
    * caller its history, and must not also cost it the turn. */
@@ -362,6 +366,19 @@ export function matchModelOptionValue(
   return match?.value;
 }
 
+export interface SessionMode {
+  id: string;
+  name?: string;
+  description?: string;
+}
+
+/** An agent's mode surface as `session/new`/`session/load` returned it, with
+ * `currentModeId` reflecting the caller's mode when one was set. */
+export interface SessionModes {
+  currentModeId?: string;
+  availableModes: SessionMode[];
+}
+
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
@@ -374,6 +391,9 @@ export interface AcpSessionResult {
    * putting an operational notice in the message stream. codex-acp turns
    * codex's `warning` and `configWarning` events into exactly this. */
   notices: string[];
+  /** Present when the agent served a mode roster — what a caller's member can
+   * pick from next turn. */
+  modes?: SessionModes;
 }
 
 /**
@@ -519,30 +539,58 @@ export async function driveAcpSession(
     await selectModelConfigOption(conn, sessionId, session, options);
   }
   const modes = session.modes as
-    { currentModeId?: string; availableModes?: { id?: string }[] } | undefined;
-  const planOffered = modes?.availableModes?.some((mode) => mode.id === 'plan') ?? false;
-  if (planOffered && modes?.currentModeId !== 'plan') {
-    try {
-      await conn.request('session/set_mode', { sessionId, modeId: 'plan' });
-    } catch (error) {
-      const detail = `plan mode unavailable (${
-        error instanceof Error ? error.message : String(error)
-      })`;
-      // Agents with no agent-side sandbox (spec.requirePlanMode) fail CLOSED
-      // here — plan mode is their behavioral read-only layer, not a nicety.
-      if (options.requirePlanMode) {
-        throw new Error(`acp:${agent} ${label}: ${detail}; refusing to run without it`);
-      }
-      log(`acp:${agent} ${label}: ${detail}; relying on permission policy`);
-    }
-  } else if (!planOffered) {
-    // kilo exposes mode as a config option (no session/modes); its `plan`
-    // value is the read-only agent — the same contract as opencode's.
-    const applied = await selectPlanConfigOption(conn, sessionId, session, options);
-    if (!applied && options.requirePlanMode) {
+    | { currentModeId?: string; availableModes?: Record<string, unknown>[] }
+    | undefined;
+  const roster = (modes?.availableModes ?? []).flatMap((entry): SessionMode[] =>
+    typeof entry.id === 'string'
+      ? [
+          {
+            id: entry.id,
+            ...(typeof entry.name === 'string' ? { name: entry.name } : {}),
+            ...(typeof entry.description === 'string' ? { description: entry.description } : {}),
+          },
+        ]
+      : [],
+  );
+  if (options.mode !== undefined) {
+    // The caller's mode is its member's explicit choice: not offered fails the
+    // turn — silently downgrading would run a different permission tier than
+    // the one they were shown, and upgrading is not ours to do either.
+    if (!roster.some((offered) => offered.id === options.mode)) {
       throw new Error(
-        `acp:${agent} ${label}: agent offered no plan mode; refusing to run without it`,
+        `acp:${agent} ${label}: mode ${options.mode} not offered (offers: ${
+          roster.map((offered) => offered.id).join(', ') || 'none'
+        })`,
       );
+    }
+    if (modes?.currentModeId !== options.mode) {
+      await conn.request('session/set_mode', { sessionId, modeId: options.mode });
+    }
+  } else {
+    const planOffered = roster.some((offered) => offered.id === 'plan');
+    if (planOffered && modes?.currentModeId !== 'plan') {
+      try {
+        await conn.request('session/set_mode', { sessionId, modeId: 'plan' });
+      } catch (error) {
+        const detail = `plan mode unavailable (${
+          error instanceof Error ? error.message : String(error)
+        })`;
+        // Agents with no agent-side sandbox (spec.requirePlanMode) fail CLOSED
+        // here — plan mode is their behavioral read-only layer, not a nicety.
+        if (options.requirePlanMode) {
+          throw new Error(`acp:${agent} ${label}: ${detail}; refusing to run without it`);
+        }
+        log(`acp:${agent} ${label}: ${detail}; relying on permission policy`);
+      }
+    } else if (!planOffered) {
+      // kilo exposes mode as a config option (no session/modes); its `plan`
+      // value is the read-only agent — the same contract as opencode's.
+      const applied = await selectPlanConfigOption(conn, sessionId, session, options);
+      if (!applied && options.requirePlanMode) {
+        throw new Error(
+          `acp:${agent} ${label}: agent offered no plan mode; refusing to run without it`,
+        );
+      }
     }
   }
   const result = (await conn.request('session/prompt', {
@@ -580,11 +628,16 @@ export async function driveAcpSession(
   // fail open") — an aside shown as the answer is recoverable, a lost answer is
   // not — so the asides are taken back rather than returning silence.
   const kept = answered.length ? answered : segments;
+  const finalMode =
+    options.mode ?? (typeof modes?.currentModeId === 'string' ? modes.currentModeId : undefined);
   return {
     text: (kept[kept.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
     sessionId,
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
+    ...(roster.length
+      ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
+      : {}),
   };
 }
 
