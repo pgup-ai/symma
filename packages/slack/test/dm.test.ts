@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import type { TurnTarget } from '@symma/protocol';
+import type { SessionModes, TurnTarget } from '@symma/protocol';
 
 import { handleDm, isMemberDm, type DmDeps, type RunSpec } from '../src/dm.js';
 import type { ThreadMessage } from '../src/snapshot.js';
@@ -26,6 +26,8 @@ function harness(
     endpoint?: TurnTarget | null;
     answer?: string;
     notices?: string[];
+    /** The roster the run came back with, for the picker. */
+    modes?: SessionModes;
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
@@ -48,6 +50,7 @@ function harness(
     threadTs?: string;
     offerShare?: { conversation: string; destination: string };
     notices?: string[];
+    modePicker?: { conversation: string; modes: SessionModes };
   }[] = [];
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
@@ -73,16 +76,18 @@ function harness(
             text: over.answer ?? 'the answer',
             notices: over.notices ?? [],
             session: 'acp-1',
+            ...(over.modes ? { modes: over.modes } : {}),
           });
     },
     find: () => Promise.resolve(over.existing),
-    post: (channel, text, threadTs, offerShare, notices) => {
+    post: (channel, text, threadTs, offerShare, notices, modePicker) => {
       posts.push({
         channel,
         text,
         ...(threadTs ? { threadTs } : {}),
         ...(offerShare ? { offerShare } : {}),
         ...(notices?.length ? { notices } : {}),
+        ...(modePicker ? { modePicker } : {}),
       });
       if (over.postFails) return Promise.reject(over.postFails);
       // The acknowledgement is always first; anything later is the answer.
@@ -280,6 +285,44 @@ describe('dm message', () => {
     // opens in an empty temp dir, which is not what "your own machine" sounds
     // like to someone asking about their repo.
     assert.match(posts[0]!.text, /no access to your files/);
+  });
+
+  it('runs in the conversation mode and offers the picker with the answer', async () => {
+    const roster: SessionModes = {
+      currentModeId: 'agent',
+      availableModes: [
+        { id: 'read-only', name: 'Read-only' },
+        { id: 'agent', name: 'Agent' },
+      ],
+    };
+    const { deps, posts, runs } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma', mode: 'agent' },
+      modes: roster,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'change it' },
+      deps,
+    );
+    assert.equal(runs[0]!.mode, 'agent');
+    // Read back on every turn — the member should never have to remember what
+    // tier their own machine is running at.
+    assert.match(posts[0]!.text, /in `symma` — `agent` mode/);
+    assert.deepEqual(posts[1]!.modePicker, { conversation: 'conv-1', modes: roster });
+  });
+
+  it('offers no picker outside a named workspace, wherever the roster came from', async () => {
+    // A temp-dir session can serve a roster too; rendering a picker for it
+    // would offer a mode the companion is guaranteed to refuse.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'hi' },
+      deps,
+    );
+    assert.equal(posts[1]!.modePicker, undefined);
   });
 
   it('names the model as `provider/model`, which is the only shape that parses', async () => {

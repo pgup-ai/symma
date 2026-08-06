@@ -8,7 +8,7 @@
  * up from this thread when it does not — both travel, because which applies is
  * not known until the agent has been asked (§4).
  */
-import type { TurnTarget } from '@symma/protocol';
+import type { SessionModes, TurnTarget } from '@symma/protocol';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
@@ -69,6 +69,9 @@ export interface RunSpec {
   /** `provider/model`, always — every spec parses it that way and reads the half
    * after the slash. A bare `default` is refused before any agent sees it. */
   model: string;
+  /** The conversation's session mode, as the gateway served it (§4). Absent is
+   * read-only. */
+  mode?: string;
   /** A session to pick up, and what to catch a fresh one up with instead. Both
    * travel: which applies is not known until the agent has been asked. */
   resume?: string;
@@ -90,7 +93,9 @@ export interface DmDeps {
    * `notices` is what the agent said about itself rather than about the
    * question, kept apart so the answer is not read as carrying it. `session` is
    * where it ran, for the next turn in this thread to pick up. */
-  run: (spec: RunSpec) => Promise<{ text: string; notices: string[]; session: string }>;
+  run: (
+    spec: RunSpec,
+  ) => Promise<{ text: string; notices: string[]; session: string; modes?: SessionModes }>;
   /** Ends the turn, and remembers the session it ran in when there was one —
    * against what it ran under, since an id means nothing on another machine,
    * agent or directory. Every path that opened a turn calls this, including the
@@ -113,6 +118,7 @@ export interface DmDeps {
     threadTs?: string,
     offerShare?: { conversation: string; destination: string },
     notices?: string[],
+    modePicker?: { conversation: string; modes: SessionModes },
   ) => Promise<{ channel: string; ts: string }>;
   /** Marks the member's own message for the length of the run. Only the run is
    * worth marking — everything refused answers in words, immediately. */
@@ -240,8 +246,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // A backtick closes the span it is in, so a directory named with one would
   // spill the rest of the sentence into code. Their own machine and their own
   // DM, so this is rendering and not a trust boundary.
+  // The mode is part of the scope: a member who enabled writes should read it
+  // back on every turn, not have to remember what they picked last week.
   const scope = decision.label
-    ? `On it, in \`${decision.label.replaceAll('`', '')}\`.`
+    ? `On it, in \`${decision.label.replaceAll('`', '')}\`${
+        decision.mode ? ` — \`${decision.mode}\` mode` : ''
+      }.`
     : 'On it. It has no access to your files, so keep the question self-contained.';
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
@@ -254,7 +264,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  let answer: { text: string; notices: string[]; session: string };
+  let answer: { text: string; notices: string[]; session: string; modes?: SessionModes };
   try {
     answer = await deps.run({
       conversation: conversation.id,
@@ -268,6 +278,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       ...(caught ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
+      ...(decision.mode ? { mode: decision.mode } : {}),
     });
   } catch (error) {
     // Posted into the thread they are watching rather than left to the socket's
@@ -301,6 +312,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       conversation.rootThread,
       to ? { conversation: conversation.id, destination: `<#${to.channel}>` } : undefined,
       answer.notices,
+      // The picker renders the agent's own roster, so it exists exactly where
+      // the agent serves one — and only inside a named workspace, the one
+      // place a mode means anything (§4).
+      answer.modes && decision.workspace
+        ? { conversation: conversation.id, modes: answer.modes }
+        : undefined,
     );
   } catch (error) {
     // The run is over either way, and `announcing` tells them the delivery

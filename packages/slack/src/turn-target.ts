@@ -25,6 +25,7 @@ export function readTurnTarget(raw: Partial<TurnTarget>): TurnTarget | undefined
     ...(raw.token ? { token: raw.token } : {}),
     ...(raw.workspace ? { workspace: raw.workspace } : {}),
     ...(raw.workspaceLabel ? { workspaceLabel: raw.workspaceLabel } : {}),
+    ...(raw.mode ? { mode: raw.mode } : {}),
     ...(raw.resume ? { resume: raw.resume } : {}),
   };
 }
