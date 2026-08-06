@@ -63,7 +63,9 @@ describe('remote acp prompt', () => {
     writeFileSync(agentPath, REVIEW_AGENT);
     // A root the companion will allowlist, so this test can ask for it by id.
     const mine = mkdtempSync(join(tmpdir(), 'symma-remote-mine-'));
-    const port = 24000 + Math.floor(Math.random() * 2000);
+    // 32000+: every suite gets its own range — this one shared 24000+ with
+    // the companion allowlist suite, the same concurrent-boot collision class.
+    const port = 32000 + Math.floor(Math.random() * 2000);
     const base = `http://127.0.0.1:${port}`;
     let gateway: ChildProcess | undefined;
     let companion: ChildProcess | undefined;
