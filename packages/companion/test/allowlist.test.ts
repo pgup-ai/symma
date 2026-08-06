@@ -254,6 +254,11 @@ describe('workspace allowlist', () => {
     assert.deepEqual(await answered('sid-perm-ro', {}), {
       outcome: { outcome: 'selected', optionId: 'ro' },
     });
+    // `plan` is not the literal read-only id, but it IS the behavioral
+    // read-only layer — the shared classifier keeps it off the writes floor.
+    assert.deepEqual(await answered('sid-perm-plan', { mode: 'plan' }), {
+      outcome: { outcome: 'selected', optionId: 'ro' },
+    });
   });
 
   // Last, because proving the shutdown path means ending the companion.

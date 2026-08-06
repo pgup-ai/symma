@@ -15,6 +15,7 @@ export {
   kiloAcpSpec,
   opencodeAcpSpec,
   opencodeAuthPath,
+  isWriteCapableMode,
   matchModelOptionValue,
   respondToPermissionRequest,
   type AcpAgentSpec,

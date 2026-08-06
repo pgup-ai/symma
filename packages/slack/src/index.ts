@@ -5,7 +5,7 @@
  * has not earned any of them yet.
  */
 import { runRemotePrompt } from '@symma/client';
-import type { SessionModes, TurnTarget } from '@symma/protocol';
+import { isWriteCapableMode, type SessionModes, type TurnTarget } from '@symma/protocol';
 
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
@@ -331,7 +331,7 @@ const connection = socketMode({
           await api.post(
             where,
             `Mode set: \`${modeId}\` — applies from your next message.${
-              modeId === 'read-only' ? '' : ' Writes are enabled in this workspace.'
+              isWriteCapableMode(modeId) ? ' Writes are enabled in this workspace.' : ''
             }`,
             thread,
           );

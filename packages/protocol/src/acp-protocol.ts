@@ -133,6 +133,13 @@ export interface PermissionRequestParams {
  * mix and a session can never escalate itself. */
 export type PermissionPolicy = 'read-only' | 'writes';
 
+/** Mode ids whose intent is read-only. `plan` is the behavioral read-only
+ * layer this driver itself force-selects for sandbox-less agents — so every
+ * floor that classifies a mode must go through here, or "anything not
+ * literally read-only" hands `plan` the writes policy against its meaning. */
+const READ_ONLY_MODE_IDS = new Set(['read-only', 'plan']);
+export const isWriteCapableMode = (mode: string): boolean => !READ_ONLY_MODE_IDS.has(mode);
+
 export type PermissionResponse = {
   outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' };
 };
@@ -450,7 +457,7 @@ export async function driveAcpSession(
         // mode must not have this layer silently deny what the mode promises.
         const response = respondToPermissionRequest(
           params as PermissionRequestParams,
-          options.mode && options.mode !== 'read-only' ? 'writes' : 'read-only',
+          options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only',
         );
         if (response.outcome.outcome !== 'selected') {
           log(`acp:${agent} ${label}: permission request had no usable option; cancelled`);

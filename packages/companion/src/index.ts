@@ -36,6 +36,7 @@ import {
   createNdjsonReader,
   cursorAcpSpec,
   devinAcpSpec,
+  isWriteCapableMode,
   geminiAcpSpec,
   geminiOauthPath,
   devinCredentialsPath,
@@ -610,7 +611,7 @@ async function openSession(control: OpenControl): Promise<void> {
   // owner allowlisted at the keyboard; anywhere else it is refused rather than
   // quietly downgraded to a tier the caller was not shown.
   const mode = control.mode;
-  if (mode && mode !== 'read-only' && !chosen)
+  if (mode && isWriteCapableMode(mode) && !chosen)
     return refuse(`mode ${mode} requires a named workspace`);
 
   const model = control.model ?? 'default';
@@ -697,7 +698,7 @@ async function openSession(control: OpenControl): Promise<void> {
     workspace,
     // The workspace requirement was enforced above, so a write-capable mode
     // here is one the owner chose for a root they allowlisted.
-    allowWrites: Boolean(mode && mode !== 'read-only'),
+    allowWrites: Boolean(mode && isWriteCapableMode(mode)),
     cleanup,
   };
   sessions.set(control.sessionId, session);

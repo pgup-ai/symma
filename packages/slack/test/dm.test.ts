@@ -28,6 +28,8 @@ function harness(
     notices?: string[];
     /** The roster the run came back with, for the picker. */
     modes?: SessionModes;
+    /** The gateway refuses the mode clear. */
+    shedFails?: boolean;
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
@@ -103,7 +105,7 @@ function harness(
     },
     shedMode: (conversation) => {
       sheds.push(conversation);
-      return Promise.resolve();
+      return over.shedFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
     },
     mark: (channel, ts, state) => {
       marks.push({ channel, ts, state });
@@ -353,6 +355,22 @@ describe('dm message', () => {
     assert.deepEqual(sheds, ['conv-1']);
     assert.match(posts[1]!.text, /no longer offers `yolo` mode.*retry read-only/);
     assert.equal(finished[0]!.status, 'failed');
+  });
+
+  it('does not claim a clear that failed', async () => {
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma', mode: 'yolo' },
+      fails: new Error('acp:codex slack-conv-1: mode yolo not offered (offers: read-only)'),
+      shedFails: true,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    // A stale mode still stored means the retry fails the same way — saying
+    // "cleared" here would promise a recovery that did not happen.
+    assert.match(posts[1]!.text, /could not clear it/);
   });
 
   it('offers no picker outside a named workspace, wherever the roster came from', async () => {

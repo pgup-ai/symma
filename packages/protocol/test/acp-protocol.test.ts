@@ -32,6 +32,7 @@ import {
   matchModelOptionValue,
   opencodeAcpSpec,
   opencodeAuthPath,
+  isWriteCapableMode,
   respondToPermissionRequest,
 } from '../src/acp-protocol.js';
 import { codexAuthPath } from '../src/codex.js';
@@ -371,6 +372,13 @@ describe('acp', () => {
       respondToPermissionRequest({ toolCall: { kind: 'switch_mode' }, options }, 'writes'),
       { outcome: { outcome: 'selected', optionId: 'ro' } },
     );
+    // `plan` is read-only-class despite not being the literal id — it is the
+    // behavioral read-only layer this driver itself force-selects. Every floor
+    // classifies through the shared helper, or plan would be handed writes.
+    assert.equal(isWriteCapableMode('plan'), false);
+    assert.equal(isWriteCapableMode('read-only'), false);
+    assert.equal(isWriteCapableMode('agent'), true);
+    assert.equal(isWriteCapableMode('agent-full-access'), true);
   });
 
   it('read-only denies MCP tool approvals whatever kind they carry', () => {

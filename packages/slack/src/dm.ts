@@ -295,13 +295,23 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // would fix it.
     const unoffered =
       decision.mode !== undefined && /: mode \S+ not offered \(/.test(String(error));
-    if (unoffered) await deps.shedMode(conversation.id).catch(() => undefined);
+    // Tracked, not assumed: a clear that failed leaves the stale mode in
+    // place, and claiming recovery would promise a retry that fails the same
+    // way. Fail-open on the write itself — the turn's outcome stands either way.
+    const shed =
+      unoffered &&
+      (await deps.shedMode(conversation.id).then(
+        () => true,
+        () => false,
+      ));
     await deps.finish(conversation.id, turn, 'failed');
     await deps.mark(message.channel, message.ts, 'failed');
     await deps.post(
       conversation.dmChannel,
       unoffered
-        ? `The agent no longer offers \`${decision.mode}\` mode, so I cleared it. Send it again and I will retry read-only.`
+        ? shed
+          ? `The agent no longer offers \`${decision.mode}\` mode, so I cleared it. Send it again and I will retry read-only.`
+          : `The agent no longer offers \`${decision.mode}\` mode, and I could not clear it. Send it again and I will keep trying.`
         : 'That run did not finish. Send it again and I will retry.',
       conversation.rootThread,
     );

@@ -231,10 +231,12 @@ describe('slack api', () => {
   it('bounds the picker to what Slack will post and what can round-trip', async () => {
     const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
     // 150 modes, one un-postable id (space fails the wire's alphabet) and one
-    // whose encoded value would blow Slack's 150-char option cap — plus a
-    // current mode sitting past the option cap, which loses its highlight
-    // rather than making the whole post invalid.
+    // whose encoded value blows Slack's 150-char option cap — the conversation
+    // id is UUID-length, since a short one keeps even a maximal mode id under
+    // the cap and the filter would never fire. The current mode sits past the
+    // option cap, so it loses its highlight rather than invalidating the post.
     const flood = Array.from({ length: 150 }, (_, i) => ({ id: `mode-${String(i)}` }));
+    const oversized = 'x'.repeat(128);
     await slackApi('xoxb-test', { fetch: fetchImpl }).post(
       'D-nel',
       'the answer',
@@ -242,10 +244,10 @@ describe('slack api', () => {
       undefined,
       undefined,
       {
-        conversation: 'conv-1',
+        conversation: 'c'.repeat(36),
         modes: {
           currentModeId: 'mode-149',
-          availableModes: [{ id: 'not safe' }, { id: 'x'.repeat(128) }, ...flood],
+          availableModes: [{ id: 'not safe' }, { id: oversized }, ...flood],
         },
       },
     );
@@ -258,7 +260,10 @@ describe('slack api', () => {
       ?.elements?.find((e) => e.type === 'static_select');
     assert.equal(select!.options!.length, 100);
     assert.ok(
-      select!.options!.every((o) => o.value.length <= 150 && !o.value.includes('not safe')),
+      select!.options!.every(
+        (o) =>
+          o.value.length <= 150 && !o.value.includes('not safe') && !o.value.includes(oversized),
+      ),
     );
     assert.equal(select!.initial_option, undefined);
   });
