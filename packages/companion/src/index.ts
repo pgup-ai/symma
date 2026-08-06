@@ -149,17 +149,61 @@ const agentNames = (
   .map((entry) => entry.trim())
   .filter(Boolean);
 /**
- * §4's allowlist: the roots this machine's owner will let an agent run in,
- * configured here and nowhere else. Keyed by the opaque id that crosses the
- * wire, derived from the resolved path so it survives a restart — a
- * conversation that pinned one yesterday still names that directory today.
+ * §4's allowlist: the roots this machine's owner will let an agent run in.
+ * The variable is how it is authored; what it names is copied to the state
+ * dir, because the login service starts the companion with no environment at
+ * all — without the copy, the first reboot silently unlists every root. Env
+ * over file, the precedence pairing already takes. Keyed by the opaque id
+ * that crosses the wire, derived from the resolved path so it survives a
+ * restart — a conversation that pinned one yesterday still names that
+ * directory today.
  */
-const workspaces = new Map<string, { id: string; label: string; path: string }>();
-for (const entry of (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
+const workspacesPath = join(stateDir, 'workspaces.json');
+
+/** What a previous start persisted. Malformed is logged and ignored, like a
+ * pairing file that yields nothing — never thrown, which at module scope
+ * would be a companion that cannot boot past its own config. */
+function savedWorkspaceEntries(): string[] {
+  if (!existsSync(workspacesPath)) return [];
+  try {
+    const entries = (JSON.parse(readFileSync(workspacesPath, 'utf8')) as { workspaces?: unknown })
+      .workspaces;
+    if (Array.isArray(entries) && entries.every((entry) => typeof entry === 'string'))
+      return entries as string[];
+  } catch (error) {
+    log(`ignoring ${workspacesPath}: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+  log(`ignoring ${workspacesPath}: no workspaces array in it`);
+  return [];
+}
+
+// Resolved at authoring time, when the shell's cwd is the one a relative
+// entry meant; the login service would resolve it against `/`.
+const envWorkspaceEntries = (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
   .split(',')
   .map((raw) => raw.trim())
-  .filter(Boolean)) {
-  const path = resolve(entry);
+  .filter(Boolean)
+  .map((entry) => resolve(entry));
+if (envWorkspaceEntries.length) {
+  // Persisted before validation, not after: the entries are the member's
+  // intent, and a root unmounted at this boot must come back at the next one
+  // rather than vanish from the copy. Compared first so the steady state
+  // writes nothing.
+  const contents = `${JSON.stringify({ workspaces: envWorkspaceEntries }, null, 2)}\n`;
+  try {
+    if (!existsSync(workspacesPath) || readFileSync(workspacesPath, 'utf8') !== contents) {
+      mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+      saveState(workspacesPath, contents);
+    }
+  } catch (error) {
+    // The allowlist still works from the variable this run; only the copy
+    // that would survive a reboot could not be written.
+    log(`could not persist workspaces: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+const workspaces = new Map<string, { id: string; label: string; path: string }>();
+for (const path of envWorkspaceEntries.length ? envWorkspaceEntries : savedWorkspaceEntries()) {
   // Skipped with a reason rather than fatal, the same way an absent agent is:
   // one bad line in a config must not stop the machine answering at all. That
   // has to hold for every way a stat can fail — `throwIfNoEntry` covers the
@@ -172,7 +216,7 @@ for (const entry of (process.env.SYMMA_COMPANION_WORKSPACES ?? '')
     why = error instanceof Error ? error.message : String(error);
   }
   if (why) {
-    log(`skipping workspace ${entry}: ${why}`);
+    log(`skipping workspace ${path}: ${why}`);
     continue;
   }
   const id = createHash('sha256').update(path).digest('hex').slice(0, 12);
@@ -909,18 +953,22 @@ function shutdown(): void {
 
 /** Replaces, where the signing key must never be replaced — so rename rather
  * than link, still through a staged file so a reader never sees half of one. */
-function savePairing(saved: Pairing): string {
-  const path = join(stateDir, 'pairing.json');
+function saveState(path: string, contents: string): void {
   const staged = `${path}.${process.pid}`;
   try {
-    writeFileSync(staged, `${JSON.stringify(saved, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(staged, contents, { mode: 0o600 });
     renameSync(staged, path);
   } finally {
-    // A staged file that outlived a failure is a token sitting under a name
+    // A staged file that outlived a failure is state sitting under a name
     // nothing will ever read. Gone on the way out either way; after a rename
     // there is nothing left to remove.
     rmSync(staged, { force: true });
   }
+}
+
+function savePairing(saved: Pairing): string {
+  const path = join(stateDir, 'pairing.json');
+  saveState(path, `${JSON.stringify(saved, null, 2)}\n`);
   return path;
 }
 
