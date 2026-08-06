@@ -355,6 +355,47 @@ describe('acp', () => {
     );
   });
 
+  it('answers permission requests for a write-mode session: everything but switch_mode', () => {
+    const options = [
+      { optionId: 'aa', kind: 'allow_always' },
+      { optionId: 'ao', kind: 'allow_once' },
+      { optionId: 'ro', kind: 'reject_once' },
+    ];
+    assert.deepEqual(
+      respondToPermissionRequest({ toolCall: { kind: 'edit' }, options }, 'writes'),
+      { outcome: { outcome: 'selected', optionId: 'ao' } },
+    );
+    // The mode channel and the prompt channel never mix: even a session whose
+    // owner enabled writes cannot switch its own mode from inside.
+    assert.deepEqual(
+      respondToPermissionRequest({ toolCall: { kind: 'switch_mode' }, options }, 'writes'),
+      { outcome: { outcome: 'selected', optionId: 'ro' } },
+    );
+  });
+
+  it('read-only denies MCP tool approvals whatever kind they carry', () => {
+    // codex-acp 1.1.7 labels MCP approvals kind `execute` — a kind the floor
+    // allows for git — with this meta flag. MCP servers run outside the OS
+    // sandbox, so the floor is all that stands between a read-only session and
+    // a write-capable MCP tool.
+    const options = [
+      { optionId: 'ao', kind: 'allow_once' },
+      { optionId: 'ro', kind: 'reject_once' },
+    ];
+    const mcp = {
+      toolCall: { kind: 'execute' },
+      _meta: { is_mcp_tool_approval: true },
+      options,
+    };
+    assert.deepEqual(respondToPermissionRequest(mcp), {
+      outcome: { outcome: 'selected', optionId: 'ro' },
+    });
+    // A write-mode session is the member's own choice; their MCP tools run.
+    assert.deepEqual(respondToPermissionRequest(mcp, 'writes'), {
+      outcome: { outcome: 'selected', optionId: 'ao' },
+    });
+  });
+
   it('drives a session end-to-end and returns the last assistant segment', async () => {
     const permissionAnswers: unknown[] = [];
     const fake = fakeAgentIo({

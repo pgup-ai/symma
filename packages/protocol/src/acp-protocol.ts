@@ -122,7 +122,16 @@ export function createNdjsonReader(
 export interface PermissionRequestParams {
   toolCall?: { kind?: string; title?: string };
   options?: { optionId?: string; kind?: string }[];
+  /** codex-acp 1.1.7 marks MCP tool approvals here (`is_mcp_tool_approval`);
+   * their kind is `execute`, so the kind alone cannot tell them apart. */
+  _meta?: Record<string, unknown>;
 }
+
+/** `read-only` is the review floor. `writes` is a DM turn whose owner picked a
+ * write-capable mode inside their own allowlisted workspace — everything is
+ * allowed but `switch_mode`, so the mode channel and the prompt channel never
+ * mix and a session can never escalate itself. */
+export type PermissionPolicy = 'read-only' | 'writes';
 
 export type PermissionResponse = {
   outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' };
@@ -146,10 +155,17 @@ const DENIED_TOOL_KINDS = new Set(['edit', 'delete', 'move', 'write', 'switch_mo
  * call. Kind strings normalize `-` to `_` (cursor emits hyphens). No usable
  * option ⇒ cancelled outcome.
  */
-export function respondToPermissionRequest(params: PermissionRequestParams): PermissionResponse {
-  const direction = DENIED_TOOL_KINDS.has(normalizeKind(params.toolCall?.kind))
-    ? 'reject'
-    : 'allow';
+export function respondToPermissionRequest(
+  params: PermissionRequestParams,
+  policy: PermissionPolicy = 'read-only',
+): PermissionResponse {
+  const kind = normalizeKind(params.toolCall?.kind);
+  // MCP servers are the agent's own subprocesses, outside its OS sandbox and
+  // this floor's kind vocabulary — read-only must catch them by the meta flag.
+  const mcp = params._meta?.is_mcp_tool_approval === true;
+  const denied =
+    policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
+  const direction = denied ? 'reject' : 'allow';
   const options = params.options ?? [];
   const pick =
     options.find((option) => normalizeKind(option.kind) === `${direction}_once`) ??

@@ -22,6 +22,7 @@ export {
   type AcpSessionOptions,
   type AcpSessionResult,
   type ModelOptionCandidate,
+  type PermissionPolicy,
   type PermissionRequestParams,
   type PermissionResponse,
 } from './acp-protocol.js';
