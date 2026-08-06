@@ -140,7 +140,7 @@ export const MODE_ACTION = 'set_conversation_mode';
 /** One picker option. `initial_option` must deep-equal one of `options` for
  * Slack to accept it, so both are built here and nowhere else. */
 const modeOption = (conversation: string, mode: SessionMode) => ({
-  // Slack caps option labels at 75 characters; the id is the fallback name.
+  // Slack caps option labels at 75 characters.
   text: { type: 'plain_text' as const, text: (mode.name ?? mode.id).slice(0, 75) },
   value: JSON.stringify({ c: conversation, m: mode.id }),
 });

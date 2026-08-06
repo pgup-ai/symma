@@ -151,7 +151,8 @@ const DENIED_TOOL_KINDS = new Set(['edit', 'delete', 'move', 'write', 'switch_mo
  * read tools commonly ship kind `other` or none, so denying unknowns would
  * stall reviews (a recall hole). Command-level policing — bash filtering and
  * the like — belongs to the other two layers, codex's OS sandbox and plan
- * mode. Prefers the `*_once` option so no standing grant outlives a single
+ * mode. The `writes` policy inverts all of that to deny only `switch_mode`.
+ * Prefers the `*_once` option so no standing grant outlives a single
  * call. Kind strings normalize `-` to `_` (cursor emits hyphens). No usable
  * option ⇒ cancelled outcome.
  */

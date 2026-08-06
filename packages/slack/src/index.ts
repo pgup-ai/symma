@@ -322,8 +322,8 @@ const connection = socketMode({
         if (typeof conversationId !== 'string' || typeof modeId !== 'string') return;
         await announcing(who, 'mode', async () => {
           await ask('/api/slack/mode', { user: who, conversation: conversationId, mode: modeId });
-          // Said where they picked it, writes named out loud: the mode is the
-          // permission tier of their own machine, not a cosmetic setting.
+          // Writes named out loud: the mode is their machine's permission
+          // tier, not a cosmetic setting.
           await api.post(
             where,
             `Mode set: \`${modeId}\` — applies from your next message.${
