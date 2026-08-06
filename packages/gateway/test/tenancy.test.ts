@@ -182,7 +182,7 @@ const as = (token: string, path: string, init?: RequestInit): Promise<Response> 
 const attach = async (
   token: string,
   endpoint: string,
-  agents = ['kilo'],
+  agents: (string | { agent: string; modes?: boolean })[] = ['kilo'],
   workspaces?: { id: string; label: string }[],
 ): Promise<() => void> => {
   const abort = new AbortController();
@@ -196,7 +196,7 @@ const attach = async (
       kind: 'hello',
       endpoint,
       device: endpoint,
-      agents: agents.map((agent) => ({ agent })),
+      agents: agents.map((agent) => (typeof agent === 'string' ? { agent } : agent)),
       maxSessions: 2,
       ...(workspaces ? { workspaces } : {}),
     })}\n`,
@@ -1316,6 +1316,124 @@ describe('tenancy', () => {
         const off = await attach(ivy.endpointToken, 'ivy-box', ['kilo'], [both[0]!]);
         return (await ask(conversation)).workspace === 'aaaaaaaaaaaa' ? off : (off(), undefined);
       }, 'the endpoint reattached offering only one');
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
+  it('serves a mode only where the agent advertises it, and hands it down per workspace', async () => {
+    const url = pg.getConnectionUri();
+    const wes = await provision(url, { team: 'ws', slackUser: 'wes', endpoint: 'wes-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const ask = async (conversation: string): Promise<Record<string, string>> =>
+      (await (
+        await fetch(`${base}/api/slack/endpoint`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+          body: JSON.stringify({ team: 'ws', user: 'wes', conversation }),
+        })
+      ).json()) as Record<string, string>;
+    const setMode = (user: string, conversation: string, mode: string): Promise<Response> =>
+      fetch(`${base}/api/slack/mode`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user, conversation, mode }),
+      });
+    let detach: (() => void) | undefined;
+    try {
+      const roots = [{ id: 'cccccccccccc', label: 'symma' }];
+      detach = await attach(wes.endpointToken, 'wes-box', [{ agent: 'kilo', modes: true }], roots);
+      const first = await waitFor(async () => {
+        const opened = await store.openConversation(wes.owner, {
+          dmChannel: 'D-wes',
+          rootThread: '1.0',
+        });
+        return opened?.id;
+      }, 'a conversation to set a mode on');
+
+      // Nothing picked yet is read-only, which travels as absence.
+      assert.equal((await ask(first)).mode, undefined);
+      assert.equal((await setMode('wes', first, 'agent')).status, 200);
+      assert.equal((await ask(first)).mode, 'agent');
+
+      // A fresh thread in the same workspace starts where its member left off.
+      const second = (await store.openConversation(wes.owner, {
+        dmChannel: 'D-wes',
+        rootThread: '2.0',
+      }))!.id;
+      assert.equal((await ask(second)).mode, 'agent');
+
+      // "Left off" is the last pick, not the last thread that spoke: a re-pick
+      // on the older thread must win inheritance for the next one.
+      assert.equal((await setMode('wes', first, 'agent-full-access')).status, 200);
+      const third = (await store.openConversation(wes.owner, {
+        dmChannel: 'D-wes',
+        rootThread: '3.0',
+      }))!.id;
+      assert.equal((await ask(third)).mode, 'agent-full-access');
+
+      // A shed (`mode: null`) clears the whole workspace, or `lastModeFor`
+      // would refill the dead mode from a sibling thread on the next turn.
+      const shed = await fetch(`${base}/api/slack/mode`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'wes', conversation: first, mode: null }),
+      });
+      assert.equal(shed.status, 200);
+      assert.equal((await ask(first)).mode, undefined);
+      assert.equal((await ask(second)).mode, undefined, 'siblings shed too');
+
+      // A workspace change sheds the thread's own pick rather than carrying
+      // it: write permission chosen for one root must not follow the thread
+      // into another.
+      assert.equal((await setMode('wes', first, 'agent')).status, 200);
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          wes.endpointToken,
+          'wes-box',
+          [{ agent: 'kilo', modes: true }],
+          [{ id: 'dddddddddddd', label: 'jbot' }],
+        );
+        const served = await ask(first);
+        return served.workspace === 'dddddddddddd' ? off : (off(), undefined);
+      }, 'the endpoint reattached with a different root');
+      assert.equal((await ask(first)).mode, undefined, 'the old root mode did not travel');
+
+      // Another member cannot set this conversation's mode — same scoping rule
+      // as `seen`: an id alone is not authorization.
+      await provision(url, { team: 'ws', slackUser: 'naomi', endpoint: 'naomi-box' });
+      const foreign = await fetch(`${base}/api/slack/mode`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'naomi', conversation: first, mode: 'agent' }),
+      });
+      assert.equal(foreign.status, 404);
+
+      // An endpoint whose hello stops advertising modes is not served the
+      // stored one — an old companion would drop the field and run read-only
+      // against a picker that said otherwise — but the pick is kept, not
+      // cleared, for when the advertisement returns.
+      assert.equal((await setMode('wes', first, 'agent')).status, 200);
+      const jbot = [{ id: 'dddddddddddd', label: 'jbot' }];
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(wes.endpointToken, 'wes-box', ['kilo'], jbot);
+        const served = await ask(first);
+        return served.mode === undefined ? off : (off(), undefined);
+      }, 'the endpoint reattached without modes');
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          wes.endpointToken,
+          'wes-box',
+          [{ agent: 'kilo', modes: true }],
+          jbot,
+        );
+        const served = await ask(first);
+        return served.mode === 'agent' ? off : (off(), undefined);
+      }, 'the stored pick came back with the advertisement');
     } finally {
       detach?.();
       await store.close();

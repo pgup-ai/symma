@@ -84,15 +84,24 @@ turn rather than a standing key.
    the agent-side layers, not the floor, which is deliberately kind-based and
    allow-by-default for unknown kinds.
 
-   **Scoped to the review path.** M3's DM path inverts the caller — the
-   endpoint's owner, on their own machine — and allows writes inside an
-   allowlisted workspace root (§4, "Read-only ends where the caller changes").
-   That path drives prompts now, and the root exists: a companion advertises
-   `hello.workspaces[]` and an open may name one. **Writes into it do not** —
-   the floor still refuses every mutating kind, which is what now stands
-   between a prompt and the member's real source rather than an empty temp
-   directory. So the invariant is unconditional today. Whoever enables writes
-   amends this entry in the same commit.
+   **Scoped to the review path and to read-only DM turns.** M3's DM path
+   inverts the caller — the endpoint's owner, on their own machine — and §4's
+   "read-only ends where the caller changes" is now a mechanism, not prose: a
+   DM conversation pinned to an allowlisted workspace runs a session mode the
+   member picked (codex's own `read-only`/`agent`/`agent-full-access`), and a
+   write-capable mode swaps the companion floor to a `writes` policy. What
+   stays unconditional: writes are never allowed outside a named workspace
+   (the companion refuses the open), a mode reaches a companion only through
+   the owner's explicit choice (the gateway serves one solely for endpoints
+   whose hello advertised `modes` for the agent, so an old companion stays a
+   read-only one), and no session can escalate itself — `switch_mode` is
+   denied under every policy, and the read-only policy additionally denies
+   MCP tool approvals (codex-acp 1.1.7 marks them `_meta.is_mcp_tool_approval`
+   with kind `execute`, a kind the floor otherwise allows for git; MCP servers
+   run outside the OS sandbox, so the floor is the only layer that sees them).
+   Named-workspace codex sessions run from the member's real `~/.codex` —
+   their config, MCP servers and session history — so "read-only" there means
+   codex's read-only mode plus this floor, not an empty environment.
 
 2. **Auxiliary sessions fail open.** A broken precision filter must never
    become a recall hole.

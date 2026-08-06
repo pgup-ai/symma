@@ -16,6 +16,7 @@ describe('turn target', () => {
         token: 'tok-1',
         workspace: 'ws-1',
         workspaceLabel: 'symma',
+        mode: 'agent',
         resume: 'acp-1',
       }),
       {
@@ -26,6 +27,7 @@ describe('turn target', () => {
         token: 'tok-1',
         workspace: 'ws-1',
         workspaceLabel: 'symma',
+        mode: 'agent',
         resume: 'acp-1',
       },
     );

@@ -56,6 +56,27 @@ describe('relay control parsing', () => {
     }
   });
 
+  it('carries a session mode on open and a modes flag on hello agents', () => {
+    const parsed = parseRelayControl(JSON.stringify(open({ mode: 'agent-full-access' })));
+    assert.equal((parsed as OpenControl).mode, 'agent-full-access');
+    // Not id-safe means not a mode: the value lands in a child env var.
+    assert.equal(
+      (parseRelayControl(JSON.stringify(open({ mode: 'a b' }))) as OpenControl).mode,
+      undefined,
+    );
+    const withModes = hello({ agents: [{ agent: 'codex', modes: true }, { agent: 'kilo' }] });
+    assert.deepEqual((parseRelayControl(JSON.stringify(withModes)) as HelloControl).agents, [
+      { agent: 'codex', modes: true },
+      { agent: 'kilo' },
+    ]);
+    // Anything but `true` drops: the flag gates whether a mode is ever sent,
+    // so a value that means nothing must read as "cannot".
+    const junk = hello({ agents: [{ agent: 'codex', modes: 'yes' as never }] });
+    assert.deepEqual((parseRelayControl(JSON.stringify(junk)) as HelloControl).agents, [
+      { agent: 'codex' },
+    ]);
+  });
+
   it('reads a generation off hello, and drops one it cannot read', () => {
     const version = (raw: unknown): number | undefined =>
       (parseRelayControl(JSON.stringify(hello({ version: raw as number }))) as HelloControl)

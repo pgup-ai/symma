@@ -15,11 +15,13 @@ const noLog = (): void => undefined;
 // exercised over the real gateway + companion rather than a stub stream pair.
 const REVIEW_AGENT = `
 let buf = '';
+let mode = 'read-only';
 process.stdin.setEncoding('utf8');
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
-const REVIEW = JSON.stringify({
+const REVIEW = () => JSON.stringify({
   summary: 'remote review ok',
   cwd: process.cwd(),
+  mode,
   findings: [{ path: 'src/a.ts', line: 1, severity: 'P2', title: 'remote finding', body: 'b' }],
   addressedPriorComments: [],
 });
@@ -31,9 +33,10 @@ process.stdin.on('data', (c) => {
     if (!line.trim()) continue;
     const m = JSON.parse(line);
     if (m.id === undefined) continue;
-    if (m.method === 'session/new') out({ jsonrpc: '2.0', id: m.id, result: { sessionId: 'a1' } });
+    if (m.method === 'session/new') out({ jsonrpc: '2.0', id: m.id, result: { sessionId: 'a1', modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }, { id: 'agent', name: 'Agent' }] } } });
+    else if (m.method === 'session/set_mode') { mode = m.params.modeId; out({ jsonrpc: '2.0', id: m.id, result: {} }); }
     else if (m.method === 'session/prompt') {
-      out({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'a1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: REVIEW } } } });
+      out({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'a1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: REVIEW() } } } });
       out({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } });
     } else out({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } });
   }
@@ -163,6 +166,30 @@ describe('remote acp prompt', () => {
         noLog,
       );
       assert.equal(ranIn(inMine), realpathSync(mine));
+
+      // The member's pick travels the same wire: the open carries it, the
+      // driver sets it on the session, and the roster comes back for whoever
+      // renders the picker.
+      let roster: unknown;
+      const moded = await runRemotePrompt(
+        {
+          ...config,
+          agent: 'probe',
+          runId: 'run-moded',
+          workspace: id,
+          mode: 'agent',
+          onModes: (modes) => (roster = modes),
+        },
+        'probe/default',
+        'PR CONTEXT',
+        'review',
+        noLog,
+      );
+      assert.equal((JSON.parse(moded) as { mode: string }).mode, 'agent');
+      assert.deepEqual(roster, {
+        currentModeId: 'agent',
+        availableModes: [{ id: 'read-only' }, { id: 'agent', name: 'Agent' }],
+      });
 
       // The reply above already proves the round trip; what only this test
       // covers is that it was journaled under the client's run id, one session

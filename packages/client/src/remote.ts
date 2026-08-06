@@ -15,6 +15,7 @@ import {
   type AckControl,
   type EndpointPresence,
   type RefusalCode,
+  type SessionModes,
 } from '@symma/protocol';
 
 const REMOTE_PROMPT_TIMEOUT_MS = 20 * 60_000;
@@ -46,6 +47,12 @@ export interface RemoteAcpConfig {
    * that directory instead of an empty temp one. Never a path — resolving it is
    * the companion's job, and its allowlist is the boundary (§4). */
   workspace?: string;
+  /** Session mode the member picked, one the agent offers. Requires a
+   * workspace — the companion refuses a write-capable mode outside one. */
+  mode?: string;
+  /** Receives the agent's mode roster when it serves one, for whoever renders
+   * the member's picker. Absent drops it. */
+  onModes?: (modes: SessionModes) => void;
   /** Receives `AcpSessionResult.notices` — what the agent said about itself
    * rather than about the prompt. Absent drops them. */
   onNotice?: (notice: string) => void;
@@ -236,6 +243,7 @@ export async function runRemotePrompt(
       agent: config.agent,
       model,
       ...(config.workspace ? { workspace: config.workspace } : {}),
+      ...(config.mode ? { mode: config.mode } : {}),
       ...(config.repo ? { repo: config.repo } : {}),
       ...(config.ref ? { ref: config.ref } : {}),
       ...(config.base ? { base: config.base } : {}),
@@ -268,6 +276,7 @@ export async function runRemotePrompt(
             model,
             ...(ack.modelCandidates ? { configOptionModelIds: ack.modelCandidates } : {}),
             ...(ack.requirePlanMode ? { requirePlanMode: true } : {}),
+            ...(config.mode !== undefined ? { mode: config.mode } : {}),
             ...(config.resume !== undefined ? { resume: config.resume } : {}),
             ...(config.context !== undefined ? { context: config.context } : {}),
           },
@@ -291,6 +300,8 @@ export async function runRemotePrompt(
       }
     };
     deliver('session', () => config.onSession?.(result.sessionId));
+    const roster = result.modes;
+    if (roster) deliver('modes', () => config.onModes?.(roster));
     for (const notice of result.notices) deliver('notice', () => config.onNotice?.(notice));
     if (!result.text) {
       throw new Error(

@@ -32,6 +32,7 @@ import {
   matchModelOptionValue,
   opencodeAcpSpec,
   opencodeAuthPath,
+  isWriteCapableMode,
   respondToPermissionRequest,
 } from '../src/acp-protocol.js';
 import { codexAuthPath } from '../src/codex.js';
@@ -353,6 +354,126 @@ describe('acp', () => {
       }),
       { outcome: { outcome: 'cancelled' } },
     );
+  });
+
+  it('answers permission requests for a write-mode session: everything but switch_mode', () => {
+    const options = [
+      { optionId: 'aa', kind: 'allow_always' },
+      { optionId: 'ao', kind: 'allow_once' },
+      { optionId: 'ro', kind: 'reject_once' },
+    ];
+    assert.deepEqual(
+      respondToPermissionRequest({ toolCall: { kind: 'edit' }, options }, 'writes'),
+      { outcome: { outcome: 'selected', optionId: 'ao' } },
+    );
+    // The mode channel and the prompt channel never mix: even a session whose
+    // owner enabled writes cannot switch its own mode from inside.
+    assert.deepEqual(
+      respondToPermissionRequest({ toolCall: { kind: 'switch_mode' }, options }, 'writes'),
+      { outcome: { outcome: 'selected', optionId: 'ro' } },
+    );
+    // `plan` is read-only-class despite not being the literal id — it is the
+    // behavioral read-only layer this driver itself force-selects. Every floor
+    // classifies through the shared helper, or plan would be handed writes.
+    assert.equal(isWriteCapableMode('plan'), false);
+    assert.equal(isWriteCapableMode('read-only'), false);
+    assert.equal(isWriteCapableMode('agent'), true);
+    assert.equal(isWriteCapableMode('agent-full-access'), true);
+  });
+
+  it('read-only denies MCP tool approvals whatever kind they carry', () => {
+    // codex-acp 1.1.7 labels MCP approvals kind `execute` — a kind the floor
+    // allows for git — with this meta flag. MCP servers run outside the OS
+    // sandbox, so the floor is all that stands between a read-only session and
+    // a write-capable MCP tool.
+    const options = [
+      { optionId: 'ao', kind: 'allow_once' },
+      { optionId: 'ro', kind: 'reject_once' },
+    ];
+    const mcp = {
+      toolCall: { kind: 'execute' },
+      _meta: { is_mcp_tool_approval: true },
+      options,
+    };
+    assert.deepEqual(respondToPermissionRequest(mcp), {
+      outcome: { outcome: 'selected', optionId: 'ro' },
+    });
+    // A write-mode session is the member's own choice; their MCP tools run.
+    assert.deepEqual(respondToPermissionRequest(mcp, 'writes'), {
+      outcome: { outcome: 'selected', optionId: 'ao' },
+    });
+  });
+
+  it('runs the caller-chosen mode and reports the roster', async () => {
+    const permissionAnswers: unknown[] = [];
+    const fake = fakeAgentIo({
+      modes: {
+        currentModeId: 'read-only',
+        availableModes: [
+          { id: 'read-only', name: 'Read-only' },
+          { id: 'agent', name: 'Agent', description: 'Read and edit files.' },
+        ],
+      },
+      onPrompt: (agent) => {
+        // The driver's own floor follows the mode: a local caller that asked
+        // for writes must not have this layer deny what the mode promises.
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'edit' },
+          options: [
+            { optionId: 'ao', kind: 'allow_once' },
+            { optionId: 'ro', kind: 'reject_once' },
+          ],
+        });
+      },
+      onClientResponse: (_id, result, agent) => {
+        permissionAnswers.push(result);
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      mode: 'agent',
+    });
+    assert.deepEqual(fake.setModeIds, ['agent']);
+    assert.deepEqual(permissionAnswers, [{ outcome: { outcome: 'selected', optionId: 'ao' } }]);
+    assert.deepEqual(result.modes, {
+      currentModeId: 'agent',
+      availableModes: [
+        { id: 'read-only', name: 'Read-only' },
+        { id: 'agent', name: 'Agent', description: 'Read and edit files.' },
+      ],
+    });
+  });
+
+  it('refuses a mode the agent does not offer, naming the roster', async () => {
+    const fake = fakeAgentIo({
+      modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },
+      onPrompt: () => {
+        throw new Error('must not prompt');
+      },
+    });
+    // Silently downgrading would run a different permission tier than the one
+    // the member was shown, in either direction — so the turn fails instead.
+    await assert.rejects(
+      driveAcpSession(fake, {
+        cwd: '/tmp',
+        prompt: 'p',
+        agent: 'codex',
+        label: 't',
+        log: noLog,
+        mode: 'agent',
+      }),
+      /mode agent not offered \(offers: read-only\)/,
+    );
+    assert.deepEqual(fake.setModeIds, []);
   });
 
   it('drives a session end-to-end and returns the last assistant segment', async () => {
@@ -925,6 +1046,32 @@ describe('acp', () => {
       );
       assert.equal(result.text, text, label);
       assert.deepEqual(result.notices, notices, label);
+    }
+  });
+
+  it('runs a named workspace from the member own home, mode pinned', () => {
+    const codexHome = mkdtempSync(join(tmpdir(), 'symma-test-codex-'));
+    const runParent = mkdtempSync(join(tmpdir(), 'symma-test-run-'));
+    const runHome = join(runParent, 'codex');
+    try {
+      writeFileSync(codexAuthPath(codexHome), '{"tokens":"t"}');
+      const codex = codexAcpSpec(codexHome, runHome);
+      assert.equal(codex.modes, true);
+      const opened = codex.env('codex/default', { mode: 'agent', workspace: true });
+      // The member's own home — their config, MCP servers and history — with
+      // nothing of ours written into it, and no run home built on the side.
+      assert.equal(opened.env.CODEX_HOME, codexHome);
+      assert.ok(!existsSync(join(codexHome, 'config.toml')), 'their home is not ours to configure');
+      assert.ok(!existsSync(runHome), 'no run home for a session that does not use it');
+      assert.equal(opened.env.INITIAL_AGENT_MODE, 'agent');
+      // A temp-dir open is the isolated path, mode or not: a mode outside a
+      // named workspace was refused before the spawn.
+      const temp = codex.env('codex/default', { workspace: false });
+      assert.equal(temp.env.CODEX_HOME, runHome);
+      assert.equal(temp.env.INITIAL_AGENT_MODE, 'read-only');
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+      rmSync(runParent, { recursive: true, force: true });
     }
   });
 

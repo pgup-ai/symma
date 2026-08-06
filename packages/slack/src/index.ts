@@ -5,13 +5,13 @@
  * has not earned any of them yet.
  */
 import { runRemotePrompt } from '@symma/client';
-import type { TurnTarget } from '@symma/protocol';
+import { isWriteCapableMode, type SessionModes, type TurnTarget } from '@symma/protocol';
 
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
-import { slackApi, SHARE_ACTION } from './slack-api.js';
+import { slackApi, MODE_ACTION, SHARE_ACTION } from './slack-api.js';
 import { readTurnTarget } from './turn-target.js';
 import { socketMode } from './socket-mode.js';
 
@@ -158,11 +158,13 @@ const depsFor = (user: string) => {
       prompt,
       workspace,
       model,
+      mode,
       resume,
       context,
     }: RunSpec) => {
       const notices: string[] = [];
       let session = '';
+      let modes: SessionModes | undefined;
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -174,16 +176,18 @@ const depsFor = (user: string) => {
           runId: conversation,
           onNotice: (notice) => notices.push(notice),
           onSession: (id) => (session = id),
+          onModes: (roster) => (modes = roster),
           ...(resume ? { resume } : {}),
           ...(context ? { context } : {}),
           ...(workspace ? { workspace } : {}),
+          ...(mode ? { mode } : {}),
         },
         model,
         prompt,
         `slack-${conversation}`,
         log,
       );
-      return { text, notices, session };
+      return { text, notices, session, ...(modes ? { modes } : {}) };
     },
     finish: async (
       conversation: string,
@@ -214,6 +218,9 @@ const depsFor = (user: string) => {
     },
     seen: async (conversation: string, seenThroughTs: string) => {
       await ask('/api/slack/seen', { user, conversation, seenThroughTs });
+    },
+    shedMode: async (conversation: string) => {
+      await ask('/api/slack/mode', { user, conversation, mode: null });
     },
   };
 };
@@ -255,6 +262,7 @@ const connection = socketMode({
               endpoint: deps.endpoint,
               run: deps.run,
               finish: deps.finish,
+              shedMode: deps.shedMode,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,
@@ -291,8 +299,46 @@ const connection = socketMode({
         user?: { id?: unknown };
         channel?: { id?: unknown };
         message?: { ts?: unknown; text?: unknown; thread_ts?: unknown };
-        actions?: { action_id?: unknown; value?: unknown }[];
+        actions?: {
+          action_id?: unknown;
+          value?: unknown;
+          selected_option?: { value?: unknown };
+        }[];
       };
+      // The mode picker: the selection names a conversation and a mode, and
+      // whether that conversation is this member's is the gateway's check —
+      // the payload claims nothing the store does not verify.
+      const picked = actions?.find((a) => a.action_id === MODE_ACTION)?.selected_option?.value;
+      if (typeof picked === 'string') {
+        const who = user?.id;
+        const where = channel?.id;
+        const messageTs = message?.ts;
+        const thread = typeof message?.thread_ts === 'string' ? message.thread_ts : messageTs;
+        if (typeof who !== 'string' || typeof where !== 'string' || typeof thread !== 'string')
+          return;
+        let selection: { c?: unknown; m?: unknown };
+        try {
+          selection = JSON.parse(picked) as { c?: unknown; m?: unknown };
+        } catch {
+          return;
+        }
+        const { c: conversationId, m: modeId } = selection;
+        if (typeof conversationId !== 'string' || typeof modeId !== 'string') return;
+        await announcing(who, 'mode', async () => {
+          await ask('/api/slack/mode', { user: who, conversation: conversationId, mode: modeId });
+          // Writes named out loud: the mode is their machine's permission
+          // tier, not a cosmetic setting.
+          await api.post(
+            where,
+            `Mode set: \`${modeId}\` — applies from your next message.${
+              isWriteCapableMode(modeId) ? ' Writes are enabled in this workspace.' : ''
+            }`,
+            thread,
+          );
+          return `set ${modeId} on ${conversationId}`;
+        });
+        return;
+      }
       const conversation = actions?.find((a) => a.action_id === SHARE_ACTION)?.value;
       const who = user?.id;
       const where = channel?.id;

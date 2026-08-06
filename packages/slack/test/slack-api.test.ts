@@ -183,6 +183,91 @@ describe('slack api', () => {
     assert.equal(sent.get('text'), 'the answer');
   });
 
+  it('renders the mode picker off the roster, current selection marked', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      undefined,
+      undefined,
+      {
+        conversation: 'conv-1',
+        modes: {
+          currentModeId: 'agent',
+          availableModes: [
+            { id: 'read-only', name: 'Read-only' },
+            { id: 'agent', name: 'Agent' },
+            { id: 'agent-full-access' },
+          ],
+        },
+      },
+    );
+    const sent = new URLSearchParams(String(seen[0]));
+    const blocks = JSON.parse(sent.get('blocks') ?? '[]') as {
+      type: string;
+      elements?: {
+        type: string;
+        action_id?: string;
+        options?: { text: { text: string }; value: string }[];
+        initial_option?: { value: string };
+      }[];
+    }[];
+    const select = blocks
+      .find((b) => b.type === 'actions')
+      ?.elements?.find((e) => e.type === 'static_select');
+    assert.ok(select, 'the picker rides the answer');
+    assert.equal(select.action_id, 'set_conversation_mode');
+    // The agent's names verbatim, the id where it gave none — never our copy.
+    assert.deepEqual(
+      select.options!.map((o) => o.text.text),
+      ['Read-only', 'Agent', 'agent-full-access'],
+    );
+    assert.deepEqual(JSON.parse(select.options![1]!.value), { c: 'conv-1', m: 'agent' });
+    // Slack accepts initial_option only when it deep-equals one of the options.
+    assert.deepEqual(select.initial_option, select.options![1]);
+  });
+
+  it('bounds the picker to what Slack will post and what can round-trip', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    // 150 modes, one un-postable id (space fails the wire's alphabet) and one
+    // whose encoded value blows Slack's 150-char option cap — the conversation
+    // id is UUID-length, since a short one keeps even a maximal mode id under
+    // the cap and the filter would never fire. The current mode sits past the
+    // option cap, so it loses its highlight rather than invalidating the post.
+    const flood = Array.from({ length: 150 }, (_, i) => ({ id: `mode-${String(i)}` }));
+    const oversized = 'x'.repeat(128);
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'the answer',
+      '200.0',
+      undefined,
+      undefined,
+      {
+        conversation: 'c'.repeat(36),
+        modes: {
+          currentModeId: 'mode-149',
+          availableModes: [{ id: 'not safe' }, { id: oversized }, ...flood],
+        },
+      },
+    );
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      elements?: { type: string; options?: { value: string }[]; initial_option?: unknown }[];
+    }[];
+    const select = blocks
+      .find((b) => b.type === 'actions')
+      ?.elements?.find((e) => e.type === 'static_select');
+    assert.equal(select!.options!.length, 100);
+    assert.ok(
+      select!.options!.every(
+        (o) =>
+          o.value.length <= 150 && !o.value.includes('not safe') && !o.value.includes(oversized),
+      ),
+    );
+    assert.equal(select!.initial_option, undefined);
+  });
+
   it('splits an answer Slack would reject rather than losing the post', async () => {
     // A section caps at 3,000 characters and the message at 50 blocks. Slack
     // rejects the whole post over either, and `handleDm` reports a rejected

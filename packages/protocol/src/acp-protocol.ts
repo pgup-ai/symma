@@ -122,7 +122,23 @@ export function createNdjsonReader(
 export interface PermissionRequestParams {
   toolCall?: { kind?: string; title?: string };
   options?: { optionId?: string; kind?: string }[];
+  /** codex-acp 1.1.7 marks MCP tool approvals here (`is_mcp_tool_approval`);
+   * their kind is `execute`, so the kind alone cannot tell them apart. */
+  _meta?: Record<string, unknown>;
 }
+
+/** `read-only` is the review floor. `writes` is a DM turn whose owner picked a
+ * write-capable mode inside their own allowlisted workspace — everything is
+ * allowed but `switch_mode`, so the mode channel and the prompt channel never
+ * mix and a session can never escalate itself. */
+export type PermissionPolicy = 'read-only' | 'writes';
+
+/** Mode ids whose intent is read-only. `plan` is the behavioral read-only
+ * layer this driver itself force-selects for sandbox-less agents — so every
+ * floor that classifies a mode must go through here, or "anything not
+ * literally read-only" hands `plan` the writes policy against its meaning. */
+const READ_ONLY_MODE_IDS = new Set(['read-only', 'plan']);
+export const isWriteCapableMode = (mode: string): boolean => !READ_ONLY_MODE_IDS.has(mode);
 
 export type PermissionResponse = {
   outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' };
@@ -142,14 +158,21 @@ const DENIED_TOOL_KINDS = new Set(['edit', 'delete', 'move', 'write', 'switch_mo
  * read tools commonly ship kind `other` or none, so denying unknowns would
  * stall reviews (a recall hole). Command-level policing — bash filtering and
  * the like — belongs to the other two layers, codex's OS sandbox and plan
- * mode. Prefers the `*_once` option so no standing grant outlives a single
+ * mode. The `writes` policy inverts all of that to deny only `switch_mode`.
+ * Prefers the `*_once` option so no standing grant outlives a single
  * call. Kind strings normalize `-` to `_` (cursor emits hyphens). No usable
  * option ⇒ cancelled outcome.
  */
-export function respondToPermissionRequest(params: PermissionRequestParams): PermissionResponse {
-  const direction = DENIED_TOOL_KINDS.has(normalizeKind(params.toolCall?.kind))
-    ? 'reject'
-    : 'allow';
+export function respondToPermissionRequest(
+  params: PermissionRequestParams,
+  policy: PermissionPolicy = 'read-only',
+): PermissionResponse {
+  const kind = normalizeKind(params.toolCall?.kind);
+  // MCP servers are the agent's own subprocesses, outside its OS sandbox and
+  // this floor's kind vocabulary — read-only must catch them by the meta flag.
+  const mcp = params._meta?.is_mcp_tool_approval === true;
+  const denied = policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
+  const direction = denied ? 'reject' : 'allow';
   const options = params.options ?? [];
   const pick =
     options.find((option) => normalizeKind(option.kind) === `${direction}_once`) ??
@@ -303,6 +326,10 @@ export interface AcpSessionOptions {
   /** Fail closed when plan mode is missing or cannot be set (agents with no
    * agent-side sandbox — plan mode is their behavioral read-only layer). */
   requirePlanMode?: boolean;
+  /** Session mode to run under, one of the agent's `availableModes`. Fails the
+   * turn when not offered — no silent downgrade in either direction. Absent
+   * keeps the review path's behavior: plan mode forced when offered. */
+  mode?: string;
   /** Reattach to this session rather than opening one, for agents that
    * advertise `loadSession`. Fails open: a resume that cannot happen costs the
    * caller its history, and must not also cost it the turn. */
@@ -346,6 +373,19 @@ export function matchModelOptionValue(
   return match?.value;
 }
 
+export interface SessionMode {
+  id: string;
+  name?: string;
+  description?: string;
+}
+
+/** An agent's mode surface as `session/new`/`session/load` returned it, with
+ * `currentModeId` reflecting the caller's mode when one was set. */
+export interface SessionModes {
+  currentModeId?: string;
+  availableModes: SessionMode[];
+}
+
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
@@ -358,6 +398,9 @@ export interface AcpSessionResult {
    * putting an operational notice in the message stream. codex-acp turns
    * codex's `warning` and `configWarning` events into exactly this. */
   notices: string[];
+  /** Present when the agent served a mode roster — what a caller's member can
+   * pick from next turn. */
+  modes?: SessionModes;
 }
 
 /**
@@ -409,7 +452,13 @@ export async function driveAcpSession(
     },
     (method, params) => {
       if (method === 'session/request_permission') {
-        const response = respondToPermissionRequest(params as PermissionRequestParams);
+        // The driver's own floor follows the caller's mode the same way the
+        // companion's does — a local caller that asked for a write-capable
+        // mode must not have this layer silently deny what the mode promises.
+        const response = respondToPermissionRequest(
+          params as PermissionRequestParams,
+          options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only',
+        );
         if (response.outcome.outcome !== 'selected') {
           log(`acp:${agent} ${label}: permission request had no usable option; cancelled`);
         }
@@ -503,30 +552,57 @@ export async function driveAcpSession(
     await selectModelConfigOption(conn, sessionId, session, options);
   }
   const modes = session.modes as
-    { currentModeId?: string; availableModes?: { id?: string }[] } | undefined;
-  const planOffered = modes?.availableModes?.some((mode) => mode.id === 'plan') ?? false;
-  if (planOffered && modes?.currentModeId !== 'plan') {
-    try {
-      await conn.request('session/set_mode', { sessionId, modeId: 'plan' });
-    } catch (error) {
-      const detail = `plan mode unavailable (${
-        error instanceof Error ? error.message : String(error)
-      })`;
-      // Agents with no agent-side sandbox (spec.requirePlanMode) fail CLOSED
-      // here — plan mode is their behavioral read-only layer, not a nicety.
-      if (options.requirePlanMode) {
-        throw new Error(`acp:${agent} ${label}: ${detail}; refusing to run without it`);
-      }
-      log(`acp:${agent} ${label}: ${detail}; relying on permission policy`);
-    }
-  } else if (!planOffered) {
-    // kilo exposes mode as a config option (no session/modes); its `plan`
-    // value is the read-only agent — the same contract as opencode's.
-    const applied = await selectPlanConfigOption(conn, sessionId, session, options);
-    if (!applied && options.requirePlanMode) {
+    { currentModeId?: string; availableModes?: Record<string, unknown>[] } | undefined;
+  const roster = (modes?.availableModes ?? []).flatMap((entry): SessionMode[] =>
+    typeof entry.id === 'string'
+      ? [
+          {
+            id: entry.id,
+            ...(typeof entry.name === 'string' ? { name: entry.name } : {}),
+            ...(typeof entry.description === 'string' ? { description: entry.description } : {}),
+          },
+        ]
+      : [],
+  );
+  if (options.mode !== undefined) {
+    // The caller's mode is its member's explicit choice: not offered fails the
+    // turn — silently downgrading would run a different permission tier than
+    // the one they were shown, and upgrading is not ours to do either.
+    if (!roster.some((offered) => offered.id === options.mode)) {
       throw new Error(
-        `acp:${agent} ${label}: agent offered no plan mode; refusing to run without it`,
+        `acp:${agent} ${label}: mode ${options.mode} not offered (offers: ${
+          roster.map((offered) => offered.id).join(', ') || 'none'
+        })`,
       );
+    }
+    if (modes?.currentModeId !== options.mode) {
+      await conn.request('session/set_mode', { sessionId, modeId: options.mode });
+    }
+  } else {
+    const planOffered = roster.some((offered) => offered.id === 'plan');
+    if (planOffered && modes?.currentModeId !== 'plan') {
+      try {
+        await conn.request('session/set_mode', { sessionId, modeId: 'plan' });
+      } catch (error) {
+        const detail = `plan mode unavailable (${
+          error instanceof Error ? error.message : String(error)
+        })`;
+        // Agents with no agent-side sandbox (spec.requirePlanMode) fail CLOSED
+        // here — plan mode is their behavioral read-only layer, not a nicety.
+        if (options.requirePlanMode) {
+          throw new Error(`acp:${agent} ${label}: ${detail}; refusing to run without it`);
+        }
+        log(`acp:${agent} ${label}: ${detail}; relying on permission policy`);
+      }
+    } else if (!planOffered) {
+      // kilo exposes mode as a config option (no session/modes); its `plan`
+      // value is the read-only agent — the same contract as opencode's.
+      const applied = await selectPlanConfigOption(conn, sessionId, session, options);
+      if (!applied && options.requirePlanMode) {
+        throw new Error(
+          `acp:${agent} ${label}: agent offered no plan mode; refusing to run without it`,
+        );
+      }
     }
   }
   const result = (await conn.request('session/prompt', {
@@ -564,11 +640,16 @@ export async function driveAcpSession(
   // fail open") — an aside shown as the answer is recoverable, a lost answer is
   // not — so the asides are taken back rather than returning silence.
   const kept = answered.length ? answered : segments;
+  const finalMode =
+    options.mode ?? (typeof modes?.currentModeId === 'string' ? modes.currentModeId : undefined);
   return {
     text: (kept[kept.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
     sessionId,
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
+    ...(roster.length
+      ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
+      : {}),
   };
 }
 
@@ -674,13 +755,21 @@ async function selectModelConfigOption(
   }
 }
 
+/** What the companion knows at spawn that a spec may branch on: the caller's
+ * session mode, and whether the session runs in an allowlisted workspace
+ * rather than a temp directory. */
+export interface AgentOpen {
+  mode?: string;
+  workspace?: boolean;
+}
+
 export interface AcpAgentSpec {
   /** Backend id this spec serves; the engine name becomes `acp:<id>`. */
   id: string;
   bin: string;
   args(model: string): string[];
   /** Per-spawn env + optional cleanup (temp auth copies, config files). */
-  env(model: string): { env: NodeJS.ProcessEnv; cleanup?: () => void };
+  env(model: string, open?: AgentOpen): { env: NodeJS.ProcessEnv; cleanup?: () => void };
   /** Ordered model-id candidates for the agent's ACP model config option —
    * for agents (devin, kilo) whose CLI flags/env/config never reach the ACP
    * session. Empty result skips selection; kilo always returns candidates
@@ -689,6 +778,8 @@ export interface AcpAgentSpec {
   modelConfigCandidates?(model: string): string[];
   /** See AcpSessionOptions.requirePlanMode. */
   requirePlanMode?: boolean;
+  /** Advertised in hello: sessions honor a caller-chosen mode (§4). */
+  modes?: boolean;
 }
 export function cursorAcpSpec(apiKey: string): AcpAgentSpec {
   return {
@@ -783,8 +874,14 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
     id: 'codex',
     bin: CODEX_ACP_BIN,
     args: () => [],
-    env: (model) => {
-      const env = codexEnvForHome(prepareCodexRunHome(codexHome, runHome));
+    env: (model, open) => {
+      // A named workspace runs from the member's own home — their config, MCP
+      // servers, skills and session history, the parity §4's inversion is for.
+      // The isolated run home stays for temp-dir sessions, whose read-only
+      // config is ours to write; theirs is not ours to touch.
+      const env = codexEnvForHome(
+        open?.workspace ? codexHome : prepareCodexRunHome(codexHome, runHome),
+      );
       // codex-acp runtime overrides (README): CODEX_PATH swaps the binary and
       // MODEL_PROVIDER redirects models, so ambient values must not reach the
       // child. CODEX_CONFIG is set rather than stripped — being per process is
@@ -794,12 +891,14 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
       const { modelID } = parseModelName(model);
       if (modelID === 'default') delete env.CODEX_CONFIG;
       else env.CODEX_CONFIG = JSON.stringify({ model: modelID });
-      // Live-probed against codex-acp 1.1.7: config.toml's `sandbox_mode`
-      // leaves the ACP mode reading `agent`; this is what selects read-only.
-      env.INITIAL_AGENT_MODE = 'read-only';
+      // Always pinned: live-probed on codex-acp 1.1.7, an unpinned session
+      // opens in `agent` — write-capable — not read-only and not the config's
+      // sandbox default.
+      env.INITIAL_AGENT_MODE = open?.mode ?? 'read-only';
       env.NO_BROWSER = '1';
       return { env };
     },
+    modes: true,
   };
 }
 

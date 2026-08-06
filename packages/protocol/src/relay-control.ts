@@ -22,6 +22,11 @@ export const servesProtocol = (version = 0): boolean =>
 
 export interface EndpointAgent {
   agent: string;
+  /** The companion honors a caller-chosen session mode for this agent (§4).
+   * Absent — every companion published before the field — reads as "cannot",
+   * which is what keeps an old companion a read-only one rather than one that
+   * quietly ignores the mode a member picked. */
+  modes?: boolean;
 }
 
 /** What `GET /api/endpoints` serves: the gateway builds it, a client reads it
@@ -83,6 +88,9 @@ export interface TurnTarget extends SelectedEndpoint {
   /** An agent session this conversation can reattach to, offered only when the
    * machine, agent and directory are the ones it was minted under (§4). */
   resume?: string;
+  /** The conversation's session mode; absent is read-only. Served only for a
+   * named workspace on an endpoint whose hello advertised modes for the agent. */
+  mode?: string;
 }
 
 /**
@@ -127,6 +135,10 @@ export interface OpenControl {
    * general questions: an empty temp directory, as the review path has always
    * had. Never a path — see `EndpointWorkspace`. */
   workspace?: string;
+  /** Session mode the caller chose, one the agent offers. Absent is read-only —
+   * also all an older companion can be asked for, since this field reaches it
+   * only when its hello advertised `modes` for the agent. */
+  mode?: string;
   repo?: string;
   ref?: string;
   base?: string;
@@ -195,7 +207,9 @@ export function parseRelayControl(line: string): RelayControl | undefined {
       const agents: EndpointAgent[] = [];
       for (const entry of raw.agents as Record<string, unknown>[]) {
         if (!entry || !str(entry.agent)) return undefined;
-        agents.push({ agent: entry.agent });
+        // Only literal `true`: the flag gates whether a mode is ever sent, so
+        // a value that means nothing must read as "cannot".
+        agents.push({ agent: entry.agent, ...(entry.modes === true ? { modes: true } : {}) });
       }
       const max = Number(raw.maxSessions);
       if (!Number.isInteger(max) || max < 1) return undefined;
@@ -255,6 +269,9 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         // refused there rather than dropped here into a temp directory the
         // caller never asked for.
         ...(str(raw.workspace) ? { workspace: raw.workspace } : {}),
+        // id-safe or dropped: the value becomes a child process env var on the
+        // companion, so the parse is where its alphabet is pinned.
+        ...(isSafeId(raw.mode) ? { mode: raw.mode } : {}),
         ...(str(raw.repo) ? { repo: raw.repo } : {}),
         ...(str(raw.ref) ? { ref: raw.ref } : {}),
         ...(str(raw.base) ? { base: raw.base } : {}),

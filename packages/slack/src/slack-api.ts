@@ -7,6 +7,8 @@
  */
 import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } from '@slack/web-api';
 
+import { isSafeId, type SessionMode, type SessionModes } from '@symma/protocol';
+
 import type { ThreadMessage } from './snapshot.js';
 
 export interface SlackApi {
@@ -27,6 +29,10 @@ export interface SlackApi {
      * context block, which is Slack's own small-and-grey — the member should be
      * able to tell it from the answer without reading it. */
     notices?: string[],
+    /** §4's mode picker, rendered from the agent's own roster. The selection
+     * carries the conversation and the mode id; what to do with them is the
+     * gateway's to decide, same as the share button. */
+    modePicker?: { conversation: string; modes: SessionModes },
   ) => Promise<{ channel: string; ts: string }>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
@@ -128,6 +134,48 @@ function sections(text: string, budget: number): SectionBlock[] {
 /** The one action id the bot listens for, shared by the button and its handler. */
 export const SHARE_ACTION = 'share_to_thread';
 
+/** The mode picker's action id, shared the same way. */
+export const MODE_ACTION = 'set_conversation_mode';
+
+/** Slack's static_select caps: options per select, characters per value. */
+const PICKER_OPTION_LIMIT = 100;
+const PICKER_VALUE_LIMIT = 150;
+
+/** One picker option. `initial_option` must deep-equal one of `options` for
+ * Slack to accept it, so both are built here and nowhere else. */
+const modeOption = (conversation: string, mode: SessionMode) => ({
+  // Slack caps option labels at 75 characters.
+  text: { type: 'plain_text' as const, text: (mode.name ?? mode.id).slice(0, 75) },
+  value: JSON.stringify({ c: conversation, m: mode.id }),
+});
+
+/** The select, bounded to what Slack will post and what can round-trip: an id
+ * outside the wire's alphabet, or a value past Slack's cap, could be shown but
+ * never selected — and one roster past the option cap would cost the whole
+ * answer it rides on. A current mode the bounds dropped just loses its
+ * highlight; the placeholder stands in. */
+function modeSelect(conversation: string, modes: SessionModes): Record<string, unknown>[] {
+  const options = modes.availableModes
+    .filter((mode) => isSafeId(mode.id))
+    .map((mode) => modeOption(conversation, mode))
+    .filter((option) => option.value.length <= PICKER_VALUE_LIMIT)
+    .slice(0, PICKER_OPTION_LIMIT);
+  if (!options.length) return [];
+  const current = modes.availableModes.find((mode) => mode.id === modes.currentModeId);
+  const initial = current && modeOption(conversation, current);
+  return [
+    {
+      type: 'static_select',
+      action_id: MODE_ACTION,
+      placeholder: { type: 'plain_text', text: 'Session mode' },
+      options,
+      ...(initial && options.some((option) => option.value === initial.value)
+        ? { initial_option: initial }
+        : {}),
+    },
+  ];
+}
+
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */
 const UNREADABLE = new Set(['not_in_channel', 'channel_not_found', 'missing_scope']);
@@ -202,33 +250,32 @@ export function slackApi(
       if (!channel?.id) throw new Error('conversations.open returned no channel');
       return channel.id;
     },
-    async post(channel, text, threadTs, offerShare, notices) {
-      const actions = offerShare
-        ? [
-            {
-              type: 'actions',
-              elements: [
-                {
-                  type: 'button',
-                  action_id: SHARE_ACTION,
-                  text: { type: 'plain_text', text: 'Share to thread' },
-                  value: offerShare.conversation,
-                  // §5 wants the destination previewed before it is published,
-                  // and the content is the message this sits on.
-                  confirm: {
-                    title: { type: 'plain_text', text: 'Share this answer?' },
-                    text: {
-                      type: 'mrkdwn',
-                      text: `It will be posted to ${offerShare.destination}, with your name on it.`,
-                    },
-                    confirm: { type: 'plain_text', text: 'Share' },
-                    deny: { type: 'plain_text', text: 'Keep private' },
+    async post(channel, text, threadTs, offerShare, notices, modePicker) {
+      const elements = [
+        ...(offerShare
+          ? [
+              {
+                type: 'button',
+                action_id: SHARE_ACTION,
+                text: { type: 'plain_text', text: 'Share to thread' },
+                value: offerShare.conversation,
+                // §5 wants the destination previewed before it is published,
+                // and the content is the message this sits on.
+                confirm: {
+                  title: { type: 'plain_text', text: 'Share this answer?' },
+                  text: {
+                    type: 'mrkdwn',
+                    text: `It will be posted to ${offerShare.destination}, with your name on it.`,
                   },
+                  confirm: { type: 'plain_text', text: 'Share' },
+                  deny: { type: 'plain_text', text: 'Keep private' },
                 },
-              ],
-            },
-          ]
-        : [];
+              },
+            ]
+          : []),
+        ...(modePicker ? modeSelect(modePicker.conversation, modePicker.modes) : []),
+      ];
+      const actions = elements.length ? [{ type: 'actions', elements }] : [];
       // The answer takes the blocks it needs and the asides take what is left,
       // in that order — a run that talked about itself a lot must not crowd out
       // what it was talking alongside. One block is held back for them all the

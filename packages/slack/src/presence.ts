@@ -36,6 +36,8 @@ export type TurnDecision =
       token: string;
       workspace?: string;
       label?: string;
+      /** The conversation's session mode (§4); absent is read-only. */
+      mode?: string;
       /** An agent session this thread can pick up rather than start over (§4). */
       resume?: string;
     }
@@ -60,6 +62,7 @@ export function decideTurn(target: TurnTarget | undefined): TurnDecision {
           token: target.token,
           ...(target.workspace ? { workspace: target.workspace } : {}),
           ...(target.workspaceLabel ? { label: target.workspaceLabel } : {}),
+          ...(target.mode ? { mode: target.mode } : {}),
           ...(target.resume ? { resume: target.resume } : {}),
         }
       : { run: false, because: 'unusable', why: unusable };

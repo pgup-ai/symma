@@ -219,3 +219,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS conversations_source_thread
   ON conversations (user_id, source_channel_id, source_thread_ts)
   WHERE source_channel_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS conversations_activity_idx ON conversations (last_activity_at);
+
+-- The session mode this conversation runs under (§4): its member's own pick,
+-- applied from the next turn. NULL is read-only, which every conversation
+-- predating the column was.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS mode_id text;

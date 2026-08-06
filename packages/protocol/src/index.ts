@@ -15,15 +15,20 @@ export {
   kiloAcpSpec,
   opencodeAcpSpec,
   opencodeAuthPath,
+  isWriteCapableMode,
   matchModelOptionValue,
   respondToPermissionRequest,
   type AcpAgentSpec,
+  type AgentOpen,
   type AcpSessionIo,
   type AcpSessionOptions,
   type AcpSessionResult,
   type ModelOptionCandidate,
+  type PermissionPolicy,
   type PermissionRequestParams,
   type PermissionResponse,
+  type SessionMode,
+  type SessionModes,
 } from './acp-protocol.js';
 
 export {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import type { TurnTarget } from '@symma/protocol';
+import type { SessionModes, TurnTarget } from '@symma/protocol';
 
 import { handleDm, isMemberDm, type DmDeps, type RunSpec } from '../src/dm.js';
 import type { ThreadMessage } from '../src/snapshot.js';
@@ -26,6 +26,10 @@ function harness(
     endpoint?: TurnTarget | null;
     answer?: string;
     notices?: string[];
+    /** The roster the run came back with, for the picker. */
+    modes?: SessionModes;
+    /** The gateway refuses the mode clear. */
+    shedFails?: boolean;
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
@@ -48,11 +52,13 @@ function harness(
     threadTs?: string;
     offerShare?: { conversation: string; destination: string };
     notices?: string[];
+    modePicker?: { conversation: string; modes: SessionModes };
   }[] = [];
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
   const marks: { channel: string; ts: string; state: MarkState }[] = [];
   const finished: Record<string, string>[] = [];
+  const sheds: string[] = [];
   let asked = 0;
   const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
@@ -73,16 +79,18 @@ function harness(
             text: over.answer ?? 'the answer',
             notices: over.notices ?? [],
             session: 'acp-1',
+            ...(over.modes ? { modes: over.modes } : {}),
           });
     },
     find: () => Promise.resolve(over.existing),
-    post: (channel, text, threadTs, offerShare, notices) => {
+    post: (channel, text, threadTs, offerShare, notices, modePicker) => {
       posts.push({
         channel,
         text,
         ...(threadTs ? { threadTs } : {}),
         ...(offerShare ? { offerShare } : {}),
         ...(notices?.length ? { notices } : {}),
+        ...(modePicker ? { modePicker } : {}),
       });
       if (over.postFails) return Promise.reject(over.postFails);
       // The acknowledgement is always first; anything later is the answer.
@@ -94,6 +102,10 @@ function harness(
     finish: (conversation, turn, status, ran) => {
       finished.push({ conversation, turn, status, ...ran });
       return Promise.resolve();
+    },
+    shedMode: (conversation) => {
+      sheds.push(conversation);
+      return over.shedFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
     },
     mark: (channel, ts, state) => {
       marks.push({ channel, ts, state });
@@ -118,7 +130,7 @@ function harness(
       return Promise.resolve(selected ?? undefined);
     },
   };
-  return { deps, posts, turns, runs, marks, finished, askedFor, asked: () => asked };
+  return { deps, posts, turns, runs, marks, finished, sheds, askedFor, asked: () => asked };
 }
 
 describe('dm message', () => {
@@ -282,6 +294,99 @@ describe('dm message', () => {
     assert.match(posts[0]!.text, /no access to your files/);
   });
 
+  it('runs in the conversation mode and offers the picker with the answer', async () => {
+    const roster: SessionModes = {
+      currentModeId: 'agent',
+      availableModes: [
+        { id: 'read-only', name: 'Read-only' },
+        { id: 'agent', name: 'Agent' },
+      ],
+    };
+    const { deps, posts, runs } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma', mode: 'agent' },
+      modes: roster,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'change it' },
+      deps,
+    );
+    assert.equal(runs[0]!.mode, 'agent');
+    // Read back on every turn — the member should never have to remember what
+    // tier their own machine is running at.
+    assert.match(posts[0]!.text, /in `symma` — `agent` mode/);
+    assert.deepEqual(posts[1]!.modePicker, { conversation: 'conv-1', modes: roster });
+  });
+
+  it('names read-only for a workspace turn that picked nothing, picker included', async () => {
+    const roster: SessionModes = {
+      currentModeId: 'read-only',
+      availableModes: [{ id: 'read-only' }, { id: 'agent' }],
+    };
+    const { deps, posts, runs } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma' },
+      modes: roster,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'look' },
+      deps,
+    );
+    // Absent mode still runs read-only, and the tier is said, not implied.
+    assert.equal(runs[0]!.mode, undefined);
+    assert.match(posts[0]!.text, /in `symma` — `read-only` mode/);
+    // The first workspace turn is exactly where the picker has to appear, or
+    // there is no way to ever leave read-only.
+    assert.deepEqual(posts[1]!.modePicker, { conversation: 'conv-1', modes: roster });
+  });
+
+  it('sheds a mode the agent stopped offering, and says so', async () => {
+    const { deps, posts, sheds, finished } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma', mode: 'yolo' },
+      fails: new Error('acp:codex slack-conv-1: mode yolo not offered (offers: read-only, agent)'),
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    // Without the shed this thread fails every turn from here on: the picker
+    // that could fix it only rides answers, and there is no answer.
+    assert.deepEqual(sheds, ['conv-1']);
+    assert.match(posts[1]!.text, /no longer offers `yolo` mode.*retry read-only/);
+    assert.equal(finished[0]!.status, 'failed');
+  });
+
+  it('does not claim a clear that failed', async () => {
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma', mode: 'yolo' },
+      fails: new Error('acp:codex slack-conv-1: mode yolo not offered (offers: read-only)'),
+      shedFails: true,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    // A stale mode still stored means the retry fails the same way — saying
+    // "cleared" here would promise a recovery that did not happen.
+    assert.match(posts[1]!.text, /could not clear it/);
+  });
+
+  it('offers no picker outside a named workspace, wherever the roster came from', async () => {
+    // A temp-dir session can serve a roster too; rendering a picker for it
+    // would offer a mode the companion is guaranteed to refuse.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'hi' },
+      deps,
+    );
+    assert.equal(posts[1]!.modePicker, undefined);
+  });
+
   it('names the model as `provider/model`, which is the only shape that parses', async () => {
     // Every spec runs the string through `parseModelName` and reads the half
     // after the slash, so a bare `default` is refused before any agent sees it —
@@ -318,8 +423,10 @@ describe('dm message', () => {
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /in `weird`\./);
-    assert.equal(posts[0]!.text.split('`').length - 1, 2, 'one span, opened and closed');
+    assert.match(posts[0]!.text, /in `weird` — `read-only` mode\./);
+    // Two spans — label and mode — each opened and closed; the mode span is
+    // safe by the wire's alphabet, so only the label needed stripping.
+    assert.equal(posts[0]!.text.split('`').length - 1, 4, 'both spans opened and closed');
   });
 
   it('catches a follow-up up from the thread, and says what that is worth', async () => {
