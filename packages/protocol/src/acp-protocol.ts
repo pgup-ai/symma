@@ -163,8 +163,7 @@ export function respondToPermissionRequest(
   // MCP servers are the agent's own subprocesses, outside its OS sandbox and
   // this floor's kind vocabulary — read-only must catch them by the meta flag.
   const mcp = params._meta?.is_mcp_tool_approval === true;
-  const denied =
-    policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
+  const denied = policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
   const direction = denied ? 'reject' : 'allow';
   const options = params.options ?? [];
   const pick =
@@ -539,8 +538,7 @@ export async function driveAcpSession(
     await selectModelConfigOption(conn, sessionId, session, options);
   }
   const modes = session.modes as
-    | { currentModeId?: string; availableModes?: Record<string, unknown>[] }
-    | undefined;
+    { currentModeId?: string; availableModes?: Record<string, unknown>[] } | undefined;
   const roster = (modes?.availableModes ?? []).flatMap((entry): SessionMode[] =>
     typeof entry.id === 'string'
       ? [
