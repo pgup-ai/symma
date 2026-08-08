@@ -131,6 +131,14 @@ describe('attachments', () => {
     assert.equal(asked.length, 2);
   });
 
+  it('names an empty file rather than sending nothing under its name', async () => {
+    // Distinct from a refused download: the fetch succeeded, so only the length
+    // separates a file the agent can read from one it cannot.
+    const { fetchFile } = downloads(() => ({ ok: true, bytes: Buffer.alloc(0) }));
+    const got = await collectAttachments([file({ size: 0 })], fetchFile);
+    assert.deepEqual(got, [{ ok: false, name: 'notes.md', why: 'it came back empty' }]);
+  });
+
   it('cuts a size Slack under-reported off at the turn ceiling', async () => {
     // 800kB sent, then a file that says 100kB and serves 400kB. Nothing weighs
     // the bytes once they are here, so the fetch cap is the whole ceiling.

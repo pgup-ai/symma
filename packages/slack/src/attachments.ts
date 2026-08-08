@@ -175,6 +175,14 @@ export async function collectAttachments(
       });
       continue;
     }
+    // Named, not sent: an empty attachment is a file the agent cannot read
+    // while the acknowledgement says it is reading it, which is the silence
+    // this module exists to end. A member can upload one, and a 200 with no
+    // body arrives here the same way.
+    if (!got.bytes.byteLength) {
+      out.push({ ok: false, name, why: 'it came back empty' });
+      continue;
+    }
     spent += got.bytes.byteLength;
     carried += 1;
     out.push({
