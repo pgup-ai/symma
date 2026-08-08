@@ -521,6 +521,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     await deps.finish(conversation.id, turn, 'completed', ran);
     throw error;
   }
+  // The narration was a hint for a turn in flight. Once the answer is here it is
+  // in the way — Slack cannot fold it up the way a terminal does — so the
+  // acknowledgement goes back to what it said before. Only when something was
+  // narrated, or a short turn spends an update saying nothing changed, and
+  // fail-open for the same reason `narrate` is: this is presentation, and the
+  // answer is already delivered.
+  if (lastShown) await deps.working(acked.channel, acked.ts, ack).catch(() => undefined);
   await deps.mark(message.channel, message.ts, 'done');
   await deps.finish(conversation.id, turn, 'completed', ran);
   return existing ? 'resumed' : 'opened';

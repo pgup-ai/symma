@@ -37,6 +37,8 @@ function harness(
     usage?: TurnUsage;
     /** Files the agent had no block for, as the driver reports them. */
     unsupported?: { name: string; kind: string }[];
+    /** A step the run reports while it is still in flight. */
+    narrates?: string;
     /** What a file download hands back; absent is a download that fails. */
     fileBytes?: string;
     fails?: Error;
@@ -84,6 +86,7 @@ function harness(
     log: () => {},
     run: (spec) => {
       runs.push(spec);
+      if (over.narrates) spec.onProgress?.(over.narrates);
       return over.fails
         ? Promise.reject(over.fails)
         : Promise.resolve({
@@ -400,6 +403,23 @@ describe('dm message', () => {
     runs[0]!.onProgress!('Running git log');
     assert.equal(updates.length, 1);
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
+  });
+
+  it('takes the narration back off once the answer is there to read', async () => {
+    // A step is worth seeing while the turn runs and in the way afterwards, in a
+    // client that cannot fold it away.
+    const { deps, posts, updates } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(
+      updates.map((update) => update.text),
+      [`${posts[0]!.text}\n\n_Reading dm.ts_`, posts[0]!.text],
+    );
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {
