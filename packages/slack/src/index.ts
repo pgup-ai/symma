@@ -5,13 +5,18 @@
  * has not earned any of them yet.
  */
 import { runRemotePrompt } from '@symma/client';
-import { isWriteCapableMode, type SessionModes, type TurnTarget } from '@symma/protocol';
+import {
+  isWriteCapableMode,
+  type SessionModels,
+  type SessionModes,
+  type TurnTarget,
+} from '@symma/protocol';
 
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
-import { slackApi, MODE_ACTION, SHARE_ACTION } from './slack-api.js';
+import { slackApi, MODE_ACTION, MODEL_ACTION, SHARE_ACTION } from './slack-api.js';
 import { readTurnTarget } from './turn-target.js';
 import { socketMode } from './socket-mode.js';
 
@@ -161,10 +166,13 @@ const depsFor = (user: string) => {
       mode,
       resume,
       context,
+      onProgress,
     }: RunSpec) => {
       const notices: string[] = [];
       let session = '';
+      let resumeWith: string | undefined;
       let modes: SessionModes | undefined;
+      let models: SessionModels | undefined;
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -175,8 +183,13 @@ const depsFor = (user: string) => {
           agent,
           runId: conversation,
           onNotice: (notice) => notices.push(notice),
-          onSession: (id) => (session = id),
+          onSession: (id, cli) => {
+            session = id;
+            if (cli) resumeWith = cli;
+          },
           onModes: (roster) => (modes = roster),
+          onModels: (roster) => (models = roster),
+          ...(onProgress ? { onProgress } : {}),
           ...(resume ? { resume } : {}),
           ...(context ? { context } : {}),
           ...(workspace ? { workspace } : {}),
@@ -187,7 +200,14 @@ const depsFor = (user: string) => {
         `slack-${conversation}`,
         log,
       );
-      return { text, notices, session, ...(modes ? { modes } : {}) };
+      return {
+        text,
+        notices,
+        session,
+        ...(resumeWith ? { resumeWith } : {}),
+        ...(modes ? { modes } : {}),
+        ...(models ? { models } : {}),
+      };
     },
     finish: async (
       conversation: string,
@@ -222,6 +242,7 @@ const depsFor = (user: string) => {
     shedMode: async (conversation: string) => {
       await ask('/api/slack/mode', { user, conversation, mode: null });
     },
+    working: api.working,
   };
 };
 
@@ -263,6 +284,7 @@ const connection = socketMode({
               run: deps.run,
               finish: deps.finish,
               shedMode: deps.shedMode,
+              working: deps.working,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,
@@ -308,8 +330,12 @@ const connection = socketMode({
       // The mode picker: the selection names a conversation and a mode, and
       // whether that conversation is this member's is the gateway's check —
       // the payload claims nothing the store does not verify.
-      const picked = actions?.find((a) => a.action_id === MODE_ACTION)?.selected_option?.value;
+      const chose = actions?.find(
+        (a) => a.action_id === MODE_ACTION || a.action_id === MODEL_ACTION,
+      );
+      const picked = chose?.selected_option?.value;
       if (typeof picked === 'string') {
+        const choice = chose?.action_id === MODEL_ACTION ? 'model' : 'mode';
         const who = user?.id;
         const where = channel?.id;
         const messageTs = message?.ts;
@@ -324,18 +350,24 @@ const connection = socketMode({
         }
         const { c: conversationId, m: modeId } = selection;
         if (typeof conversationId !== 'string' || typeof modeId !== 'string') return;
-        await announcing(who, 'mode', async () => {
-          await ask('/api/slack/mode', { user: who, conversation: conversationId, mode: modeId });
-          // Writes named out loud: the mode is their machine's permission
-          // tier, not a cosmetic setting.
+        await announcing(who, choice, async () => {
+          await ask(`/api/slack/${choice}`, {
+            user: who,
+            conversation: conversationId,
+            [choice]: modeId,
+          });
+          // Writes named out loud: a mode is their machine's permission tier,
+          // not a cosmetic setting. A model is only ever a preference.
           await api.post(
             where,
-            `Mode set: \`${modeId}\` — applies from your next message.${
-              isWriteCapableMode(modeId) ? ' Writes are enabled in this workspace.' : ''
-            }`,
+            choice === 'mode'
+              ? `Mode set: \`${modeId}\` — applies from your next message.${
+                  isWriteCapableMode(modeId) ? ' Writes are enabled in this workspace.' : ''
+                }`
+              : `Model set: \`${modeId}\` — applies from your next message.`,
             thread,
           );
-          return `set ${modeId} on ${conversationId}`;
+          return `set ${choice} ${modeId} on ${conversationId}`;
         });
         return;
       }

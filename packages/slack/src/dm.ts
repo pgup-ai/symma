@@ -8,7 +8,7 @@
  * up from this thread when it does not — both travel, because which applies is
  * not known until the agent has been asked (§4).
  */
-import type { SessionModes, TurnTarget } from '@symma/protocol';
+import type { SessionModels, SessionModes, TurnTarget } from '@symma/protocol';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
@@ -76,6 +76,26 @@ export interface RunSpec {
    * travel: which applies is not known until the agent has been asked. */
   resume?: string;
   context?: string;
+  /** What the agent is doing, for the acknowledgement to show while it runs. */
+  onProgress?: (title: string) => void;
+}
+
+/** How often the acknowledgement may be rewritten. `chat.update` is rate
+ * limited per channel, and a turn that narrates every file read would spend the
+ * budget on frames nobody reads. */
+const PROGRESS_MIN_MS = 4_000;
+
+/** What the answer can offer to change for the next turn, or nothing. */
+function pickers(
+  conversation: string,
+  answer: { modes?: SessionModes; models?: SessionModels },
+  inWorkspace: boolean,
+): { conversation: string; modes?: SessionModes; models?: SessionModels } | undefined {
+  const offer = {
+    ...(answer.modes && inWorkspace ? { modes: answer.modes } : {}),
+    ...(answer.models ? { models: answer.models } : {}),
+  };
+  return Object.keys(offer).length ? { conversation, ...offer } : undefined;
 }
 
 export interface DmDeps {
@@ -93,13 +113,24 @@ export interface DmDeps {
    * `notices` is what the agent said about itself rather than about the
    * question, kept apart so the answer is not read as carrying it. `session` is
    * where it ran, for the next turn in this thread to pick up. */
-  run: (
-    spec: RunSpec,
-  ) => Promise<{ text: string; notices: string[]; session: string; modes?: SessionModes }>;
+  run: (spec: RunSpec) => Promise<{
+    text: string;
+    notices: string[];
+    session: string;
+    /** How the member picks this session up in their own terminal, when the
+     * agent has such a command. */
+    resumeWith?: string;
+    modes?: SessionModes;
+    models?: SessionModels;
+  }>;
   /** Clears the conversation's stored mode. Called when a turn failed because
    * the agent no longer offers it — the picker that could fix it only rides
    * answers, so without this the thread would fail every turn from here on. */
   shedMode: (conversation: string) => Promise<void>;
+  /** Rewrites the acknowledgement while the run is out, so a member watching a
+   * long turn can see it is still moving. Fails open: this is a hint, and
+   * losing one must not cost the answer it was a hint about. */
+  working: (channel: string, ts: string, text: string) => Promise<void>;
   /** Ends the turn, and remembers the session it ran in when there was one —
    * against what it ran under, since an id means nothing on another machine,
    * agent or directory. Every path that opened a turn calls this, including the
@@ -122,7 +153,7 @@ export interface DmDeps {
     threadTs?: string,
     offerShare?: { conversation: string; destination: string },
     notices?: string[],
-    modePicker?: { conversation: string; modes: SessionModes },
+    pickers?: { conversation: string; modes?: SessionModes; models?: SessionModels },
   ) => Promise<{ channel: string; ts: string }>;
   /** Marks the member's own message for the length of the run. Only the run is
    * worth marking — everything refused answers in words, immediately. */
@@ -255,20 +286,39 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // absent mode is named too — read-only is the floor's truth for every
   // workspace turn that never picked one, old companions included.
   const scope = decision.label
-    ? `On it, in \`${decision.label.replaceAll('`', '')}\` — \`${decision.mode ?? 'read-only'}\` mode.`
-    : 'On it. It has no access to your files, so keep the question self-contained.';
+    ? `On it, in \`${decision.label.replaceAll('`', '')}\` — \`${decision.mode ?? 'read-only'}\` mode…`
+    : 'On it… It has no access to your files, so keep the question self-contained.';
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
   const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
-  await deps.post(
-    conversation.dmChannel,
-    note ? `${scope} ${note}` : scope,
-    conversation.rootThread,
-  );
+  const ack = note ? `${scope} ${note}` : scope;
+  const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  let answer: { text: string; notices: string[]; session: string; modes?: SessionModes };
+  // The agent's own narration, rewritten onto the acknowledgement it already
+  // posted — Slack gives a bot no typing indicator, so the message is the only
+  // place a long turn can show it is still moving. Throttled because
+  // `chat.update` is rate-limited and a busy turn narrates far faster than
+  // anyone reads; fails open, since this is a hint and not the answer.
+  let lastShown = 0;
+  const narrate = (title: string): void => {
+    const now = Date.now();
+    if (now - lastShown < PROGRESS_MIN_MS) return;
+    lastShown = now;
+    void deps
+      .working(acked.channel, acked.ts, `${ack}\n\n_${title.replaceAll('_', ' ').slice(0, 200)}_`)
+      .catch(() => undefined);
+  };
+
+  let answer: {
+    text: string;
+    notices: string[];
+    session: string;
+    resumeWith?: string;
+    modes?: SessionModes;
+    models?: SessionModels;
+  };
   try {
     answer = await deps.run({
       conversation: conversation.id,
@@ -277,8 +327,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       token: decision.token,
       // §5 wants a per-agent default with an override; until the override
       // exists this is the default, and the prefix is what makes it parse.
-      model: `${decision.agent}/default`,
+      // The member's pick when they have made one, else the agent's own
+      // default. The prefix is what makes it parse either way.
+      model: `${decision.agent}/${decision.model ?? 'default'}`,
       prompt: message.text,
+      onProgress: narrate,
       ...(caught ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
@@ -335,13 +388,20 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       answer.text.trim() || 'That finished without producing an answer.',
       conversation.rootThread,
       to ? { conversation: conversation.id, destination: `<#${to.channel}>` } : undefined,
-      answer.notices,
+      // The handoff back to the terminal, as an aside rather than in the answer:
+      // the session the turn ran in is listed by the agent's own CLI, and this
+      // is the one line that turns "it ran somewhere" into somewhere reachable.
+      answer.resumeWith
+        ? [...answer.notices, `\`${answer.resumeWith} ${answer.session}\``]
+        : answer.notices,
       // The picker renders the agent's own roster, so it exists exactly where
       // the agent serves one — and only inside a named workspace, the one
       // place a mode means anything (§4).
-      answer.modes && decision.workspace
-        ? { conversation: conversation.id, modes: answer.modes }
-        : undefined,
+      // Both rosters ride the answer, but a mode only means something inside a
+      // named workspace — where the model is a preference anywhere. Nothing to
+      // render means no payload at all, rather than a conversation id with no
+      // picker to carry.
+      pickers(conversation.id, answer, decision.workspace !== undefined),
     );
   } catch (error) {
     // The run is over either way, and `announcing` tells them the delivery

@@ -580,8 +580,7 @@ export async function driveAcpSession(
   // its ids fold reasoning effort in). Applied by exact roster id — never by
   // splitting the id apart, so whatever the member was shown is what runs.
   const served = session.models as
-    | { currentModelId?: string; availableModels?: Record<string, unknown>[] }
-    | undefined;
+    { currentModelId?: string; availableModels?: Record<string, unknown>[] } | undefined;
   const models = (served?.availableModels ?? []).flatMap((entry): SessionModel[] =>
     typeof entry.modelId === 'string'
       ? [
@@ -837,6 +836,10 @@ export interface AcpAgentSpec {
   requirePlanMode?: boolean;
   /** Advertised in hello: sessions honor a caller-chosen mode (§4). */
   modes?: boolean;
+  /** How a member picks this agent's session up in their own terminal. Only for
+   * agents whose sessions are addressable after the run — codex writes a
+   * rollout under the home it ran in, so its id is still good there. */
+  resumeWith?: string;
 }
 export function cursorAcpSpec(apiKey: string): AcpAgentSpec {
   return {
@@ -970,6 +973,11 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
       return { env };
     },
     modes: true,
+    // Live-probed on codex-cli 0.145: `codex resume <uuid>` addresses the
+    // rollout this session writes, so a Slack turn can be carried to a
+    // terminal. The picker lists it by first message rather than a generated
+    // name, which is why the id is worth handing over.
+    resumeWith: 'codex resume',
   };
 }
 

@@ -7,7 +7,7 @@
  */
 import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } from '@slack/web-api';
 
-import { isSafeId, type SessionMode, type SessionModes } from '@symma/protocol';
+import { isSafeId, isSafeModelId, type SessionModels, type SessionModes } from '@symma/protocol';
 
 import type { ThreadMessage } from './snapshot.js';
 
@@ -29,11 +29,15 @@ export interface SlackApi {
      * context block, which is Slack's own small-and-grey — the member should be
      * able to tell it from the answer without reading it. */
     notices?: string[],
-    /** §4's mode picker, rendered from the agent's own roster. The selection
-     * carries the conversation and the mode id; what to do with them is the
-     * gateway's to decide, same as the share button. */
-    modePicker?: { conversation: string; modes: SessionModes },
+    /** §4's pickers, rendered from the agent's own rosters. A selection carries
+     * the conversation and the chosen id; what to do with them is the gateway's
+     * to decide, same as the share button. */
+    pickers?: { conversation: string; modes?: SessionModes; models?: SessionModels },
   ) => Promise<{ channel: string; ts: string }>;
+  /** Rewrites the acknowledgement while a run is out, so a long turn can show
+   * what the agent is doing. Never throws, and carries no blocks of its own: a
+   * progress line that failed to land must not cost the answer behind it. */
+  working: (channel: string, ts: string, text: string) => Promise<void>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
    * and reporting a failed update as a failed share would be a lie the member
@@ -134,40 +138,48 @@ function sections(text: string, budget: number): SectionBlock[] {
 /** The one action id the bot listens for, shared by the button and its handler. */
 export const SHARE_ACTION = 'share_to_thread';
 
-/** The mode picker's action id, shared the same way. */
+/** The picker action ids, shared with their handlers. */
 export const MODE_ACTION = 'set_conversation_mode';
+export const MODEL_ACTION = 'set_conversation_model';
 
 /** Slack's static_select caps: options per select, characters per value. */
 const PICKER_OPTION_LIMIT = 100;
 const PICKER_VALUE_LIMIT = 150;
 
-/** One picker option. `initial_option` must deep-equal one of `options` for
- * Slack to accept it, so both are built here and nowhere else. */
-const modeOption = (conversation: string, mode: SessionMode) => ({
+/** One roster entry as the picker shows it and hands it back. `initial_option`
+ * must deep-equal one of `options` for Slack to accept it, so both are built
+ * here and nowhere else. */
+const pickerOption = (conversation: string, id: string, label: string) => ({
   // Slack caps option labels at 75 characters.
-  text: { type: 'plain_text' as const, text: (mode.name ?? mode.id).slice(0, 75) },
-  value: JSON.stringify({ c: conversation, m: mode.id }),
+  text: { type: 'plain_text' as const, text: label.slice(0, 75) },
+  value: JSON.stringify({ c: conversation, m: id }),
 });
 
-/** The select, bounded to what Slack will post and what can round-trip: an id
- * outside the wire's alphabet, or a value past Slack's cap, could be shown but
+/** A select, bounded to what Slack will post and what can round-trip: an id
+ * outside its wire alphabet, or a value past Slack's cap, could be shown but
  * never selected — and one roster past the option cap would cost the whole
- * answer it rides on. A current mode the bounds dropped just loses its
+ * answer it rides on. A current choice the bounds dropped just loses its
  * highlight; the placeholder stands in. */
-function modeSelect(conversation: string, modes: SessionModes): Record<string, unknown>[] {
-  const options = modes.availableModes
-    .filter((mode) => isSafeId(mode.id))
-    .map((mode) => modeOption(conversation, mode))
+function rosterSelect(
+  conversation: string,
+  action: string,
+  placeholder: string,
+  entries: { id: string; label: string; safe: boolean }[],
+  currentId: string | undefined,
+): Record<string, unknown>[] {
+  const options = entries
+    .filter((entry) => entry.safe)
+    .map((entry) => pickerOption(conversation, entry.id, entry.label))
     .filter((option) => option.value.length <= PICKER_VALUE_LIMIT)
     .slice(0, PICKER_OPTION_LIMIT);
   if (!options.length) return [];
-  const current = modes.availableModes.find((mode) => mode.id === modes.currentModeId);
-  const initial = current && modeOption(conversation, current);
+  const current = entries.find((entry) => entry.id === currentId);
+  const initial = current && pickerOption(conversation, current.id, current.label);
   return [
     {
       type: 'static_select',
-      action_id: MODE_ACTION,
-      placeholder: { type: 'plain_text', text: 'Session mode' },
+      action_id: action,
+      placeholder: { type: 'plain_text', text: placeholder },
       options,
       ...(initial && options.some((option) => option.value === initial.value)
         ? { initial_option: initial }
@@ -175,6 +187,34 @@ function modeSelect(conversation: string, modes: SessionModes): Record<string, u
     },
   ];
 }
+
+const modeSelect = (conversation: string, modes: SessionModes): Record<string, unknown>[] =>
+  rosterSelect(
+    conversation,
+    MODE_ACTION,
+    'Session mode',
+    modes.availableModes.map((mode) => ({
+      id: mode.id,
+      label: mode.name ?? mode.id,
+      safe: isSafeId(mode.id),
+    })),
+    modes.currentModeId,
+  );
+
+const modelSelect = (conversation: string, models: SessionModels): Record<string, unknown>[] =>
+  rosterSelect(
+    conversation,
+    MODEL_ACTION,
+    'Model',
+    models.availableModels.map((model) => ({
+      id: model.modelId,
+      label: model.name ?? model.modelId,
+      // Model ids carry a bracketed reasoning effort, so they need the wider
+      // alphabet — the same one the gateway's route accepts.
+      safe: isSafeModelId(model.modelId),
+    })),
+    models.currentModelId,
+  );
 
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */
@@ -250,7 +290,7 @@ export function slackApi(
       if (!channel?.id) throw new Error('conversations.open returned no channel');
       return channel.id;
     },
-    async post(channel, text, threadTs, offerShare, notices, modePicker) {
+    async post(channel, text, threadTs, offerShare, notices, pickers) {
       const elements = [
         ...(offerShare
           ? [
@@ -273,7 +313,8 @@ export function slackApi(
               },
             ]
           : []),
-        ...(modePicker ? modeSelect(modePicker.conversation, modePicker.modes) : []),
+        ...(pickers?.modes ? modeSelect(pickers.conversation, pickers.modes) : []),
+        ...(pickers?.models ? modelSelect(pickers.conversation, pickers.models) : []),
       ];
       const actions = elements.length ? [{ type: 'actions', elements }] : [];
       // The answer takes the blocks it needs and the asides take what is left,
@@ -318,6 +359,15 @@ export function slackApi(
       });
       if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
       return { channel: sent.channel, ts: sent.ts };
+    },
+    async working(channel, ts, text) {
+      try {
+        await client.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
+      } catch (error) {
+        // Said once rather than swallowed: a scope or rate-limit problem here
+        // is invisible otherwise, and the answer still arrives either way.
+        options.log?.(`progress update failed: ${slackCode(error) ?? String(error)}`);
+      }
     },
     async settle(channel, ts, text) {
       try {

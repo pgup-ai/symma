@@ -832,6 +832,7 @@ async function openSession(control: OpenControl): Promise<void> {
     ...(chosen ? {} : { workspace }),
     ...(spec.requirePlanMode ? { requirePlanMode: true } : {}),
     ...(spec.modelConfigCandidates ? { modelCandidates: spec.modelConfigCandidates(model) } : {}),
+    ...(spec.resumeWith ? { resumeWith: spec.resumeWith } : {}),
   });
   log(`session ${control.sessionId} opened (agent=${control.agent})`);
 }

@@ -172,6 +172,11 @@ export interface AckControl {
   workspace?: string;
   requirePlanMode?: boolean;
   modelCandidates?: string[];
+  /** How this agent's sessions are picked up locally — the command's verb, which
+   * a caller completes with the session id. Only agents whose sessions outlive
+   * the run have one, and it is what lets a member carry a turn from chat to
+   * their own terminal. */
+  resumeWith?: string;
 }
 
 export interface CloseControl {
@@ -300,6 +305,7 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         if (Array.isArray(raw.modelCandidates) && raw.modelCandidates.every(str)) {
           ack.modelCandidates = raw.modelCandidates as string[];
         }
+        if (str(raw.resumeWith)) ack.resumeWith = raw.resumeWith;
       }
       return control;
     }

@@ -68,8 +68,10 @@ export interface RemoteAcpConfig {
   resume?: string;
   context?: string;
   /** The session the turn ran in, for a caller that means to resume it next
-   * time. Equal to `resume` when that was honoured. */
-  onSession?: (sessionId: string) => void;
+   * time. Equal to `resume` when that was honoured. `resumeWith` is how the
+   * agent's own CLI picks it up, when it has one — the two together are the
+   * whole handoff back to a terminal. */
+  onSession?: (sessionId: string, resumeWith?: string) => void;
   /** Checked out by the companion so the agent can explore the code it reviews. */
   repo?: string;
   ref?: string;
@@ -306,7 +308,7 @@ export async function runRemotePrompt(
         log(`${label}: ${what} sink threw, dropping one: ${String(error)}`);
       }
     };
-    deliver('session', () => config.onSession?.(result.sessionId));
+    deliver('session', () => config.onSession?.(result.sessionId, ack.resumeWith));
     const roster = result.modes;
     if (roster) deliver('modes', () => config.onModes?.(roster));
     const modelRoster = result.models;

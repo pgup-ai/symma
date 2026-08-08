@@ -201,6 +201,15 @@ describe('slack api', () => {
             { id: 'agent-full-access' },
           ],
         },
+        // Model ids carry a bracketed reasoning effort, which the mode
+        // alphabet has no room for — so this one rides its own check.
+        models: {
+          currentModelId: 'gpt-5.6-sol[high]',
+          availableModels: [
+            { modelId: 'gpt-5.6-sol[high]', name: 'GPT-5.6-Sol (high)' },
+            { modelId: 'gpt-5.4-mini[low]' },
+          ],
+        },
       },
     );
     const sent = new URLSearchParams(String(seen[0]));
@@ -213,11 +222,20 @@ describe('slack api', () => {
         initial_option?: { value: string };
       }[];
     }[];
-    const select = blocks
-      .find((b) => b.type === 'actions')
-      ?.elements?.find((e) => e.type === 'static_select');
+    const selects = blocks.find((b) => b.type === 'actions')?.elements ?? [];
+    const select = selects.find((e) => e.action_id === 'set_conversation_mode');
     assert.ok(select, 'the picker rides the answer');
-    assert.equal(select.action_id, 'set_conversation_mode');
+    const modelPick = selects.find((e) => e.action_id === 'set_conversation_model');
+    assert.deepEqual(
+      modelPick!.options!.map((o) => o.text.text),
+      ['GPT-5.6-Sol (high)', 'gpt-5.4-mini[low]'],
+      'bracketed ids survive the wider alphabet, and the id stands in for a missing name',
+    );
+    assert.deepEqual(JSON.parse(modelPick!.options![0]!.value), {
+      c: 'conv-1',
+      m: 'gpt-5.6-sol[high]',
+    });
+    assert.deepEqual(modelPick!.initial_option, modelPick!.options![0]);
     // The agent's names verbatim, the id where it gave none — never our copy.
     assert.deepEqual(
       select.options!.map((o) => o.text.text),
