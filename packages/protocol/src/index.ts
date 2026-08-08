@@ -28,6 +28,8 @@ export {
   type PermissionRequestParams,
   type PermissionResponse,
   type SessionMode,
+  type SessionModel,
+  type SessionModels,
   type SessionModes,
 } from './acp-protocol.js';
 

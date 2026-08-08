@@ -344,6 +344,10 @@ export interface AcpSessionOptions {
    * and endpoint-attributed — so it passes none rather than posting the same
    * frames a second time, unsigned, under a different id. */
   tee?: (dir: 'out' | 'in', frame: Record<string, unknown>) => void;
+  /** What the agent is doing right now, for a caller with somewhere to show it.
+   * Titles only, at the agent's own pace — the caller throttles, since a
+   * chatty turn emits far more of these than any surface wants to render. */
+  onProgress?: (title: string) => void;
 }
 
 export interface ModelOptionCandidate {
@@ -386,6 +390,21 @@ export interface SessionModes {
   availableModes: SessionMode[];
 }
 
+/** One entry of the agent's model roster. codex-acp 1.1.7 folds reasoning
+ * effort into the id — `gpt-5.6-sol[high]` — so a model and its effort are one
+ * choice here, exactly as codex itself presents them. */
+export interface SessionModel {
+  modelId: string;
+  name?: string;
+  description?: string;
+}
+
+/** Mirrors `SessionModes`: ACP serves both selectors the same shape. */
+export interface SessionModels {
+  currentModelId?: string;
+  availableModels: SessionModel[];
+}
+
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
@@ -401,6 +420,8 @@ export interface AcpSessionResult {
   /** Present when the agent served a mode roster — what a caller's member can
    * pick from next turn. */
   modes?: SessionModes;
+  /** Present when the agent served a model roster, same purpose. */
+  models?: SessionModels;
 }
 
 /**
@@ -446,8 +467,12 @@ export async function driveAcpSession(
         lastMessageId = messageId;
         const content = update.content as { type?: string; text?: string } | undefined;
         if (content?.type === 'text' && typeof content.text === 'string') current += content.text;
-      } else if ((kind === 'tool_call' || kind === 'tool_call_update') && !usesMessageIds) {
-        flush();
+      } else if (kind === 'tool_call' || kind === 'tool_call_update') {
+        // The agent's own words for what it is doing — `tool_call` carries the
+        // title, an update usually only a status, so a missing one is skipped
+        // rather than reported as a blank step.
+        if (typeof update.title === 'string' && update.title) options.onProgress?.(update.title);
+        if (!usesMessageIds) flush();
       }
     },
     (method, params) => {
@@ -551,6 +576,28 @@ export async function driveAcpSession(
   if (options.configOptionModelIds?.length) {
     await selectModelConfigOption(conn, sessionId, session, options);
   }
+  // The ACP model selector, for agents that serve one (codex-acp 1.1.7 does;
+  // its ids fold reasoning effort in). Applied by exact roster id — never by
+  // splitting the id apart, so whatever the member was shown is what runs.
+  const served = session.models as
+    | { currentModelId?: string; availableModels?: Record<string, unknown>[] }
+    | undefined;
+  const models = (served?.availableModels ?? []).flatMap((entry): SessionModel[] =>
+    typeof entry.modelId === 'string'
+      ? [
+          {
+            modelId: entry.modelId,
+            ...(typeof entry.name === 'string' ? { name: entry.name } : {}),
+            ...(typeof entry.description === 'string' ? { description: entry.description } : {}),
+          },
+        ]
+      : [],
+  );
+  const wanted = options.model === undefined ? undefined : parseModelName(options.model).modelID;
+  const offeredModel = models.some((entry) => entry.modelId === wanted) ? wanted : undefined;
+  if (offeredModel !== undefined && served?.currentModelId !== offeredModel) {
+    await conn.request('session/set_model', { sessionId, modelId: offeredModel });
+  }
   const modes = session.modes as
     { currentModeId?: string; availableModes?: Record<string, unknown>[] } | undefined;
   const roster = (modes?.availableModes ?? []).flatMap((entry): SessionMode[] =>
@@ -649,6 +696,16 @@ export async function driveAcpSession(
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
     ...(roster.length
       ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
+      : {}),
+    ...(models.length
+      ? {
+          models: {
+            ...((offeredModel ?? served?.currentModelId)
+              ? { currentModelId: offeredModel ?? served?.currentModelId }
+              : {}),
+            availableModels: models,
+          },
+        }
       : {}),
   };
 }
@@ -867,6 +924,16 @@ export function kiloAcpSpec(auth: string): AcpAgentSpec {
   };
 }
 
+/** Splits codex-acp's roster id into the config keys codex itself takes. A
+ * plain id (the review path's `gpt-5.2-codex`) carries no effort and leaves the
+ * member's configured one alone. */
+function codexModelConfig(modelID: string): Record<string, string> {
+  const bracketed = modelID.match(/^(.+)\[([^[\]]+)\]$/);
+  return bracketed
+    ? { model: bracketed[1]!, model_reasoning_effort: bracketed[2]! }
+    : { model: modelID };
+}
+
 /** `codexHome` is the member's own — only `auth.json` is read out of it.
  * `runHome` is symma's, and persists; see `prepareCodexRunHome`. */
 export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
@@ -890,7 +957,11 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
       delete env.MODEL_PROVIDER;
       const { modelID } = parseModelName(model);
       if (modelID === 'default') delete env.CODEX_CONFIG;
-      else env.CODEX_CONFIG = JSON.stringify({ model: modelID });
+      // codex-acp's roster ids fold reasoning effort in (`gpt-5.6-sol[high]`),
+      // while the config takes the pair apart — live-probed both ways on
+      // 1.1.7. Splitting here pins the session on the model the member picked
+      // at spawn, so the driver's `session/set_model` has nothing left to do.
+      else env.CODEX_CONFIG = JSON.stringify(codexModelConfig(modelID));
       // Always pinned: live-probed on codex-acp 1.1.7, an unpinned session
       // opens in `agent` — write-capable — not read-only and not the config's
       // sandbox default.
