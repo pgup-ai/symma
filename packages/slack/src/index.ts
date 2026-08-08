@@ -1,8 +1,9 @@
 /**
  * The bot. Holds one outbound WebSocket to Slack and no agent credentials, and
- * spawns nothing (§6). One command, deliberately: model, provider, directory
- * and shell controls are all support and security surface, and this workflow
- * has not earned any of them yet.
+ * spawns nothing (§6). Still one command: the controls a member has — the
+ * directory, the session mode, the model — ride the answers as pickers built
+ * from what their own agent advertised, so none of them is a name the bot knows
+ * or a shell it can reach.
  */
 import { runRemotePrompt } from '@symma/client';
 import {
@@ -327,7 +328,7 @@ const connection = socketMode({
           selected_option?: { value?: unknown };
         }[];
       };
-      // The mode picker: the selection names a conversation and a mode, and
+      // Either picker: the selection names a conversation and a chosen id, and
       // whether that conversation is this member's is the gateway's check —
       // the payload claims nothing the store does not verify.
       const chose = actions?.find(
@@ -348,26 +349,26 @@ const connection = socketMode({
         } catch {
           return;
         }
-        const { c: conversationId, m: modeId } = selection;
-        if (typeof conversationId !== 'string' || typeof modeId !== 'string') return;
+        const { c: conversationId, m: chosenId } = selection;
+        if (typeof conversationId !== 'string' || typeof chosenId !== 'string') return;
         await announcing(who, choice, async () => {
           await ask(`/api/slack/${choice}`, {
             user: who,
             conversation: conversationId,
-            [choice]: modeId,
+            [choice]: chosenId,
           });
           // Writes named out loud: a mode is their machine's permission tier,
           // not a cosmetic setting. A model is only ever a preference.
           await api.post(
             where,
             choice === 'mode'
-              ? `Mode set: \`${modeId}\` — applies from your next message.${
-                  isWriteCapableMode(modeId) ? ' Writes are enabled in this workspace.' : ''
+              ? `Mode set: \`${chosenId}\` — applies from your next message.${
+                  isWriteCapableMode(chosenId) ? ' Writes are enabled in this workspace.' : ''
                 }`
-              : `Model set: \`${modeId}\` — applies from your next message.`,
+              : `Model set: \`${chosenId}\` — applies from your next message.`,
             thread,
           );
-          return `set ${choice} ${modeId} on ${conversationId}`;
+          return `set ${choice} ${chosenId} on ${conversationId}`;
         });
         return;
       }
