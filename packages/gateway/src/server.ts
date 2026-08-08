@@ -931,11 +931,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // Read before the workspace rebind below: once this thread's row names the
       // new root, its own not-yet-shed choices satisfy the inheritance query and
       // the stale picks follow it in.
-      // The model is served with or without a root, because the picker offers it
-      // either way — only its *inheritance* is per-workspace. A mode has no
-      // meaning outside one, and none is served to a companion that cannot
-      // honor it, inheritance included.
-      if (stored.model) serve.model = stored.model;
       if (workspace && conversation) {
         for (const choice of ['mode', 'model'] as const) {
           if (choice === 'mode' && !modeCapable) continue;
@@ -944,6 +939,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
             (await store.lastChoiceFor(owner, workspace.id, choice));
           if (inherited) serve[choice] = inherited;
         }
+      } else if (stored.model) {
+        // No root to scope it to, and the picker still offers a model there — so
+        // the row's own pick is what a turn with no workspace runs on. Only this
+        // branch reads it unscoped: under a root, a *changed* root sheds the
+        // model exactly as it sheds the mode.
+        serve.model = stored.model;
       }
       // Written back so the thread keeps its project. Only on a change, or every
       // turn costs a write to say what the row already says.

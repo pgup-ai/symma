@@ -199,8 +199,11 @@ export type RelayControl = HelloControl | OpenControl | AckControl | CloseContro
 
 const str = (v: unknown): v is string => typeof v === 'string';
 
-/** What an `opened` ack may claim as a local resume command. */
-const RESUME_COMMAND = /^[a-z][a-z0-9-]{0,31} resume$/;
+/** Every local resume command a spec supplies today. A closed set rather than a
+ * shape: `<word> resume` would still let an endpoint name a shell, and this
+ * value is rendered to a member as something to paste. One entry per agent that
+ * grows a resumable session. */
+const RESUME_COMMANDS = new Set(['codex resume']);
 
 /** Parse one control line; undefined for frames and malformed input. */
 export function parseRelayControl(line: string): RelayControl | undefined {
@@ -313,7 +316,8 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         // and nothing else. A compromised endpoint is shut down and rotated
         // (invariant 3), but it must not get a free line into someone's shell on
         // the way there.
-        if (RESUME_COMMAND.test(String(raw.resumeWith))) ack.resumeWith = raw.resumeWith as string;
+        if (str(raw.resumeWith) && RESUME_COMMANDS.has(raw.resumeWith))
+          ack.resumeWith = raw.resumeWith;
       }
       return control;
     }

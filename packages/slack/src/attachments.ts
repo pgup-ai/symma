@@ -136,7 +136,7 @@ export async function collectAttachments(
     // bytes. An unreported size is refused rather than read as zero — the
     // fetch below caps what Slack under-reports, but a file nobody sized is
     // one nothing bounded.
-    const size = typeof file.size === 'number' && file.size > 0 ? file.size : undefined;
+    const size = typeof file.size === 'number' && file.size >= 0 ? file.size : undefined;
     if (size === undefined) {
       out.push({ ok: false, name, why: 'Slack did not say how big it is' });
       continue;

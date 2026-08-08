@@ -1504,15 +1504,32 @@ describe('tenancy', () => {
         400,
       );
 
-      // A model outlives the root it was picked in: the picker rides every
-      // answer, including a turn with no root at all, so a pick stored there
-      // has to come back or the next turn silently runs the agent's default.
+      // A changed root sheds the model exactly as it sheds the mode: a pick made
+      // for one project must not follow the thread into another.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['kilo'],
+          [{ id: 'ffffffffffff', label: 'other' }],
+        );
+        return (await ask(first)).workspace === 'ffffffffffff' ? off : (off(), undefined);
+      }, 'the endpoint reattached with a different root');
+      assert.equal((await ask(first)).model, undefined, 'the old root model did not travel');
+
+      // But with no root at all there is nothing to scope a pick to, and the
+      // picker still offers one — so the row's own model is what that turn runs.
+      assert.equal(
+        (await post('/api/slack/model', { conversation: first, model: 'mini[low]' })).status,
+        200,
+      );
       detach();
       detach = await waitFor(async () => {
         const off = await attach(mo.endpointToken, 'mo-box', ['kilo']);
         return (await ask(first)).workspace === undefined ? off : (off(), undefined);
       }, 'the endpoint reattached offering no root');
-      assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]');
+      assert.equal((await ask(first)).model, 'mini[low]');
     } finally {
       detach?.();
       await store.close();

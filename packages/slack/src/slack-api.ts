@@ -390,17 +390,25 @@ export function slackApi(
         signal: AbortSignal.timeout(FILE_FETCH_TIMEOUT_MS),
       });
       if (!res.ok) return { ok: false, status: res.status };
-      // Checked before the body is read, because the caller's ceiling stands on
-      // a size Slack reported and this is the one the CDN is serving.
-      const declared = Number(res.headers.get('content-length'));
-      if (declared > maxBytes) {
-        // Not awaited: dropping the socket is best effort, and a cancel that
-        // rejects would lose the reason the caller is about to report.
-        void res.body?.cancel().catch(() => undefined);
-        return { ok: false, status: 413 };
+      if (!res.body) return { ok: true, bytes: Buffer.alloc(0) };
+      // Counted as it arrives rather than measured after: a response without a
+      // `content-length` — or one that under-reports — would otherwise be
+      // buffered whole before anything could refuse it, and these are files a
+      // member uploaded, at whatever size they liked.
+      const reader = res.body.getReader();
+      const chunks: Buffer[] = [];
+      let read = 0;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        read += value.byteLength;
+        if (read > maxBytes) {
+          void reader.cancel().catch(() => undefined);
+          return { ok: false, status: 413 };
+        }
+        chunks.push(Buffer.from(value));
       }
-      const bytes = Buffer.from(await res.arrayBuffer());
-      return bytes.byteLength > maxBytes ? { ok: false, status: 413 } : { ok: true, bytes };
+      return { ok: true, bytes: Buffer.concat(chunks) };
     },
     async settle(channel, ts, text) {
       try {

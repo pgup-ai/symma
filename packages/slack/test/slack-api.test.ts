@@ -183,6 +183,26 @@ describe('slack api', () => {
     assert.equal(sent.get('text'), 'the answer');
   });
 
+  it('stops a download at the ceiling even when nothing declared its size', async () => {
+    // Chunked, no content-length: measuring after the read would mean buffering
+    // whatever a member chose to upload before anything could refuse it.
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024)),
+      cancel: () => {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = (() =>
+      Promise.resolve(new Response(body, { status: 200 }))) as unknown as typeof fetch;
+    const got = await slackApi('xoxb-test', { fetch: fetchImpl }).fetchFile(
+      'https://files/huge.log',
+      128 * 1024,
+    );
+    assert.deepEqual(got, { ok: false, status: 413 });
+    assert.equal(cancelled, true, 'the socket is dropped rather than drained');
+  });
+
   it('renders the mode picker off the roster, current selection marked', async () => {
     const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
     await slackApi('xoxb-test', { fetch: fetchImpl }).post(
