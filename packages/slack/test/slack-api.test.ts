@@ -199,7 +199,10 @@ describe('slack api', () => {
       'https://files/huge.log',
       128 * 1024,
     );
-    assert.deepEqual(got, { ok: false, status: 413 });
+    // `pulled` is what the caller charges the turn for: three 64kB chunks read
+    // before the fourth would have crossed the cap. An upstream 413 reports none,
+    // and that difference is the whole reason it is on the wire.
+    assert.deepEqual(got, { ok: false, status: 413, pulled: 192 * 1024 });
     assert.equal(cancelled, true, 'the socket is dropped rather than drained');
   });
 

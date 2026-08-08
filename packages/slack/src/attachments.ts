@@ -25,7 +25,15 @@ export interface FetchedFile {
   ok: boolean;
   bytes?: Buffer;
   status?: number;
+  /** Bytes read before a refusal. The cap cutting a stream off costs that
+   * transfer and an upstream status costs none, and both are 413 — so the count
+   * is the only thing that tells them apart. */
+  pulled?: number;
 }
+
+/** Throws on a byte no UTF-8 sequence can hold, and drops the BOM Excel leaves
+ * on a CSV rather than passing it to the agent as text. */
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
 
 const MAX_FILE_BYTES = 512 * 1024;
 /** So five files that each clear the per-file bar cannot together bury the
@@ -167,13 +175,16 @@ export async function collectAttachments(
     // Capped at what is left of the turn, not at one file's share: a size Slack
     // under-reported is then cut off at the ceiling rather than carried past it,
     // which is why nothing weighs the bytes again once they are here.
-    const room = Math.min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - spent);
+    // Clamped because a cut-off stream is charged what it read, which overshoots
+    // the ceiling by the chunk that crossed it.
+    const room = Math.max(0, Math.min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - spent));
     const got = await fetchFile(url, room).catch((): FetchedFile => ({ ok: false }));
     if (!got.ok || !got.bytes) {
-      // 413 is this cap cutting the stream off, so those bytes are spent even
-      // though none arrived. Every other refusal transferred nothing and costs
-      // nothing — the same reason the file cap counts what was sent.
-      if (got.status === 413) spent += room;
+      // Bytes the ceiling cut off are spent even though none arrived. An
+      // upstream refusal sent nothing and costs nothing — charging it would
+      // repeat the bug the file cap already fixed, where refusals starved the
+      // readable file a member actually wanted.
+      spent += got.pulled ?? 0;
       out.push({
         ok: false,
         name,
@@ -190,6 +201,19 @@ export async function collectAttachments(
       continue;
     }
     spent += got.bytes.byteLength;
+    // Decoded strictly, because `toString('utf8')` never fails: a CP1252 CSV —
+    // what Excel writes — would arrive as a field of U+FFFD with the
+    // acknowledgement still saying it was read. Same rule as `classify`, which
+    // skips a type it cannot be sure of rather than guessing at it.
+    let data: string;
+    if (kind === 'image') data = got.bytes.toString('base64');
+    else
+      try {
+        data = UTF8.decode(got.bytes);
+      } catch {
+        out.push({ ok: false, name, why: 'it is not UTF-8 text' });
+        continue;
+      }
     carried += 1;
     out.push({
       ok: true,
@@ -197,7 +221,7 @@ export async function collectAttachments(
         name,
         mimeType: str(file.mimetype, kind === 'image' ? 'image/png' : 'text/plain'),
         kind,
-        data: kind === 'image' ? got.bytes.toString('base64') : got.bytes.toString('utf8'),
+        data,
       },
     });
   }

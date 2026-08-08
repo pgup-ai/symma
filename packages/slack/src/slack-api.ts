@@ -454,7 +454,7 @@ export function slackApi(
         read += value.byteLength;
         if (read > maxBytes) {
           void reader.cancel().catch(() => undefined);
-          return { ok: false, status: 413 };
+          return { ok: false, status: 413, pulled: read };
         }
         chunks.push(Buffer.from(value));
       }

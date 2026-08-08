@@ -7,13 +7,15 @@ const downloads = (answer: (url: string) => { ok: boolean; bytes?: Buffer; statu
   const asked: string[] = [];
   return {
     asked,
-    // Caps like the real one, so a test can see what happens to a size Slack
-    // under-reported rather than only to one it declared honestly.
+    // Caps like the real one — reporting what it read, so a cut-off stream can
+    // be told from an upstream refusal that sent nothing.
     fetchFile: (url: string, maxBytes: number) => {
       asked.push(url);
       const got = answer(url);
       return Promise.resolve(
-        got.bytes && got.bytes.byteLength > maxBytes ? { ok: false, status: 413 } : got,
+        got.bytes && got.bytes.byteLength > maxBytes
+          ? { ok: false, status: 413, pulled: maxBytes }
+          : got,
       );
     },
   };
@@ -129,6 +131,42 @@ describe('attachments', () => {
     // Refused from its declaration, not its bytes: a ceiling judged afterwards
     // still pulled every file past it in full.
     assert.equal(asked.length, 2);
+  });
+
+  it('does not charge an upstream refusal to the turn', async () => {
+    // Two files the CDN refuses outright transferred nothing, so the 400kB one
+    // behind them still fits. Charging a status that pulled no bytes is the same
+    // bug as letting a refusal spend the file budget.
+    const big = Buffer.alloc(400 * 1024, 'x');
+    const { fetchFile } = downloads((url) =>
+      url.endsWith('rows.csv') ? { ok: true, bytes: big } : { ok: false, status: 413 },
+    );
+    const got = await collectAttachments(
+      [
+        file({ size: big.byteLength }),
+        file({ size: big.byteLength }),
+        file({
+          name: 'rows.csv',
+          size: big.byteLength,
+          url_private_download: 'https://files.slack.com/rows.csv',
+        }),
+      ],
+      fetchFile,
+    );
+    assert.deepEqual(
+      got.map((entry) => (entry.ok ? 'sent' : entry.why)),
+      ['it turned out too big to send', 'it turned out too big to send', 'sent'],
+    );
+  });
+
+  it('refuses text it cannot decode rather than handing over U+FFFD', async () => {
+    // 0xA3 is `£` in the CP1252 Excel writes and no UTF-8 sequence at all.
+    const { fetchFile } = downloads(() => ({ ok: true, bytes: Buffer.from([0x61, 0x2c, 0xa3]) }));
+    const got = await collectAttachments(
+      [file({ name: 'rows.csv', mimetype: 'text/csv', filetype: 'csv' })],
+      fetchFile,
+    );
+    assert.deepEqual(got, [{ ok: false, name: 'rows.csv', why: 'it is not UTF-8 text' }]);
   });
 
   it('names an empty file rather than sending nothing under its name', async () => {

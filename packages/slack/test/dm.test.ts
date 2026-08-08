@@ -194,6 +194,9 @@ describe('dm message', () => {
     for (const subtype of ['message_changed', 'message_deleted', 'channel_join']) {
       assert.equal(isMemberDm({ ...member, subtype }), false, subtype);
     }
+    // But an upload is filed under a subtype too, and dropping it would mean a
+    // member who DMs a CSV gets no answer and no refusal either.
+    assert.equal(isMemberDm({ ...member, subtype: 'file_share' }), true);
     // And a channel message is the mention path's business, not this one.
     assert.equal(isMemberDm({ ...member, channel_type: 'channel' }), false);
     for (const missing of ['user', 'channel', 'ts']) {

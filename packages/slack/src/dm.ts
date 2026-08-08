@@ -47,14 +47,18 @@ export interface DmMessage {
  * Whether a `message` event is a member speaking in their own DM. A function
  * with a test rather than a condition in the handler, because the bot's own
  * posts arrive on this subscription and answering one is an infinite loop.
- * A `subtype` is an edit, a delete or a join: nothing to answer.
+ * A `subtype` is an edit, a delete or a join: nothing to answer. `file_share` is
+ * the exception — Slack files a member's upload under it, caption and all
+ * (docs.slack.dev/reference/events/message/file_share, checked 2026-08), so
+ * refusing every subtype would drop the attachment path's own messages in
+ * silence: no acknowledgement, no refusal, nothing in the DM at all.
  */
 export function isMemberDm(event: Record<string, unknown>): boolean {
   return (
     event.type === 'message' &&
     event.channel_type === 'im' &&
     event.bot_id === undefined &&
-    event.subtype === undefined &&
+    (event.subtype === undefined || event.subtype === 'file_share') &&
     typeof event.user === 'string' &&
     typeof event.channel === 'string' &&
     typeof event.ts === 'string'
