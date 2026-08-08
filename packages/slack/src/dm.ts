@@ -415,9 +415,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     const now = Date.now();
     if (now - lastShown < PROGRESS_MIN_MS) return;
     lastShown = now;
-    updating = updating.then(() =>
-      deps.working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`).catch(() => undefined),
-    );
+    // Caught on the chain and not on the call, so a `working` that throws where
+    // it stands rather than rejecting cannot leave `updating` rejected — every
+    // link after it, the cleanup included, would be skipped and the step would
+    // stay exactly where this is meant to take it from.
+    updating = updating
+      .then(() => deps.working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`))
+      .catch(() => undefined);
   };
 
   let answer: {

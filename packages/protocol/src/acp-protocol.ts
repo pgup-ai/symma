@@ -435,13 +435,22 @@ function readUsage(raw: unknown): TurnUsage | undefined {
   const count = (...names: string[]): number | undefined => {
     for (const name of names) {
       const value = source[name];
-      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      // Below zero is not a count. Dropped here rather than passed on, since a
+      // caller cannot tell a real figure from a nonsense one and every one of
+      // them would have to know to check.
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
     }
     return undefined;
   };
+  const totalTokens = count('totalTokens');
+  let cachedTokens = count('cachedReadTokens', 'cachedInputTokens');
+  // A cache figure above the total it is part of cannot be true either, and a
+  // caller weighing what the turn cost would discount by it.
+  if (totalTokens !== undefined && cachedTokens !== undefined && cachedTokens > totalTokens)
+    cachedTokens = undefined;
   const usage: TurnUsage = {
-    ...pick('totalTokens', count('totalTokens')),
-    ...pick('cachedTokens', count('cachedReadTokens', 'cachedInputTokens')),
+    ...pick('totalTokens', totalTokens),
+    ...pick('cachedTokens', cachedTokens),
   };
   return Object.keys(usage).length ? usage : undefined;
 }

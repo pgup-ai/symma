@@ -45,6 +45,8 @@ function harness(
     narrates?: string;
     /** How long each acknowledgement update takes, by call order. */
     updateDelays?: number[];
+    /** The first update throws where it stands rather than rejecting. */
+    updateThrows?: boolean;
     /** What a file download hands back; absent is a download that fails. */
     fileBytes?: string;
     fails?: Error;
@@ -141,6 +143,7 @@ function harness(
     },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
+      if (over.updateThrows && updates.length === 1) throw new Error('sync');
       // Settles out of call order when asked to, which is the only way a restore
       // that races the narration rather than queueing behind it is visible.
       const delay = over.updateDelays?.[updates.length - 1] ?? 0;
@@ -446,6 +449,22 @@ describe('dm message', () => {
     // The harness records an aside list only when there is one, so an answer with
     // nothing to add carries no key at all.
     assert.equal(posts[1]!.notices, undefined);
+  });
+
+  it('keeps the queue alive when an update throws where it stands', async () => {
+    // A throw rather than a rejection is what tells whether the queue's `catch`
+    // sits on the chain or only on the call: on the call, this leaves the chain
+    // rejected, and the cleanup queued behind it never runs at all.
+    const { deps, posts, timeline } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      updateThrows: true,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.equal(timeline.at(-1), posts[0]!.text);
   });
 
   it('takes the narration back off once the answer is there to read', async () => {
