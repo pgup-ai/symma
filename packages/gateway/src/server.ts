@@ -919,10 +919,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // that said otherwise.
       const modeCapable = attached?.agents.find((a) => a.agent === agent)?.modes === true;
       // The model rides the same rule and needs no capability gate: `open.model`
-      // has always been part of the wire, and a stored id the agent no longer
-      // offers is left alone by the driver rather than failing the turn — where
-      // an unhonorable *mode* fails closed, because that one is a permission
-      // tier and this one is a preference.
+      // has always been on the wire. It is not harmless, though — model ids are
+      // an agent's own, and the config-option path (kilo, devin, claude) *throws*
+      // on one it does not offer. So a stale pick fails its turn, and the caller
+      // sheds it on that failure the way it sheds an unofferable mode; nothing
+      // here can tell which agent minted the id.
       const stored: Record<ConversationChoice, string | undefined> = {
         mode: row?.modeId,
         model: row?.modelId,

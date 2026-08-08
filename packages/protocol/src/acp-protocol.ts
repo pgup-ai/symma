@@ -468,6 +468,9 @@ export interface AcpSessionResult {
   models?: SessionModels;
   /** What the turn cost, when the agent said so. */
   usage?: TurnUsage;
+  /** Attachments this agent advertised no block for, so the caller can say so
+   * in its own words — it is the one that promised its member they were read. */
+  unsupported?: { name: string; kind: PromptAttachment['kind'] }[];
 }
 
 /**
@@ -491,6 +494,8 @@ export async function driveAcpSession(
   let lastMessageId: unknown;
   let seenChunk = false;
   let usesMessageIds = false;
+  /** True while `session/load` is replaying the previous turn at us. */
+  let replaying = false;
   const flush = () => {
     if (current.trim()) segments.push({ id: lastMessageId, text: current });
     current = '';
@@ -516,7 +521,9 @@ export async function driveAcpSession(
       } else if (kind === 'tool_call' || kind === 'tool_call_update') {
         // `tool_call` carries the title, an update usually only a status — so a
         // missing one is skipped rather than reported as a blank step.
-        if (typeof update.title === 'string' && update.title) {
+        // `session/load` replays the whole previous turn as these frames, and
+        // narrating it would show the wrong turn moving.
+        if (!replaying && typeof update.title === 'string' && update.title) {
           // Inside the connection's message loop: a renderer that throws here
           // would take the turn with it, and progress is only a hint.
           try {
@@ -589,13 +596,14 @@ export async function driveAcpSession(
   let session: Record<string, unknown> | undefined;
   if (options.resume !== undefined && loadable) {
     try {
+      replaying = true;
       const loaded = (await withAuth('session/load', () =>
         conn.request('session/load', {
           sessionId: options.resume,
           cwd: options.cwd,
           mcpServers: [],
         }),
-      )) as Record<string, unknown>;
+      ).finally(() => (replaying = false))) as Record<string, unknown>;
       // Same `modes` and `configOptions` a new session returns — plan mode and
       // model selection read them off this, so a resume that dropped them
       // would fail closed on every agent whose read-only layer is plan mode.
@@ -733,11 +741,11 @@ export async function driveAcpSession(
             },
           },
     );
-  // A file the agent cannot be handed is said out loud, not dropped: the caller
-  // has already told its member it was reading them.
-  const unreadable = (options.attachments ?? [])
+  // Named rather than phrased: the caller has already told its member it was
+  // reading these, and only the caller knows how its surface renders a filename.
+  const unsupported = (options.attachments ?? [])
     .filter((file) => !carries(file))
-    .map((file) => `${file.name} did not reach ${agent}: it takes no ${file.kind} attachments.`);
+    .map((file) => ({ name: file.name, kind: file.kind }));
   const result = (await conn.request('session/prompt', {
     sessionId,
     prompt: [
@@ -782,10 +790,8 @@ export async function driveAcpSession(
     stopReason: String(result?.stopReason ?? 'unknown'),
     sessionId,
     ...(usage ? { usage } : {}),
-    notices: [
-      ...unreadable,
-      ...(answered.length ? segments.filter(aside).map((s) => s.text.trim()) : []),
-    ],
+    notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
+    ...(unsupported.length ? { unsupported } : {}),
     ...(roster.length
       ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
       : {}),

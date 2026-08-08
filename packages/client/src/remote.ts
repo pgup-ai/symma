@@ -62,6 +62,9 @@ export interface RemoteAcpConfig {
   attachments?: PromptAttachment[];
   /** What the turn cost, when the agent reported it. */
   onUsage?: (usage: TurnUsage) => void;
+  /** Attachments the agent advertised no block for; the caller told its member
+   * they were being read, so it is the one that has to correct the record. */
+  onUnsupported?: (files: { name: string; kind: string }[]) => void;
   /** What the agent is doing right now, unthrottled — a caller rendering this
    * anywhere rate-limited does its own throttling. */
   onProgress?: (title: string) => void;
@@ -322,6 +325,8 @@ export async function runRemotePrompt(
     if (modelRoster) deliver('models', () => config.onModels?.(modelRoster));
     const spent = result.usage;
     if (spent) deliver('usage', () => config.onUsage?.(spent));
+    const unsupported = result.unsupported;
+    if (unsupported?.length) deliver('unsupported', () => config.onUnsupported?.(unsupported));
     for (const notice of result.notices) deliver('notice', () => config.onNotice?.(notice));
     if (!result.text) {
       throw new Error(

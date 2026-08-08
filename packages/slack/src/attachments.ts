@@ -9,6 +9,8 @@
  */
 import type { PromptAttachment } from '@symma/protocol';
 
+import { plainly } from './slack-api.js';
+
 /** `url_private_download` needs the bot token as a bearer header; it is not a
  * public link. */
 export interface SlackFile {
@@ -90,10 +92,6 @@ const DOWNLOAD_REFUSALS: Record<number, string> = {
   // The CDN served more than Slack said it would.
   413: 'it turned out too big to send',
 };
-
-/** A file name is the member's own and lands in a mrkdwn aside, where a
- * backtick would open a code span that swallows the rest of the sentence. */
-const plain = (name: string): string => name.replaceAll('`', '');
 
 function classify(file: SlackFile): 'text' | 'image' | undefined {
   const mime = str(file.mimetype).toLowerCase().split(';')[0]!;
@@ -183,6 +181,6 @@ export async function collectAttachments(
 export function skippedNote(attached: Attached[]): string[] {
   const skipped = attached.filter((entry) => !entry.ok);
   return skipped.length
-    ? [`Could not read ${skipped.map((s) => `${plain(s.name)} (${s.why})`).join(', ')}.`]
+    ? [`Could not read ${skipped.map((s) => `${plainly(s.name)} (${s.why})`).join(', ')}.`]
     : [];
 }

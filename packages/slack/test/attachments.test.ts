@@ -74,7 +74,7 @@ describe('attachments', () => {
       'Could not read book.xlsx (xlsx is not something I can pass along), ' +
         // Backtick stripped: the aside is mrkdwn, and a code span opened here
         // would swallow the rest of the sentence.
-        'huge.log (too big to send (879kB)), weird.md (Slack gave me no way to download it).',
+        'huge.log (too big to send (879kB)), we ird.md (Slack gave me no way to download it).',
     ]);
   });
 

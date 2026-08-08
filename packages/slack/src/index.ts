@@ -178,6 +178,7 @@ const depsFor = (user: string) => {
       let modes: SessionModes | undefined;
       let models: SessionModels | undefined;
       let usage: TurnUsage | undefined;
+      let unsupported: { name: string; kind: string }[] | undefined;
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -195,6 +196,7 @@ const depsFor = (user: string) => {
           onModes: (roster) => (modes = roster),
           onModels: (roster) => (models = roster),
           onUsage: (spent) => (usage = spent),
+          onUnsupported: (files) => (unsupported = files),
           ...(onProgress ? { onProgress } : {}),
           ...(attachments ? { attachments } : {}),
           ...(resume ? { resume } : {}),
@@ -215,6 +217,7 @@ const depsFor = (user: string) => {
         ...(modes ? { modes } : {}),
         ...(models ? { models } : {}),
         ...(usage ? { usage } : {}),
+        ...(unsupported ? { unsupported } : {}),
       };
     },
     finish: async (
@@ -249,6 +252,9 @@ const depsFor = (user: string) => {
     },
     shedMode: async (conversation: string) => {
       await ask('/api/slack/mode', { user, conversation, mode: null });
+    },
+    shedModel: async (conversation: string) => {
+      await ask('/api/slack/model', { user, conversation, model: null });
     },
     working: api.working,
     fetchFile: api.fetchFile,
@@ -294,6 +300,7 @@ const connection = socketMode({
               run: deps.run,
               finish: deps.finish,
               shedMode: deps.shedMode,
+              shedModel: deps.shedModel,
               working: deps.working,
               fetchFile: deps.fetchFile,
               mark: api.mark,

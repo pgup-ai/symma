@@ -101,6 +101,12 @@ const BLOCK_TEXT_LIMIT = 3000;
 const MESSAGE_BLOCK_LIMIT = 50;
 const FALLBACK_TEXT_LIMIT = 40_000;
 
+/** A name or a title the member or their agent chose, on its way into mrkdwn:
+ * a backtick would open a code span that swallows the rest of the sentence, and
+ * a newline would break the block it sits in. */
+export const plainly = (text: string): string =>
+  text.replaceAll(/[`\n]/g, ' ').replace(/\s+/g, ' ').trim();
+
 /** Cut to `limit` and say so, so what is missing is visible rather than a
  * sentence that stops. */
 const clip = (text: string, limit: number): string =>
@@ -157,9 +163,10 @@ const PICKER_VALUE_LIMIT = 150;
 /** One roster entry as the picker shows it and hands it back. `initial_option`
  * must deep-equal one of `options` for Slack to accept it, so both are built
  * here and nowhere else. */
-const pickerOption = (conversation: string, id: string, label: string) => ({
-  // Slack caps option labels at 75 characters.
+const pickerOption = (conversation: string, id: string, label: string, about?: string) => ({
+  // Slack caps both of these at 75 characters.
   text: { type: 'plain_text' as const, text: label.slice(0, 75) },
+  ...(about ? { description: { type: 'plain_text' as const, text: about.slice(0, 75) } } : {}),
   value: JSON.stringify({ c: conversation, m: id }),
 });
 
@@ -172,17 +179,17 @@ function rosterSelect(
   conversation: string,
   action: string,
   placeholder: string,
-  entries: { id: string; label: string; safe: boolean }[],
+  entries: { id: string; label: string; about?: string; safe: boolean }[],
   currentId: string | undefined,
 ): Record<string, unknown>[] {
   const options = entries
     .filter((entry) => entry.safe)
-    .map((entry) => pickerOption(conversation, entry.id, entry.label))
+    .map((entry) => pickerOption(conversation, entry.id, entry.label, entry.about))
     .filter((option) => option.value.length <= PICKER_VALUE_LIMIT)
     .slice(0, PICKER_OPTION_LIMIT);
   if (!options.length) return [];
   const current = entries.find((entry) => entry.id === currentId);
-  const initial = current && pickerOption(conversation, current.id, current.label);
+  const initial = current && pickerOption(conversation, current.id, current.label, current.about);
   return [
     {
       type: 'static_select',
@@ -204,6 +211,9 @@ const modeSelect = (conversation: string, modes: SessionModes): Record<string, u
     modes.availableModes.map((mode) => ({
       id: mode.id,
       label: mode.name ?? mode.id,
+      // The agent's own sentence about what the choice means — codex writes
+      // "Read and edit files, and run commands." for `agent`.
+      ...(mode.description ? { about: mode.description } : {}),
       safe: isSafeId(mode.id),
     })),
     modes.currentModeId,
@@ -217,6 +227,7 @@ const modelSelect = (conversation: string, models: SessionModels): Record<string
     models.availableModels.map((model) => ({
       id: model.modelId,
       label: model.name ?? model.modelId,
+      ...(model.description ? { about: model.description } : {}),
       // Model ids carry a bracketed reasoning effort, so they need the wider
       // alphabet — the same one the gateway's route accepts.
       safe: isSafeModelId(model.modelId),

@@ -562,12 +562,14 @@ describe('acp', () => {
     // would fail the whole prompt, costing the question as well as the file.
     const bare = await drive({});
     assert.deepEqual(sent[1], [{ type: 'text', text: 'what is this?' }]);
-    // And says so, because the caller has already told its member it was
-    // reading them — a silent drop is the failure this whole path exists for.
-    assert.deepEqual(bare.notices, [
-      'rows.csv did not reach codex: it takes no text attachments.',
-      'shot.png did not reach codex: it takes no image attachments.',
+    // And names them for the caller to word: it is the one that told its member
+    // they were being read, and the one that knows how its surface renders a
+    // filename. A silent drop is the failure this whole path exists for.
+    assert.deepEqual(bare.unsupported, [
+      { name: 'rows.csv', kind: 'text' },
+      { name: 'shot.png', kind: 'image' },
     ]);
+    assert.deepEqual(bare.notices, []);
   });
 
   it('encodes an attachment name into its uri', async () => {

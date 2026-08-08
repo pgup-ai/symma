@@ -25,7 +25,7 @@ import {
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
-import type { MarkState } from './slack-api.js';
+import { plainly, type MarkState } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
@@ -102,15 +102,10 @@ export interface RunSpec {
  * read would spend that budget on frames nobody reads. */
 const PROGRESS_MIN_MS = 4_000;
 
-/** The agent's own words, put inside mrkdwn italics: an underscore or backtick
- * of its own would close the span and spill the rest into formatting, and a
- * newline would break the block. Clamped, since a title is a label. */
-const plainly = (title: string): string =>
-  title
-    .replaceAll(/[_`\n]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 200);
+/** A tool-call title on its way into a mrkdwn *italic* span, so an underscore
+ * closes it as surely as a backtick does. Clamped, since a title is a label. */
+const asStep = (title: string): string =>
+  plainly(title).replaceAll('_', ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
 
 /** Rounded: what a member does with a token count is notice a turn that cost
  * ten times the last one. */
@@ -128,6 +123,20 @@ function spent(model: string | undefined, usage: TurnUsage | undefined): string[
     ...(usage.cachedTokens ? [`${thousands(usage.cachedTokens)} cached`] : []),
   ];
   return [parts.join(' · ')];
+}
+
+/** Which files the agent had no block for, grouped by kind — one sentence per
+ * kind, because a rejected image and a rejected CSV are refused for different
+ * reasons and naming them together would misdescribe one of them. */
+function unsupportedNote(agent: string, files?: { name: string; kind: string }[]): string[] {
+  const byKind = new Map<string, string[]>();
+  for (const file of files ?? []) {
+    byKind.set(file.kind, [...(byKind.get(file.kind) ?? []), plainly(file.name)]);
+  }
+  return [...byKind].map(
+    ([kind, names]) =>
+      `${names.join(', ')} did not reach ${agent}: it takes no ${kind} attachments.`,
+  );
 }
 
 /** What the answer can offer to change for the next turn, or nothing. */
@@ -169,11 +178,16 @@ export interface DmDeps {
     models?: SessionModels;
     /** What the turn cost, when the agent said. */
     usage?: TurnUsage;
+    /** Files the agent advertised no block for, for this layer to word. */
+    unsupported?: { name: string; kind: string }[];
   }>;
   /** Clears the conversation's stored mode. Called when a turn failed because
    * the agent no longer offers it — the picker that could fix it only rides
    * answers, so without this the thread would fail every turn from here on. */
   shedMode: (conversation: string) => Promise<void>;
+  /** The same for the model: ids belong to an agent's roster, so a pick made
+   * under one can throw under another and would repeat until it is cleared. */
+  shedModel: (conversation: string) => Promise<void>;
   /** Downloads one of the member's Slack files. */
   fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>;
   /** Rewrites the acknowledgement while the run is out, so a long turn shows
@@ -370,7 +384,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     if (now - lastShown < PROGRESS_MIN_MS) return;
     lastShown = now;
     void deps
-      .working(acked.channel, acked.ts, `${ack}\n\n_${plainly(title)}_`)
+      .working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`)
       .catch(() => undefined);
   };
 
@@ -382,6 +396,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     modes?: SessionModes;
     models?: SessionModels;
     usage?: TurnUsage;
+    unsupported?: { name: string; kind: string }[];
   };
   try {
     answer = await deps.run({
@@ -411,14 +426,23 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // that would otherwise repeat forever: the stored mode has drifted off the
     // agent's roster, and nothing that fails a turn can offer the picker that
     // would fix it.
-    const unoffered =
-      decision.mode !== undefined && /: mode \S+ not offered \(/.test(String(error));
+    // Both drift the same way and both would otherwise repeat forever: a mode
+    // the roster dropped fails the turn in the driver, and a model from another
+    // agent's roster throws in config-option selection. Matched on their exact
+    // shapes, since "agent X not offered" is a different refusal.
+    const failed = String(error);
+    const staleMode = decision.mode !== undefined && /: mode \S+ not offered \(/.test(failed);
+    const staleModel =
+      decision.model !== undefined && /: model "[^"]+" is not offered by the agent/.test(failed);
+    const unoffered = staleMode || staleModel;
     // Tracked, not assumed: a clear that failed leaves the stale mode in
     // place, and claiming recovery would promise a retry that fails the same
     // way. Fail-open on the write itself — the turn's outcome stands either way.
+    // Whichever drifted is what the member is told about, and what gets cleared.
+    const dropped = staleMode ? decision.mode : decision.model;
     const shed =
       unoffered &&
-      (await deps.shedMode(conversation.id).then(
+      (await (staleMode ? deps.shedMode : deps.shedModel)(conversation.id).then(
         () => true,
         () => false,
       ));
@@ -428,8 +452,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       conversation.dmChannel,
       unoffered
         ? shed
-          ? `The agent no longer offers \`${decision.mode}\` mode, so I cleared it. Send it again and I will retry read-only.`
-          : `The agent no longer offers \`${decision.mode}\` mode, and I could not clear it. Send it again and I will keep trying.`
+          ? `The agent no longer offers \`${dropped}\`, so I cleared it. Send it again and I will retry with its default.`
+          : `The agent no longer offers \`${dropped}\`, and I could not clear it. Send it again and I will keep trying.`
         : 'That run did not finish. Send it again and I will retry.',
       conversation.rootThread,
     );
@@ -459,6 +483,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       [
         ...answer.notices,
         ...skippedNote(attached),
+        // The agent took the turn but not the file: said here because the
+        // acknowledgement already promised the member it was being read.
+        ...unsupportedNote(decision.agent, answer.unsupported),
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
         ...(answer.resumeWith ? [`\`${answer.resumeWith} ${answer.session}\``] : []),
       ],

@@ -35,6 +35,8 @@ function harness(
     resumeWith?: string;
     /** What the agent said the turn cost. */
     usage?: TurnUsage;
+    /** Files the agent had no block for, as the driver reports them. */
+    unsupported?: { name: string; kind: string }[];
     /** What a file download hands back; absent is a download that fails. */
     fileBytes?: string;
     fails?: Error;
@@ -92,6 +94,7 @@ function harness(
             ...(over.models ? { models: over.models } : {}),
             ...(over.resumeWith ? { resumeWith: over.resumeWith } : {}),
             ...(over.usage ? { usage: over.usage } : {}),
+            ...(over.unsupported ? { unsupported: over.unsupported } : {}),
           });
     },
     find: () => Promise.resolve(over.existing),
@@ -126,6 +129,10 @@ function harness(
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
       return Promise.resolve();
+    },
+    shedModel: (conversation) => {
+      sheds.push(`model:${conversation}`);
+      return over.shedFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
     },
     shedMode: (conversation) => {
       sheds.push(conversation);
@@ -479,6 +486,57 @@ describe('dm message', () => {
     ]);
   });
 
+  it('corrects the record when the agent could not take a file it was sent', async () => {
+    // The acknowledgement promised the member it was reading them, and only this
+    // layer knows how a filename renders here — so the driver names them and
+    // this words it, backtick stripped like every other name.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      fileBytes: 'x',
+      unsupported: [
+        { name: 'we`ird.csv', kind: 'text' },
+        { name: 'shot.png', kind: 'image' },
+      ],
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'read this',
+        files: [
+          { name: 'we`ird.csv', filetype: 'csv', size: 1, url_private_download: 'https://f/a.csv' },
+        ],
+      },
+      deps,
+    );
+    // One sentence per kind: an image and a CSV are refused for different
+    // reasons, and naming them together would misdescribe one of them.
+    assert.deepEqual(posts[1]!.notices, [
+      'we ird.csv did not reach kilo: it takes no text attachments.',
+      'shot.png did not reach kilo: it takes no image attachments.',
+    ]);
+  });
+
+  it('sheds a model from another agent’s roster, which would fail every turn', async () => {
+    // `selectModelConfigOption` throws for kilo/devin/claude, so a codex id left
+    // stored would fail the thread forever — a failed turn posts no picker.
+    const { deps, posts, sheds } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, model: 'gpt-5.6-sol[high]' },
+      fails: new Error(
+        'acp:kilo slack-conv-1: model "gpt-5.6-sol[high]" is not offered by the agent; first offers: x',
+      ),
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(sheds, ['model:conv-1']);
+    assert.match(posts[1]!.text, /no longer offers `gpt-5\.6-sol\[high\]`.*retry with its default/);
+  });
+
   it('says nothing about cost when the agent reported no total', async () => {
     // An invented number is worse than none, and agents other than codex
     // report nothing here at all.
@@ -525,7 +583,7 @@ describe('dm message', () => {
     // Without the shed this thread fails every turn from here on: the picker
     // that could fix it only rides answers, and there is no answer.
     assert.deepEqual(sheds, ['conv-1']);
-    assert.match(posts[1]!.text, /no longer offers `yolo` mode.*retry read-only/);
+    assert.match(posts[1]!.text, /no longer offers `yolo`.*retry with its default/);
     assert.equal(finished[0]!.status, 'failed');
   });
 
@@ -542,7 +600,7 @@ describe('dm message', () => {
     );
     // A stale mode still stored means the retry fails the same way — saying
     // "cleared" here would promise a recovery that did not happen.
-    assert.match(posts[1]!.text, /could not clear it/);
+    assert.match(posts[1]!.text, /no longer offers `yolo`, and I could not clear it/);
   });
 
   it('offers no picker outside a named workspace, wherever the roster came from', async () => {
