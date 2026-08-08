@@ -356,20 +356,26 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const attachments = attached.flatMap((entry) => (entry.ok ? [entry.file] : []));
 
   // A run has twenty minutes to answer, so silence that long reads as broken.
-  // §4 wants the scope in the DM root rather than guessed at, so the answer
-  // says which project it is about — or that it can see no files at all, which
-  // is the one thing a member would otherwise assume wrong.
+  // §4 wants the scope in the DM root rather than guessed at, so the turn that
+  // decides it names the project and the mode — an absent mode included, since
+  // read-only is the floor's truth for a workspace turn that never picked one.
+  //
+  // Only that turn, though. A resume means the gateway found this thread's
+  // machine, agent and directory unchanged, so the scope is what the root
+  // already said and the picker under every answer carries the mode. A turn with
+  // no workspace at all keeps saying so: nothing else tells a member their
+  // question has to stand on its own, and it is the one thing they would
+  // otherwise assume wrong.
+  //
   // Through `plainly` like every other name in this message: a backtick closes
   // the span it sits in, and a `<` opens an entity that renders as a mention
   // once the answer is shared into a channel. Their own machine and their own
   // DM, so this is rendering and not a trust boundary.
-  // The mode is part of the scope: a member who enabled writes should read it
-  // back on every turn, not have to remember what they picked last week. An
-  // absent mode is named too — read-only is the floor's truth for every
-  // workspace turn that never picked one, old companions included.
-  const scope = decision.label
-    ? `On it, in \`${plainly(decision.label)}\` — \`${decision.mode ?? 'read-only'}\` mode.`
-    : 'On it. It has no access to your files, so keep the question self-contained.';
+  const scope = !decision.label
+    ? 'On it. It has no access to your files, so keep the question self-contained.'
+    : decision.resume
+      ? 'On it.'
+      : `On it, in \`${plainly(decision.label)}\` — \`${decision.mode ?? 'read-only'}\` mode.`;
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
   const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
@@ -502,7 +508,16 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
         // The command is a closed set at the parse boundary; the session id is
         // the agent's own string and is not.
-        ...(answer.resumeWith ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``] : []),
+        //
+        // Said once per session rather than once per turn: a resumed session is
+        // one this thread already carries the line for, and one the agent could
+        // not resume was minted fresh and needs the new id — which is why this
+        // compares what ran against what was offered, the same test the driver
+        // uses to decide the transcript travels. A copy pinned anywhere would
+        // eventually name a session that is no longer answering.
+        ...(answer.resumeWith && answer.session !== decision.resume
+          ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``]
+          : []),
       ],
       // The picker renders the agent's own roster, so it exists exactly where
       // the agent serves one — and only inside a named workspace, the one

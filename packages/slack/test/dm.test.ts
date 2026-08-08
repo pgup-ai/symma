@@ -405,6 +405,31 @@ describe('dm message', () => {
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
   });
 
+  it('states the scope and the session once, not on every turn', async () => {
+    // A follow-up the gateway found the same machine, agent and directory for:
+    // the project and mode are what the root already said, the picker under the
+    // answer carries the mode, and the session is the one it is resuming.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      endpoint: {
+        ...READY,
+        workspace: 'ws-1',
+        workspaceLabel: 'symma',
+        mode: 'agent-full-access',
+        resume: 'acp-1',
+      },
+      resumeWith: 'codex resume',
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      deps,
+    );
+    assert.equal(posts[0]!.text, 'On it. Picking up where it left off, if it still can…');
+    // The harness records an aside list only when there is one, so an answer with
+    // nothing to add carries no key at all.
+    assert.equal(posts[1]!.notices, undefined);
+  });
+
   it('takes the narration back off once the answer is there to read', async () => {
     // A step is worth seeing while the turn runs and in the way afterwards, in a
     // client that cannot fold it away.
@@ -803,6 +828,7 @@ describe('dm message', () => {
       existing: CONVERSATION,
       endpoint: { ...READY, workspace: 'ws-1', resume: 'acp-0' },
       history: [{ ts: '210.0', author: 'U-nel', text: 'why is the deploy failing?' }],
+      resumeWith: 'codex resume',
     });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
@@ -813,6 +839,9 @@ describe('dm message', () => {
     // agent refuses would otherwise arrive with nothing.
     assert.match(runs[0]!.context!, /why is the deploy failing/);
     assert.match(posts[0]!.text, /Picking up where it left off/);
+    // And the offer being refused is exactly when the new id has to be said: the
+    // run came back on `acp-1`, so `acp-0` is what nothing can pick up now.
+    assert.deepEqual(posts[1]!.notices, ['`codex resume acp-1`']);
     // Against what it ran under, since an id means nothing on another machine.
     assert.deepEqual(finished, [
       {
