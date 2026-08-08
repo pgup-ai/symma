@@ -355,15 +355,16 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // §4 wants the scope in the DM root rather than guessed at, so the answer
   // says which project it is about — or that it can see no files at all, which
   // is the one thing a member would otherwise assume wrong.
-  // A backtick closes the span it is in, so a directory named with one would
-  // spill the rest of the sentence into code. Their own machine and their own
+  // Through `plainly` like every other name in this message: a backtick closes
+  // the span it sits in, and a `<` opens an entity that renders as a mention
+  // once the answer is shared into a channel. Their own machine and their own
   // DM, so this is rendering and not a trust boundary.
   // The mode is part of the scope: a member who enabled writes should read it
   // back on every turn, not have to remember what they picked last week. An
   // absent mode is named too — read-only is the floor's truth for every
   // workspace turn that never picked one, old companions included.
   const scope = decision.label
-    ? `On it, in \`${decision.label.replaceAll('`', '')}\` — \`${decision.mode ?? 'read-only'}\` mode.`
+    ? `On it, in \`${plainly(decision.label)}\` — \`${decision.mode ?? 'read-only'}\` mode.`
     : 'On it. It has no access to your files, so keep the question self-contained.';
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.

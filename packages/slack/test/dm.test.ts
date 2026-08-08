@@ -673,17 +673,18 @@ describe('dm message', () => {
     assert.deepEqual(askedFor, ['conv-1']);
   });
 
-  it('does not let a directory name close the span it is shown in', async () => {
-    // A label is `basename` of a real directory, and a backtick in one would end
-    // the code span early and spill the rest of the sentence into it.
+  it('does not let a directory name break the sentence it is shown in', async () => {
+    // A label is `basename` of a real directory: a backtick in one would end the
+    // code span early and spill the rest of the sentence into it, and `<!here>`
+    // would broadcast once the answer is shared into a channel.
     const { deps, posts } = harness({
-      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'we`ird' },
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'we`ird <!here>' },
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /in `weird` — `read-only` mode…/);
+    assert.match(posts[0]!.text, /in `we ird &lt;!here&gt;` — `read-only` mode…/);
     // Two spans — label and mode — each opened and closed; the mode span is
-    // safe by the wire's alphabet, so only the label needed stripping.
+    // safe by the wire's alphabet, so only the label needed escaping.
     assert.equal(posts[0]!.text.split('`').length - 1, 4, 'both spans opened and closed');
   });
 
