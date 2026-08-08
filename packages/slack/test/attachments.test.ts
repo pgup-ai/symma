@@ -7,14 +7,16 @@ const downloads = (answer: (url: string) => { ok: boolean; bytes?: Buffer; statu
   const asked: string[] = [];
   return {
     asked,
-    // Caps like the real one — reporting what it read, so a cut-off stream can
-    // be told from an upstream refusal that sent nothing.
+    // Caps like the real one, and reports what it read so a cut-off stream can
+    // be told from an upstream refusal that sent nothing. The real counter adds
+    // a whole chunk before comparing, so `pulled` overshoots the cap; this
+    // serves one chunk, which overshoots it by the rest of the body.
     fetchFile: (url: string, maxBytes: number) => {
       asked.push(url);
       const got = answer(url);
       return Promise.resolve(
         got.bytes && got.bytes.byteLength > maxBytes
-          ? { ok: false, status: 413, pulled: maxBytes }
+          ? { ok: false, status: 413, pulled: got.bytes.byteLength }
           : got,
       );
     },
