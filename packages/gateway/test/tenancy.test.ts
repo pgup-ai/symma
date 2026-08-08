@@ -1440,6 +1440,153 @@ describe('tenancy', () => {
     }
   });
 
+  it('remembers the model per workspace, brackets and all', async () => {
+    const url = pg.getConnectionUri();
+    const mo = await provision(url, { team: 'ws', slackUser: 'mo', endpoint: 'mo-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const post = (path: string, body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'mo', ...body }),
+      });
+    const ask = async (conversation: string): Promise<Record<string, string>> =>
+      (await (await post('/api/slack/endpoint', { conversation })).json()) as Record<
+        string,
+        string
+      >;
+    let detach: (() => void) | undefined;
+    try {
+      detach = await attach(
+        mo.endpointToken,
+        'mo-box',
+        ['kilo'],
+        [{ id: 'eeeeeeeeeeee', label: 'symma' }],
+      );
+      const first = await waitFor(async () => {
+        const opened = await store.openConversation(mo.owner, {
+          dmChannel: 'D-mo',
+          rootThread: '1.0',
+        });
+        return opened?.id;
+      }, 'a conversation to set a model on');
+
+      // Waited on, not assumed: a model is served only for a selected endpoint
+      // offering a root, so asserting on one that has not attached yet passes
+      // for the wrong reason and races whatever comes after it.
+      const ready = await waitFor(async () => {
+        const served = await ask(first);
+        return served.workspace === 'eeeeeeeeeeee' ? served : undefined;
+      }, 'the endpoint serving its workspace');
+      assert.equal(ready.model, undefined);
+      // The bracketed effort codex-acp folds into its ids has no room in
+      // `isSafeId`'s alphabet, so the model route takes the wider one.
+      assert.equal(
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'gpt-5.6-sol[high]',
+            // Whose roster it came from — served back only to this agent.
+            agent: 'kilo',
+          })
+        ).status,
+        200,
+      );
+      assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]');
+      // No capability gate, unlike mode: `open.model` has always been on the
+      // wire, and a stale id costs a default rather than a refusal.
+      assert.equal((await ask(first)).mode, undefined);
+
+      // Inherited by the next thread in the same root, same as mode.
+      const second = (await store.openConversation(mo.owner, {
+        dmChannel: 'D-mo',
+        rootThread: '2.0',
+      }))!.id;
+      assert.equal((await ask(second)).model, 'gpt-5.6-sol[high]');
+
+      // And still bounded: a quote would ride into the child's environment.
+      assert.equal(
+        (await post('/api/slack/model', { conversation: first, model: 'bad"id' })).status,
+        400,
+      );
+
+      // A pick with no roster named is refused, not stored: it could never be
+      // served, and "Model set" over a change that never applies is worse than
+      // a failure the member sees.
+      assert.equal(
+        (await post('/api/slack/model', { conversation: first, model: 'mini[low]' })).status,
+        400,
+      );
+
+      // A model id belongs to the roster it came from: picked under kilo, it is
+      // not offered to an endpoint now serving codex — that turn would spawn
+      // with a model this agent refuses, and the agents that take it at spawn
+      // (codex's config, cursor/gemini/opencode's argv) cannot say why.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['codex']);
+        return (await ask(first)).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving codex');
+      assert.equal((await ask(first)).model, undefined, 'another agent’s id is not served');
+
+      // And a root change sheds it even while that other agent is selected —
+      // otherwise switching back to kilo later would find its model waiting in
+      // a project it was never picked for.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['codex'],
+          [{ id: 'aaaabbbbcccc', label: 'elsewhere' }],
+        );
+        return (await ask(first)).workspace === 'aaaabbbbcccc' ? off : (off(), undefined);
+      }, 'the endpoint reattached under codex with a different root');
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['kilo']);
+        return (await ask(first)).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving kilo again');
+      assert.equal((await ask(first)).model, undefined, 'the root change shed it regardless');
+
+      // A changed root sheds the model exactly as it sheds the mode: a pick made
+      // for one project must not follow the thread into another.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['kilo'],
+          [{ id: 'ffffffffffff', label: 'other' }],
+        );
+        return (await ask(first)).workspace === 'ffffffffffff' ? off : (off(), undefined);
+      }, 'the endpoint reattached with a different root');
+      assert.equal((await ask(first)).model, undefined, 'the old root model did not travel');
+
+      // But with no root at all there is nothing to scope a pick to, and the
+      // picker still offers one — so the row's own model is what that turn runs.
+      assert.equal(
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'mini[low]',
+            agent: 'kilo',
+          })
+        ).status,
+        200,
+      );
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['kilo']);
+        return (await ask(first)).workspace === undefined ? off : (off(), undefined);
+      }, 'the endpoint reattached offering no root');
+      assert.equal((await ask(first)).model, 'mini[low]');
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
   it('refuses a spent code, and a companion with nothing to run', async () => {
     const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });

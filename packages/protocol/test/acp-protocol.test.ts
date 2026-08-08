@@ -48,11 +48,16 @@ interface FakeAgentApi {
 
 interface FakeAgentScript {
   modes?: Record<string, unknown>;
+  models?: Record<string, unknown>;
   configOptions?: unknown[];
   authMethods?: unknown[];
   /** First session/new fails -32000 until authenticate is called. */
   authGate?: boolean;
   capabilities?: Record<string, unknown>;
+  /** What the agent says it can be handed with a prompt. */
+  promptCapabilities?: Record<string, unknown>;
+  /** Every prompt block the agent received, for asserting what travelled. */
+  onPromptBlocks?: (blocks: Record<string, unknown>[]) => void;
   /** Answers session/load. Returning an error is an agent that has forgotten
    * the session; the replay it would otherwise send is the script's to write. */
   onLoad?: (agent: FakeAgentApi, authed: boolean) => Record<string, unknown>;
@@ -66,12 +71,14 @@ function fakeAgentIo(script: FakeAgentScript): {
   input: PassThrough;
   output: PassThrough;
   setModeIds: string[];
+  setModelIds: string[];
   setConfigCalls: unknown[];
   authCalls: unknown[];
 } {
   const input = new PassThrough();
   const output = new PassThrough();
   const setModeIds: string[] = [];
+  const setModelIds: string[] = [];
   const setConfigCalls: unknown[] = [];
   const authCalls: unknown[] = [];
   let authed = false;
@@ -99,7 +106,18 @@ function fakeAgentIo(script: FakeAgentScript): {
         result: {
           protocolVersion: 1,
           ...(script.authMethods ? { authMethods: script.authMethods } : {}),
-          ...(script.capabilities ? { agentCapabilities: script.capabilities } : {}),
+          // Nested where the spec and codex-acp both put it — a fake that
+          // flattened this is what let the driver read the wrong level.
+          ...(script.capabilities || script.promptCapabilities
+            ? {
+                agentCapabilities: {
+                  ...script.capabilities,
+                  ...(script.promptCapabilities
+                    ? { promptCapabilities: script.promptCapabilities }
+                    : {}),
+                },
+              }
+            : {}),
         },
       });
     } else if (method === 'authenticate') {
@@ -119,6 +137,7 @@ function fakeAgentIo(script: FakeAgentScript): {
         result: {
           sessionId: 's1',
           ...(script.modes ? { modes: script.modes } : {}),
+          ...(script.models ? { models: script.models } : {}),
           ...(script.configOptions ? { configOptions: script.configOptions } : {}),
         },
       });
@@ -138,9 +157,13 @@ function fakeAgentIo(script: FakeAgentScript): {
     } else if (method === 'session/set_mode') {
       setModeIds.push((message.params as { modeId?: string })?.modeId ?? '');
       send({ jsonrpc: '2.0', id, result: {} });
+    } else if (method === 'session/set_model') {
+      setModelIds.push((message.params as { modelId?: string })?.modelId ?? '');
+      send({ jsonrpc: '2.0', id, result: {} });
     } else if (method === 'session/prompt') {
       promptId = id;
       const blocks = (message.params as { prompt?: { text?: string }[] }).prompt ?? [];
+      script.onPromptBlocks?.(blocks as Record<string, unknown>[]);
       script.onPrompt(agent, blocks.map((block) => block.text ?? '').join(''));
     } else if (method === undefined && id !== undefined) {
       script.onClientResponse?.(id, (message as { result?: unknown }).result, agent);
@@ -148,7 +171,7 @@ function fakeAgentIo(script: FakeAgentScript): {
   });
   input.setEncoding('utf8');
   input.on('data', (chunk: string) => read(chunk));
-  return { input, output, setModeIds, setConfigCalls, authCalls };
+  return { input, output, setModeIds, setModelIds, setConfigCalls, authCalls };
 }
 
 /** A pid nothing holds, asked for rather than hard-coded: Linux `pid_max` can
@@ -451,6 +474,159 @@ describe('acp', () => {
         { id: 'agent', name: 'Agent', description: 'Read and edit files.' },
       ],
     });
+  });
+
+  it('selects a model off the roster, reports it, and narrates tool calls', async () => {
+    const steps: string[] = [];
+    const fake = fakeAgentIo({
+      models: {
+        currentModelId: 'gpt-5.6-sol[high]',
+        availableModels: [
+          { modelId: 'gpt-5.6-sol[high]', name: 'GPT-5.6-Sol (high)' },
+          { modelId: 'gpt-5.4-mini[low]', name: 'GPT-5.4-Mini (low)' },
+        ],
+      },
+      onPrompt: (agent) => {
+        agent.update({ sessionUpdate: 'tool_call', title: 'Reading dm.ts' });
+        // An update with no title of its own must not report a blank step.
+        agent.update({ sessionUpdate: 'tool_call_update', status: 'completed' });
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'done' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      model: 'codex/gpt-5.4-mini[low]',
+      onProgress: (title) => steps.push(title),
+    });
+    // Applied by exact roster id — never by taking the id apart, so what the
+    // member was shown is what runs.
+    assert.deepEqual(fake.setModelIds, ['gpt-5.4-mini[low]']);
+    assert.equal(result.models?.currentModelId, 'gpt-5.4-mini[low]');
+    assert.deepEqual(
+      result.models?.availableModels.map((m) => m.modelId),
+      ['gpt-5.6-sol[high]', 'gpt-5.4-mini[low]'],
+    );
+    assert.deepEqual(steps, ['Reading dm.ts']);
+    assert.equal(result.text, 'done');
+  });
+
+  it('sends attachments as the blocks the agent advertised, and only those', async () => {
+    const sent: Record<string, unknown>[][] = [];
+    const attachments = [
+      { name: 'rows.csv', mimeType: 'text/csv', kind: 'text' as const, data: 'a,b' },
+      { name: 'shot.png', mimeType: 'image/png', kind: 'image' as const, data: 'iVA=' },
+    ];
+    const drive = (promptCapabilities: Record<string, unknown>) =>
+      driveAcpSession(
+        fakeAgentIo({
+          promptCapabilities,
+          onPromptBlocks: (blocks) => sent.push(blocks),
+          onPrompt: (agent) => {
+            agent.update({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'ok' },
+            });
+            agent.finish();
+          },
+        }),
+        {
+          cwd: '/tmp',
+          prompt: 'what is this?',
+          agent: 'codex',
+          label: 't',
+          log: noLog,
+          attachments,
+        },
+      );
+
+    await drive({ embeddedContext: true, image: true });
+    // Material first, question last — the order a human would write it in.
+    assert.deepEqual(sent[0], [
+      {
+        type: 'resource',
+        resource: { uri: 'symma://attachment/rows.csv', mimeType: 'text/csv', text: 'a,b' },
+      },
+      { type: 'image', mimeType: 'image/png', data: 'iVA=' },
+      { type: 'text', text: 'what is this?' },
+    ]);
+
+    // An agent that advertised neither is sent neither: a block it cannot read
+    // would fail the whole prompt, costing the question as well as the file.
+    const bare = await drive({});
+    assert.deepEqual(sent[1], [{ type: 'text', text: 'what is this?' }]);
+    // And names them for the caller to word: it is the one that told its member
+    // they were being read, and the one that knows how its surface renders a
+    // filename. A silent drop is the failure this whole path exists for.
+    assert.deepEqual(bare.unsupported, [
+      { name: 'rows.csv', kind: 'text' },
+      { name: 'shot.png', kind: 'image' },
+    ]);
+    assert.deepEqual(bare.notices, []);
+  });
+
+  it('encodes an attachment name into its uri', async () => {
+    // A space or a `#` in a name would otherwise make a uri a stricter consumer
+    // can reject, dropping the file it names.
+    const sent: Record<string, unknown>[][] = [];
+    await driveAcpSession(
+      fakeAgentIo({
+        promptCapabilities: { embeddedContext: true },
+        onPromptBlocks: (blocks) => sent.push(blocks),
+        onPrompt: (agent) => {
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ok' },
+          });
+          agent.finish();
+        },
+      }),
+      {
+        cwd: '/tmp',
+        prompt: 'p',
+        agent: 'codex',
+        label: 't',
+        log: noLog,
+        attachments: [
+          { name: 'my notes #2.md', mimeType: 'text/markdown', kind: 'text', data: 'x' },
+        ],
+      },
+    );
+    assert.equal(
+      (sent[0]![0] as { resource: { uri: string } }).resource.uri,
+      'symma://attachment/my%20notes%20%232.md',
+    );
+  });
+
+  it('leaves the model alone when the roster does not hold it', async () => {
+    // The review path names models the agent takes by config or flag, not off
+    // this roster; selecting one it never offered would fail the turn instead.
+    const fake = fakeAgentIo({
+      models: { currentModelId: 'a', availableModels: [{ modelId: 'a' }] },
+      onPrompt: (agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.finish();
+      },
+    });
+    await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      model: 'codex/not-on-the-roster',
+    });
+    assert.deepEqual(fake.setModelIds, []);
   });
 
   it('refuses a mode the agent does not offer, naming the roster', async () => {
@@ -1064,6 +1240,17 @@ describe('acp', () => {
       assert.ok(!existsSync(join(codexHome, 'config.toml')), 'their home is not ours to configure');
       assert.ok(!existsSync(runHome), 'no run home for a session that does not use it');
       assert.equal(opened.env.INITIAL_AGENT_MODE, 'agent');
+      // A roster id folds reasoning effort in; the config takes the pair apart,
+      // so the spawn pins both rather than passing codex a model it has no name
+      // for. A plain id leaves the member's own effort setting alone.
+      assert.equal(
+        codex.env('codex/gpt-5.6-sol[high]', { workspace: true }).env.CODEX_CONFIG,
+        '{"model":"gpt-5.6-sol","model_reasoning_effort":"high"}',
+      );
+      assert.equal(
+        codex.env('codex/gpt-5.2-codex', { workspace: true }).env.CODEX_CONFIG,
+        '{"model":"gpt-5.2-codex"}',
+      );
       // A temp-dir open is the isolated path, mode or not: a mode outside a
       // named workspace was refused before the spawn.
       const temp = codex.env('codex/default', { workspace: false });

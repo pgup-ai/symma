@@ -7,8 +7,9 @@
  */
 import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } from '@slack/web-api';
 
-import { isSafeId, type SessionMode, type SessionModes } from '@symma/protocol';
+import { isSafeId, isSafeModelId, type SessionModels, type SessionModes } from '@symma/protocol';
 
+import type { FetchedFile } from './attachments.js';
 import type { ThreadMessage } from './snapshot.js';
 
 export interface SlackApi {
@@ -29,11 +30,21 @@ export interface SlackApi {
      * context block, which is Slack's own small-and-grey — the member should be
      * able to tell it from the answer without reading it. */
     notices?: string[],
-    /** §4's mode picker, rendered from the agent's own roster. The selection
-     * carries the conversation and the mode id; what to do with them is the
-     * gateway's to decide, same as the share button. */
-    modePicker?: { conversation: string; modes: SessionModes },
+    /** §4's pickers, rendered from the agent's own rosters. A selection carries
+     * the conversation and the chosen id; what to do with them is the gateway's
+     * to decide, same as the share button. */
+    pickers?: {
+      conversation: string;
+      /** Whose rosters these are — a model id is only meaningful under it. */
+      agent: string;
+      modes?: SessionModes;
+      models?: SessionModels;
+    },
   ) => Promise<{ channel: string; ts: string }>;
+  /** Rewrites the acknowledgement while a run is out, so a long turn can show
+   * what the agent is doing. Never throws, and carries no blocks of its own: a
+   * progress line that failed to land must not cost the answer behind it. */
+  working: (channel: string, ts: string, text: string) => Promise<void>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
    * and reporting a failed update as a failed share would be a lie the member
@@ -45,6 +56,10 @@ export interface SlackApi {
    * lands. Never throws: the mark is a hint, and losing one must not cost them
    * the answer it was a hint about. */
   mark: (channel: string, ts: string, state: MarkState) => Promise<void>;
+  /** Downloads one of Slack's own file URLs. `url_private_download` is not a
+   * public link — it needs the bot token as a bearer header, which is why this
+   * lives here and not in whatever wants the bytes. */
+  fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>;
   /** Publishes into the source thread. Returns why it could not rather than
    * throwing: §5 keeps the answer in the DM and names which of these happened,
    * and a publication that cannot land is not a lost answer. */
@@ -88,6 +103,25 @@ const MAX_PAGES = 20;
 const BLOCK_TEXT_LIMIT = 3000;
 const MESSAGE_BLOCK_LIMIT = 50;
 const FALLBACK_TEXT_LIMIT = 40_000;
+
+/** A file download is a CDN fetch, not an API call — bounded on its own because
+ * a stalled one would otherwise hold the whole turn. */
+const FILE_FETCH_TIMEOUT_MS = 20_000;
+
+/** A name or a title the member or their agent chose, on its way into mrkdwn:
+ * a backtick would open a code span that swallows the rest of the sentence, and
+ * a newline would break the block it sits in. */
+export const plainly = (text: string): string =>
+  text
+    // Slack's three mrkdwn entities, ampersand first or the escapes double up.
+    // `<!channel>` in a filename would otherwise broadcast when an answer is
+    // shared, and `<http://x|y>` would render as a link nobody wrote.
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll(/[`\n]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
 /** Cut to `limit` and say so, so what is missing is visible rather than a
  * sentence that stops. */
@@ -134,40 +168,60 @@ function sections(text: string, budget: number): SectionBlock[] {
 /** The one action id the bot listens for, shared by the button and its handler. */
 export const SHARE_ACTION = 'share_to_thread';
 
-/** The mode picker's action id, shared the same way. */
+/** The picker action ids, shared with their handlers. */
 export const MODE_ACTION = 'set_conversation_mode';
+export const MODEL_ACTION = 'set_conversation_model';
 
 /** Slack's static_select caps: options per select, characters per value. */
 const PICKER_OPTION_LIMIT = 100;
 const PICKER_VALUE_LIMIT = 150;
 
-/** One picker option. `initial_option` must deep-equal one of `options` for
- * Slack to accept it, so both are built here and nowhere else. */
-const modeOption = (conversation: string, mode: SessionMode) => ({
-  // Slack caps option labels at 75 characters.
-  text: { type: 'plain_text' as const, text: (mode.name ?? mode.id).slice(0, 75) },
-  value: JSON.stringify({ c: conversation, m: mode.id }),
+/** One roster entry as the picker shows it and hands it back. `initial_option`
+ * must deep-equal one of `options` for Slack to accept it, so both are built
+ * here and nowhere else. */
+const pickerOption = (
+  conversation: string,
+  id: string,
+  label: string,
+  about?: string,
+  agent?: string,
+) => ({
+  // Slack caps both of these at 75 characters.
+  text: { type: 'plain_text' as const, text: label.slice(0, 75) },
+  ...(about ? { description: { type: 'plain_text' as const, text: about.slice(0, 75) } } : {}),
+  // `a` is whose roster this came from — a model id means nothing under another
+  // agent, so the selection carries where it was offered.
+  value: JSON.stringify({ c: conversation, m: id, ...(agent ? { a: agent } : {}) }),
 });
 
-/** The select, bounded to what Slack will post and what can round-trip: an id
- * outside the wire's alphabet, or a value past Slack's cap, could be shown but
+/** A select, bounded to what Slack will post and what can round-trip: an id
+ * outside its wire alphabet, or a value past Slack's cap, could be shown but
  * never selected — and one roster past the option cap would cost the whole
- * answer it rides on. A current mode the bounds dropped just loses its
+ * answer it rides on. A current choice the bounds dropped just loses its
  * highlight; the placeholder stands in. */
-function modeSelect(conversation: string, modes: SessionModes): Record<string, unknown>[] {
-  const options = modes.availableModes
-    .filter((mode) => isSafeId(mode.id))
-    .map((mode) => modeOption(conversation, mode))
-    .filter((option) => option.value.length <= PICKER_VALUE_LIMIT)
+function rosterSelect(
+  conversation: string,
+  action: string,
+  placeholder: string,
+  entries: { id: string; label: string; about?: string; safe: boolean }[],
+  currentId: string | undefined,
+  agent?: string,
+): Record<string, unknown>[] {
+  const option = (entry: { id: string; label: string; about?: string }) =>
+    pickerOption(conversation, entry.id, entry.label, entry.about, agent);
+  const options = entries
+    .filter((entry) => entry.safe)
+    .map(option)
+    .filter((value) => value.value.length <= PICKER_VALUE_LIMIT)
     .slice(0, PICKER_OPTION_LIMIT);
   if (!options.length) return [];
-  const current = modes.availableModes.find((mode) => mode.id === modes.currentModeId);
-  const initial = current && modeOption(conversation, current);
+  const current = entries.find((entry) => entry.id === currentId);
+  const initial = current && option(current);
   return [
     {
       type: 'static_select',
-      action_id: MODE_ACTION,
-      placeholder: { type: 'plain_text', text: 'Session mode' },
+      action_id: action,
+      placeholder: { type: 'plain_text', text: placeholder },
       options,
       ...(initial && options.some((option) => option.value === initial.value)
         ? { initial_option: initial }
@@ -175,6 +229,43 @@ function modeSelect(conversation: string, modes: SessionModes): Record<string, u
     },
   ];
 }
+
+const modeSelect = (conversation: string, modes: SessionModes): Record<string, unknown>[] =>
+  rosterSelect(
+    conversation,
+    MODE_ACTION,
+    'Session mode',
+    modes.availableModes.map((mode) => ({
+      id: mode.id,
+      label: mode.name ?? mode.id,
+      // The agent's own sentence about what the choice means — codex writes
+      // "Read and edit files, and run commands." for `agent`.
+      ...(mode.description ? { about: mode.description } : {}),
+      safe: isSafeId(mode.id),
+    })),
+    modes.currentModeId,
+  );
+
+const modelSelect = (
+  conversation: string,
+  models: SessionModels,
+  agent: string,
+): Record<string, unknown>[] =>
+  rosterSelect(
+    conversation,
+    MODEL_ACTION,
+    'Model',
+    models.availableModels.map((model) => ({
+      id: model.modelId,
+      label: model.name ?? model.modelId,
+      ...(model.description ? { about: model.description } : {}),
+      // Model ids carry a bracketed reasoning effort, so they need the wider
+      // alphabet — the same one the gateway's route accepts.
+      safe: isSafeModelId(model.modelId),
+    })),
+    models.currentModelId,
+    agent,
+  );
 
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */
@@ -250,7 +341,7 @@ export function slackApi(
       if (!channel?.id) throw new Error('conversations.open returned no channel');
       return channel.id;
     },
-    async post(channel, text, threadTs, offerShare, notices, modePicker) {
+    async post(channel, text, threadTs, offerShare, notices, pickers) {
       const elements = [
         ...(offerShare
           ? [
@@ -273,7 +364,10 @@ export function slackApi(
               },
             ]
           : []),
-        ...(modePicker ? modeSelect(modePicker.conversation, modePicker.modes) : []),
+        ...(pickers?.modes ? modeSelect(pickers.conversation, pickers.modes) : []),
+        ...(pickers?.models
+          ? modelSelect(pickers.conversation, pickers.models, pickers.agent)
+          : []),
       ];
       const actions = elements.length ? [{ type: 'actions', elements }] : [];
       // The answer takes the blocks it needs and the asides take what is left,
@@ -318,6 +412,48 @@ export function slackApi(
       });
       if (!sent.channel || !sent.ts) throw new Error('chat.postMessage returned no message');
       return { channel: sent.channel, ts: sent.ts };
+    },
+    async working(channel, ts, text) {
+      try {
+        await client.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
+      } catch (error) {
+        // Said once rather than swallowed: a scope or rate-limit problem here
+        // is invisible otherwise, and the answer still arrives either way. The
+        // logger is a caller's callback, so it gets `mark`'s treatment too.
+        try {
+          options.log?.(`progress update failed: ${slackCode(error) ?? String(error)}`);
+        } catch {
+          /* a caller's logger is not worth the turn either */
+        }
+      }
+    },
+    async fetchFile(url, maxBytes) {
+      // The SDK covers `api.slack.com` calls; a file URL is plain HTTP with the
+      // same token, so it goes through fetch directly.
+      const res = await (options.fetch ?? fetch)(url, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(FILE_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) return { ok: false, status: res.status };
+      if (!res.body) return { ok: true, bytes: Buffer.alloc(0) };
+      // Counted as it arrives rather than measured after: a response without a
+      // `content-length` — or one that under-reports — would otherwise be
+      // buffered whole before anything could refuse it, and these are files a
+      // member uploaded, at whatever size they liked.
+      const reader = res.body.getReader();
+      const chunks: Buffer[] = [];
+      let read = 0;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        read += value.byteLength;
+        if (read > maxBytes) {
+          void reader.cancel().catch(() => undefined);
+          return { ok: false, status: 413 };
+        }
+        chunks.push(Buffer.from(value));
+      }
+      return { ok: true, bytes: Buffer.concat(chunks) };
     },
     async settle(channel, ts, text) {
       try {

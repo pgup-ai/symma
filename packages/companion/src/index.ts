@@ -832,6 +832,9 @@ async function openSession(control: OpenControl): Promise<void> {
     ...(chosen ? {} : { workspace }),
     ...(spec.requirePlanMode ? { requirePlanMode: true } : {}),
     ...(spec.modelConfigCandidates ? { modelCandidates: spec.modelConfigCandidates(model) } : {}),
+    // Only for a named workspace: a temp-dir session's rollout lands in
+    // symma's own run home, where the member's `codex resume` cannot see it.
+    ...(chosen && spec.resumeWith ? { resumeWith: spec.resumeWith } : {}),
   });
   log(`session ${control.sessionId} opened (agent=${control.agent})`);
 }

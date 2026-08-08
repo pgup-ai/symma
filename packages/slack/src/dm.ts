@@ -8,11 +8,24 @@
  * up from this thread when it does not — both travel, because which applies is
  * not known until the agent has been asked (§4).
  */
-import type { SessionModes, TurnTarget } from '@symma/protocol';
+import type {
+  PromptAttachment,
+  SessionModels,
+  SessionModes,
+  TurnTarget,
+  TurnUsage,
+} from '@symma/protocol';
+
+import {
+  collectAttachments,
+  skippedNote,
+  type FetchedFile,
+  type SlackFile,
+} from './attachments.js';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
-import type { MarkState } from './slack-api.js';
+import { plainly, type MarkState } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
@@ -25,6 +38,9 @@ export interface DmMessage {
   /** What they asked, as Slack sent it: `<@U123>` and `<#C123>` stay unresolved,
    * since expanding them is a lookup each and the question is about code. */
   text: string;
+  /** What they attached, as Slack described it. Fetched rather than named: an
+   * agent told a CSV exists can only say so back. */
+  files?: SlackFile[];
 }
 
 /**
@@ -76,6 +92,67 @@ export interface RunSpec {
    * travel: which applies is not known until the agent has been asked. */
   resume?: string;
   context?: string;
+  /** What the agent is doing, for the acknowledgement to show while it runs. */
+  onProgress?: (title: string) => void;
+  /** The member's own files, already fetched, for the agent to read. */
+  attachments?: PromptAttachment[];
+}
+
+/** `chat.update` is rate limited per channel, and a turn narrating every file
+ * read would spend that budget on frames nobody reads. */
+const PROGRESS_MIN_MS = 4_000;
+
+/** A tool-call title on its way into a mrkdwn *italic* span, so an underscore
+ * closes it as surely as a backtick does. Clamped, since a title is a label. */
+const asStep = (title: string): string =>
+  plainly(title).replaceAll('_', ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+
+/** Rounded: what a member does with a token count is notice a turn that cost
+ * ten times the last one. */
+const thousands = (tokens: number): string =>
+  tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+
+/** The cost beside the model that charged it — the two only mean something
+ * together, now that the model is the member's own choice. Absent when the
+ * agent reported no total: an invented number is worse than none. */
+function spent(model: string | undefined, usage: TurnUsage | undefined): string[] | undefined {
+  if (usage?.totalTokens === undefined) return undefined;
+  const parts = [
+    ...(model ? [`\`${plainly(model)}\``] : []),
+    `${thousands(usage.totalTokens)} tokens`,
+    ...(usage.cachedTokens ? [`${thousands(usage.cachedTokens)} cached`] : []),
+  ];
+  return [parts.join(' · ')];
+}
+
+/** Which files the agent had no block for, grouped by kind — one sentence per
+ * kind, because a rejected image and a rejected CSV are refused for different
+ * reasons and naming them together would misdescribe one of them. */
+function unsupportedNote(agent: string, files?: { name: string; kind: string }[]): string[] {
+  const byKind = new Map<string, string[]>();
+  for (const file of files ?? []) {
+    byKind.set(file.kind, [...(byKind.get(file.kind) ?? []), plainly(file.name)]);
+  }
+  return [...byKind].map(
+    ([kind, names]) =>
+      `${names.join(', ')} did not reach ${agent}: it takes no ${kind} attachments.`,
+  );
+}
+
+/** What the answer can offer to change for the next turn, or nothing. */
+function pickers(
+  conversation: string,
+  agent: string,
+  answer: { modes?: SessionModes; models?: SessionModels },
+  inWorkspace: boolean,
+):
+  | { conversation: string; agent: string; modes?: SessionModes; models?: SessionModels }
+  | undefined {
+  const offer = {
+    ...(answer.modes && inWorkspace ? { modes: answer.modes } : {}),
+    ...(answer.models ? { models: answer.models } : {}),
+  };
+  return Object.keys(offer).length ? { conversation, agent, ...offer } : undefined;
 }
 
 export interface DmDeps {
@@ -93,13 +170,32 @@ export interface DmDeps {
    * `notices` is what the agent said about itself rather than about the
    * question, kept apart so the answer is not read as carrying it. `session` is
    * where it ran, for the next turn in this thread to pick up. */
-  run: (
-    spec: RunSpec,
-  ) => Promise<{ text: string; notices: string[]; session: string; modes?: SessionModes }>;
+  run: (spec: RunSpec) => Promise<{
+    text: string;
+    notices: string[];
+    session: string;
+    /** How the member picks this session up in their own terminal, when the
+     * agent has such a command. */
+    resumeWith?: string;
+    modes?: SessionModes;
+    models?: SessionModels;
+    /** What the turn cost, when the agent said. */
+    usage?: TurnUsage;
+    /** Files the agent advertised no block for, for this layer to word. */
+    unsupported?: { name: string; kind: string }[];
+  }>;
   /** Clears the conversation's stored mode. Called when a turn failed because
    * the agent no longer offers it — the picker that could fix it only rides
    * answers, so without this the thread would fail every turn from here on. */
   shedMode: (conversation: string) => Promise<void>;
+  /** The same for the model: ids belong to an agent's roster, so a pick made
+   * under one can throw under another and would repeat until it is cleared. */
+  shedModel: (conversation: string) => Promise<void>;
+  /** Downloads one of the member's Slack files. */
+  fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>;
+  /** Rewrites the acknowledgement while the run is out, so a long turn shows
+   * it is still moving. Fails open, like every hint here. */
+  working: (channel: string, ts: string, text: string) => Promise<void>;
   /** Ends the turn, and remembers the session it ran in when there was one —
    * against what it ran under, since an id means nothing on another machine,
    * agent or directory. Every path that opened a turn calls this, including the
@@ -122,7 +218,12 @@ export interface DmDeps {
     threadTs?: string,
     offerShare?: { conversation: string; destination: string },
     notices?: string[],
-    modePicker?: { conversation: string; modes: SessionModes },
+    pickers?: {
+      conversation: string;
+      agent: string;
+      modes?: SessionModes;
+      models?: SessionModels;
+    },
   ) => Promise<{ channel: string; ts: string }>;
   /** Marks the member's own message for the length of the run. Only the run is
    * worth marking — everything refused answers in words, immediately. */
@@ -243,6 +344,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // thread is the half that cannot be recovered from (§4).
   const caught = existing ? await catchUp(message, conversation, deps) : undefined;
 
+  // Fetched before the run so a refusal is one aside rather than a failed turn,
+  // and after the endpoint check so a shut laptop costs no downloads.
+  const attached = message.files?.length
+    ? await collectAttachments(message.files, deps.fetchFile)
+    : [];
+  const attachments = attached.flatMap((entry) => (entry.ok ? [entry.file] : []));
+
   // A run has twenty minutes to answer, so silence that long reads as broken.
   // §4 wants the scope in the DM root rather than guessed at, so the answer
   // says which project it is about — or that it can see no files at all, which
@@ -260,15 +368,44 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
   const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
-  await deps.post(
-    conversation.dmChannel,
-    note ? `${scope} ${note}` : scope,
-    conversation.rootThread,
-  );
+  // Named up front: a member who attached three files and sees two read should
+  // learn it now, not from an answer that quietly used one.
+  const reading = attachments.length
+    ? `Reading ${attachments.map((file) => `\`${file.name.replaceAll('`', '')}\``).join(', ')}.`
+    : undefined;
+  // The trailing ellipsis is the standing "still going" cue, so it belongs on
+  // the end of whatever the acknowledgement turned out to be — not on the scope
+  // sentence, which a resume note or a file list then follows.
+  const ack = `${[scope, note, reading].filter(Boolean).join(' ').replace(/\.$/, '')}…`;
+  const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  let answer: { text: string; notices: string[]; session: string; modes?: SessionModes };
+  // The agent's own narration, rewritten onto the acknowledgement it already
+  // posted — Slack gives a bot no typing indicator, so the message is the only
+  // place a long turn can show it is still moving. Throttled because
+  // `chat.update` is rate-limited and a busy turn narrates far faster than
+  // anyone reads; fails open, since this is a hint and not the answer.
+  let lastShown = 0;
+  const narrate = (title: string): void => {
+    const now = Date.now();
+    if (now - lastShown < PROGRESS_MIN_MS) return;
+    lastShown = now;
+    void deps
+      .working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`)
+      .catch(() => undefined);
+  };
+
+  let answer: {
+    text: string;
+    notices: string[];
+    session: string;
+    resumeWith?: string;
+    modes?: SessionModes;
+    models?: SessionModels;
+    usage?: TurnUsage;
+    unsupported?: { name: string; kind: string }[];
+  };
   try {
     answer = await deps.run({
       conversation: conversation.id,
@@ -277,30 +414,38 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       token: decision.token,
       // §5 wants a per-agent default with an override; until the override
       // exists this is the default, and the prefix is what makes it parse.
-      model: `${decision.agent}/default`,
+      // The member's pick when they have made one, else the agent's own
+      // default. The prefix is what makes it parse either way.
+      model: `${decision.agent}/${decision.model ?? 'default'}`,
       prompt: message.text,
+      onProgress: narrate,
       ...(caught ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
       ...(decision.mode ? { mode: decision.mode } : {}),
+      ...(attachments.length ? { attachments } : {}),
     });
   } catch (error) {
     // Posted into the thread they are watching rather than left to the socket's
     // catch, which answers at the DM root where this reply is not.
     deps.log(`run failed: ${String(error)}`);
-    // The driver names this failure precisely — matched on its exact shape,
-    // because "agent X not offered" is a different refusal — and it is the one
-    // that would otherwise repeat forever: the stored mode has drifted off the
-    // agent's roster, and nothing that fails a turn can offer the picker that
-    // would fix it.
-    const unoffered =
-      decision.mode !== undefined && /: mode \S+ not offered \(/.test(String(error));
+    // A stored pick the agent's roster dropped would repeat forever otherwise:
+    // nothing that fails a turn can offer the picker that would fix it. Matched
+    // on each failure's exact shape, since "agent X not offered" is a different
+    // refusal from either of these.
+    const failed = String(error);
+    const staleMode = decision.mode !== undefined && /: mode \S+ not offered \(/.test(failed);
+    const staleModel =
+      decision.model !== undefined && /: model "[^"]+" is not offered by the agent/.test(failed);
+    const unoffered = staleMode || staleModel;
     // Tracked, not assumed: a clear that failed leaves the stale mode in
     // place, and claiming recovery would promise a retry that fails the same
     // way. Fail-open on the write itself — the turn's outcome stands either way.
+    // Whichever drifted is what the member is told about, and what gets cleared.
+    const dropped = staleMode ? decision.mode : decision.model;
     const shed =
       unoffered &&
-      (await deps.shedMode(conversation.id).then(
+      (await (staleMode ? deps.shedMode : deps.shedModel)(conversation.id).then(
         () => true,
         () => false,
       ));
@@ -310,8 +455,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       conversation.dmChannel,
       unoffered
         ? shed
-          ? `The agent no longer offers \`${decision.mode}\` mode, so I cleared it. Send it again and I will retry read-only.`
-          : `The agent no longer offers \`${decision.mode}\` mode, and I could not clear it. Send it again and I will keep trying.`
+          ? `The agent no longer offers \`${dropped}\`, so I cleared it. Send it again and I will retry with its default.`
+          : `The agent no longer offers \`${dropped}\`, and I could not clear it. Send it again and I will keep trying.`
         : 'That run did not finish. Send it again and I will retry.',
       conversation.rootThread,
     );
@@ -335,13 +480,28 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       answer.text.trim() || 'That finished without producing an answer.',
       conversation.rootThread,
       to ? { conversation: conversation.id, destination: `<#${to.channel}>` } : undefined,
-      answer.notices,
+      // The handoff back to the terminal, as an aside rather than in the answer:
+      // the session the turn ran in is listed by the agent's own CLI, and this
+      // is the one line that turns "it ran somewhere" into somewhere reachable.
+      [
+        ...answer.notices,
+        ...skippedNote(attached),
+        // The agent took the turn but not the file: said here because the
+        // acknowledgement already promised the member it was being read.
+        ...unsupportedNote(decision.agent, answer.unsupported),
+        ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
+        // The command is a closed set at the parse boundary; the session id is
+        // the agent's own string and is not.
+        ...(answer.resumeWith ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``] : []),
+      ],
       // The picker renders the agent's own roster, so it exists exactly where
       // the agent serves one — and only inside a named workspace, the one
       // place a mode means anything (§4).
-      answer.modes && decision.workspace
-        ? { conversation: conversation.id, modes: answer.modes }
-        : undefined,
+      // Both rosters ride the answer, but a mode only means something inside a
+      // named workspace — where the model is a preference anywhere. Nothing to
+      // render means no payload at all, rather than a conversation id with no
+      // picker to carry.
+      pickers(conversation.id, decision.agent, answer, decision.workspace !== undefined),
     );
   } catch (error) {
     // The run is over either way, and `announcing` tells them the delivery

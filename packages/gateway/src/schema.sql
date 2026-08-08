@@ -224,3 +224,13 @@ CREATE INDEX IF NOT EXISTS conversations_activity_idx ON conversations (last_act
 -- applied from the next turn. NULL is read-only, which every conversation
 -- predating the column was.
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS mode_id text;
+
+-- The model this conversation runs on (§4), off the agent's own roster. NULL
+-- leaves whatever the agent is configured for, which is every conversation
+-- that predates the column.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_id text;
+
+-- Which agent's roster the stored model came from (§4). Model ids are an
+-- agent's own, and one agent's id handed to another is a turn that fails at
+-- spawn — so a pick is served only back to the agent that offered it.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_agent text;

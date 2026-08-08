@@ -6,6 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 
 import {
   isSafeId,
+  isSafeModelId,
   parseEnvelope,
   parseRelayControl,
   servesProtocol,
@@ -35,6 +36,7 @@ import {
   PAIRING_TTL_MINUTES,
   sameSecret,
   type Conversation,
+  type ConversationChoice,
   type Owner,
   type SessionRef,
   type Store,
@@ -906,35 +908,62 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const workspace = offered.find((w) => w.id === row?.workspaceId) ?? offered[0];
       const kept = workspace !== undefined && workspace.id === row?.workspaceId;
 
-      // The mode, by the workspace's own rule — except that a workspace change
-      // sheds the thread's pick instead of carrying it: write permission
-      // chosen for one directory must not follow the thread into another. The
-      // new root still inherits what its member last picked *for it*, and
-      // read-only is what is left when they never have. Served only where it
-      // can be honored — a named root, on an endpoint whose hello advertised
-      // modes for the agent — so an old companion is never sent a mode it
-      // would drop on the floor and quietly run read-only against a picker
-      // that said otherwise.
+      // What the row holds, before anything decides whether it can be used. The
+      // shed below compares against *these*, not against what is servable: a
+      // model this agent cannot take is still a model that has to leave when the
+      // thread changes root, or switching back to its agent later would find it
+      // waiting in the wrong project.
+      const held: Record<ConversationChoice, string | null> = {
+        mode: row?.modeId ?? null,
+        model: row?.modelId ?? null,
+      };
+      // Whether each is usable on this turn. A mode reaches only a companion
+      // whose hello advertised one, so an old one stays read-only rather than
+      // ignoring a picker that said otherwise. A model id belongs to the roster
+      // it came from — handed to another agent it spawns a turn that agent
+      // refuses, and the ones that take it at spawn (codex's config,
+      // cursor/gemini/opencode's argv) leave nothing downstream to say why.
       const modeCapable = attached?.agents.find((a) => a.agent === agent)?.modes === true;
-      let mode: string | undefined;
+      const usable: Record<ConversationChoice, string | undefined> = {
+        mode: modeCapable ? (held.mode ?? undefined) : undefined,
+        model: row?.modelAgent === agent ? (held.model ?? undefined) : undefined,
+      };
+      const serve: Partial<Record<ConversationChoice, string>> = {};
+      // Read before the rebind below: once this thread's row names the new root,
+      // its own not-yet-shed picks satisfy the inheritance query and follow it in.
       if (workspace && conversation) {
-        // Read before the workspace rebind below: once this thread's row names
-        // the new root, its own not-yet-shed mode satisfies the inheritance
-        // query and the stale pick follows it in.
-        if (modeCapable)
-          mode = (kept ? row?.modeId : undefined) ?? (await store.lastModeFor(owner, workspace.id));
+        for (const choice of ['mode', 'model'] as const) {
+          // The gate covers inheritance too: a sibling thread's mode is no more
+          // servable to a companion that cannot honor one than this row's is.
+          if (choice === 'mode' && !modeCapable) continue;
+          // A changed root sheds the thread's own pick rather than carrying it —
+          // write permission and a model chosen for one project are not the next
+          // one's — but what its member last picked *for that root* is inherited.
+          const inherited =
+            (kept ? usable[choice] : undefined) ??
+            (await store.lastChoiceFor(owner, workspace.id, choice, agent));
+          if (inherited) serve[choice] = inherited;
+        }
+      } else if (usable.model) {
+        // No root to scope a pick to, and the picker still offers a model there,
+        // so the row's own is what this turn runs on.
+        serve.model = usable.model;
       }
       // Written back so the thread keeps its project. Only on a change, or every
       // turn costs a write to say what the row already says.
       if (workspace && conversation && !kept)
         await store.bindConversation(owner, conversation, workspace.id);
       if (workspace && conversation) {
-        const stored = row?.modeId ?? null;
-        // An advertisement that lapsed (an older companion reattaching) keeps
-        // the stored pick for when it returns; only a workspace change clears.
-        const next = mode ?? (kept ? stored : null);
-        if (next !== stored) await store.bindConversationMode(owner, conversation, next);
+        for (const choice of ['mode', 'model'] as const) {
+          // A lapsed advertisement keeps the stored pick for when it returns, and
+          // so does an agent that cannot use this model — only a changed root
+          // clears, which is why this reads `held` and not `usable`.
+          const next = serve[choice] ?? (kept ? held[choice] : null);
+          if (next !== held[choice])
+            await store.bindConversationChoice(owner, conversation, choice, next, agent);
+        }
       }
+      const mode = serve.mode;
 
       // §4's second rung, offered only for the machine, agent and directory the
       // session was minted under — an id means nothing anywhere else, and the
@@ -956,24 +985,48 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         token,
         ...(workspace ? { workspace: workspace.id, workspaceLabel: workspace.label } : {}),
         ...(mode ? { mode } : {}),
+        ...(serve.model ? { model: serve.model } : {}),
         ...(resume ? { resume } : {}),
       });
     }
-    if (url.pathname === '/api/slack/mode') {
-      const { conversation, mode } = body as { conversation?: unknown; mode?: unknown };
-      // id-safe like everything that crosses to a companion: the value ends up
-      // in a child process env var there. `null` sheds — the bot clearing a
-      // stored mode the agent stopped offering, across the whole workspace,
-      // or `lastModeFor` refills the dead mode from a sibling thread and the
-      // next turn fails the same way.
-      if (!str(conversation) || (mode !== null && !isSafeId(mode)))
+    if (url.pathname === '/api/slack/mode' || url.pathname === '/api/slack/model') {
+      const choice: ConversationChoice = url.pathname.endsWith('model') ? 'model' : 'mode';
+      const { conversation, agent: pickedUnder } = body as {
+        conversation?: unknown;
+        agent?: unknown;
+      };
+      const value = (body as Record<string, unknown>)[choice];
+      // Bounded like everything that crosses to a companion: the value ends up
+      // in a child process env var there. Model ids carry the bracketed effort
+      // codex-acp folds in (`gpt-5.6-sol[high]`), which `isSafeId`'s alphabet
+      // has no room for. `null` sheds — the bot clearing a stored choice the
+      // agent stopped offering, across the whole workspace, or `lastChoiceFor`
+      // refills the dead value from a sibling thread on the next turn.
+      const bounded = choice === 'model' ? isSafeModelId(value) : isSafeId(value);
+      if (!str(conversation) || (value !== null && !bounded))
         return sendJson(res, 400, { error: 'request' });
+      // A model without the roster it came from could be stored but never
+      // served, so the pick is refused rather than confirmed and dropped. Every
+      // picker sends it; a request without one is a stale bot or a hand-made
+      // call, and both are better told.
+      if (choice === 'model' && value !== null && !isSafeId(pickedUnder))
+        return sendJson(res, 400, { error: 'agent' });
       // Scoped to the caller's own conversation, like `seen`: the bot speaks
       // for whichever member picked, not for all of them.
       if (!(await store.conversationForId(owner, conversation)))
         return sendJson(res, 404, { error: 'not found' });
-      if (mode === null) await store.shedWorkspaceMode(owner, conversation);
-      else await store.bindConversationMode(owner, conversation, mode);
+      if (value === null) await store.shedWorkspaceChoice(owner, conversation, choice);
+      else
+        await store.bindConversationChoice(
+          owner,
+          conversation,
+          choice,
+          value as string,
+          // Whose roster the member picked from, so it is only ever served back
+          // to that agent. Absent from an older bot, which then stores nothing
+          // and simply never has its model served.
+          isSafeId(pickedUnder) ? pickedUnder : undefined,
+        );
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/turn/done') {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import type { SessionModes, TurnTarget } from '@symma/protocol';
+import type { SessionModels, SessionModes, TurnTarget, TurnUsage } from '@symma/protocol';
 
 import { handleDm, isMemberDm, type DmDeps, type RunSpec } from '../src/dm.js';
 import type { ThreadMessage } from '../src/snapshot.js';
@@ -26,10 +26,19 @@ function harness(
     endpoint?: TurnTarget | null;
     answer?: string;
     notices?: string[];
-    /** The roster the run came back with, for the picker. */
+    /** The rosters the run came back with, for the pickers. */
     modes?: SessionModes;
+    models?: SessionModels;
     /** The gateway refuses the mode clear. */
     shedFails?: boolean;
+    /** How the agent's own CLI picks the session up, when it has a command. */
+    resumeWith?: string;
+    /** What the agent said the turn cost. */
+    usage?: TurnUsage;
+    /** Files the agent had no block for, as the driver reports them. */
+    unsupported?: { name: string; kind: string }[];
+    /** What a file download hands back; absent is a download that fails. */
+    fileBytes?: string;
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
@@ -52,13 +61,15 @@ function harness(
     threadTs?: string;
     offerShare?: { conversation: string; destination: string };
     notices?: string[];
-    modePicker?: { conversation: string; modes: SessionModes };
+    pickers?: { conversation: string; modes?: SessionModes; models?: SessionModels };
   }[] = [];
   const turns: Record<string, unknown>[] = [];
   const runs: RunSpec[] = [];
   const marks: { channel: string; ts: string; state: MarkState }[] = [];
   const finished: Record<string, string>[] = [];
   const sheds: string[] = [];
+  const updates: { channel: string; ts: string; text: string }[] = [];
+  let fetches = 0;
   let asked = 0;
   const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
@@ -80,17 +91,21 @@ function harness(
             notices: over.notices ?? [],
             session: 'acp-1',
             ...(over.modes ? { modes: over.modes } : {}),
+            ...(over.models ? { models: over.models } : {}),
+            ...(over.resumeWith ? { resumeWith: over.resumeWith } : {}),
+            ...(over.usage ? { usage: over.usage } : {}),
+            ...(over.unsupported ? { unsupported: over.unsupported } : {}),
           });
     },
     find: () => Promise.resolve(over.existing),
-    post: (channel, text, threadTs, offerShare, notices, modePicker) => {
+    post: (channel, text, threadTs, offerShare, notices, pickers) => {
       posts.push({
         channel,
         text,
         ...(threadTs ? { threadTs } : {}),
         ...(offerShare ? { offerShare } : {}),
         ...(notices?.length ? { notices } : {}),
-        ...(modePicker ? { modePicker } : {}),
+        ...(pickers ? { pickers } : {}),
       });
       if (over.postFails) return Promise.reject(over.postFails);
       // The acknowledgement is always first; anything later is the answer.
@@ -102,6 +117,22 @@ function harness(
     finish: (conversation, turn, status, ran) => {
       finished.push({ conversation, turn, status, ...ran });
       return Promise.resolve();
+    },
+    fetchFile: () => {
+      fetches += 1;
+      return Promise.resolve(
+        over.fileBytes === undefined
+          ? { ok: false, status: 404 }
+          : { ok: true, bytes: Buffer.from(over.fileBytes) },
+      );
+    },
+    working: (channel, ts, text) => {
+      updates.push({ channel, ts, text });
+      return Promise.resolve();
+    },
+    shedModel: (conversation) => {
+      sheds.push(`model:${conversation}`);
+      return over.shedFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
     },
     shedMode: (conversation) => {
       sheds.push(conversation);
@@ -130,7 +161,19 @@ function harness(
       return Promise.resolve(selected ?? undefined);
     },
   };
-  return { deps, posts, turns, runs, marks, finished, sheds, askedFor, asked: () => asked };
+  return {
+    deps,
+    posts,
+    turns,
+    runs,
+    marks,
+    finished,
+    sheds,
+    updates,
+    askedFor,
+    asked: () => asked,
+    fetches: () => fetches,
+  };
 }
 
 describe('dm message', () => {
@@ -285,8 +328,10 @@ describe('dm message', () => {
         token: 'tok-1',
         prompt: 'what broke?',
         model: 'kilo/default',
+        onProgress: runs[0]!.onProgress,
       },
     ]);
+    assert.equal(typeof runs[0]!.onProgress, 'function', 'the run can narrate itself');
     assert.equal(posts.at(-1)!.text, 'the deploy fails on a missing env var');
     // Said up front, not discovered: until `hello.workspaces[]` lands the agent
     // opens in an empty temp dir, which is not what "your own machine" sounds
@@ -315,7 +360,192 @@ describe('dm message', () => {
     // Read back on every turn — the member should never have to remember what
     // tier their own machine is running at.
     assert.match(posts[0]!.text, /in `symma` — `agent` mode/);
-    assert.deepEqual(posts[1]!.modePicker, { conversation: 'conv-1', modes: roster });
+    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
+  });
+
+  it('runs the picked model and narrates the agent onto its own acknowledgement', async () => {
+    const models: SessionModels = {
+      currentModelId: 'gpt-5.4-mini[low]',
+      availableModels: [{ modelId: 'gpt-5.4-mini[low]' }, { modelId: 'gpt-5.6-sol[high]' }],
+    };
+    const { deps, posts, runs, updates } = harness({
+      existing: CONVERSATION,
+      endpoint: {
+        ...READY,
+        agent: 'codex',
+        workspace: 'ws-1',
+        workspaceLabel: 'symma',
+        model: 'gpt-5.4-mini[low]',
+      },
+      models,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    // `provider/model` is the only shape the specs parse, brackets and all.
+    assert.equal(runs[0]!.model, 'codex/gpt-5.4-mini[low]');
+    // The ellipsis is the standing "still working" hint; the narration lands on
+    // that same message rather than a second post.
+    assert.match(posts[0]!.text, /mode…$/);
+    runs[0]!.onProgress!('Reading dm.ts');
+    assert.deepEqual(updates, [
+      { channel: 'D-nel', ts: '300.0', text: `${posts[0]!.text}\n\n_Reading dm.ts_` },
+    ]);
+    // Throttled: a turn narrating every file read would spend the rate limit on
+    // frames nobody reads.
+    runs[0]!.onProgress!('Running git log');
+    assert.equal(updates.length, 1);
+    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
+  });
+
+  it('hands the member’s own files to the agent, and names what it could not', async () => {
+    const { deps, posts, runs } = harness({ existing: CONVERSATION, fileBytes: 'a,b\n1,2\n' });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'what is in this?',
+        files: [
+          {
+            name: 'rows.csv',
+            mimetype: 'text/csv',
+            filetype: 'csv',
+            size: 8,
+            url_private_download: 'https://files/rows.csv',
+          },
+          { name: 'book.xlsx', mimetype: 'application/vnd.ms-excel', filetype: 'xlsx', size: 20 },
+        ],
+      },
+      deps,
+    );
+    // The readable one travels as content, not as a filename in a transcript —
+    // which is the whole difference from what v1 did.
+    assert.deepEqual(runs[0]!.attachments, [
+      { name: 'rows.csv', mimeType: 'text/csv', kind: 'text', data: 'a,b\n1,2\n' },
+    ]);
+    // The moving cue lands on the end of the whole acknowledgement, whatever it
+    // turned out to say.
+    assert.match(posts[0]!.text, /Reading `rows\.csv`…$/);
+    // And the one it could not read is said out loud rather than quietly
+    // missing from an answer that used the rest.
+    assert.deepEqual(posts[1]!.notices, [
+      'Could not read book.xlsx (xlsx is not something I can pass along).',
+    ]);
+  });
+
+  it('does not spend downloads on a machine that cannot take the turn', async () => {
+    const { deps, runs, fetches } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, state: 'asleep' },
+      fileBytes: 'x',
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'read this',
+        files: [
+          { name: 'a.md', filetype: 'md', size: 1, url_private_download: 'https://files/a.md' },
+        ],
+      },
+      deps,
+    );
+    // The ordering is the assertion: a fetch hoisted above the endpoint check
+    // would pull megabytes for a laptop that was never going to answer.
+    assert.equal(fetches(), 0);
+    assert.deepEqual(runs, []);
+  });
+
+  it('says what the turn cost, beside the model that charged it', async () => {
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      models: {
+        currentModelId: 'gpt-5.6-sol[high]',
+        availableModels: [{ modelId: 'gpt-5.6-sol[high]' }],
+      },
+      usage: { totalTokens: 24237, cachedTokens: 11008 },
+      notices: ['Warning: skills were shortened.'],
+      resumeWith: 'codex resume',
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    // Asides in order: the agent's own first, then what it cost, then the
+    // handoff back to a terminal. Rounded, because what a member does with a
+    // token count is notice a turn that cost ten times the last one.
+    assert.deepEqual(posts[1]!.notices, [
+      'Warning: skills were shortened.',
+      '`gpt-5.6-sol[high]` · 24.2k tokens · 11k cached',
+      '`codex resume acp-1`',
+    ]);
+  });
+
+  it('corrects the record when the agent could not take a file it was sent', async () => {
+    // The acknowledgement promised the member it was reading them, and only this
+    // layer knows how a filename renders here — so the driver names them and
+    // this words it, backtick stripped like every other name.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      fileBytes: 'x',
+      unsupported: [
+        { name: 'we`ird.csv', kind: 'text' },
+        { name: 'shot.png', kind: 'image' },
+      ],
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'read this',
+        files: [
+          { name: 'we`ird.csv', filetype: 'csv', size: 1, url_private_download: 'https://f/a.csv' },
+        ],
+      },
+      deps,
+    );
+    // One sentence per kind: an image and a CSV are refused for different
+    // reasons, and naming them together would misdescribe one of them.
+    assert.deepEqual(posts[1]!.notices, [
+      'we ird.csv did not reach kilo: it takes no text attachments.',
+      'shot.png did not reach kilo: it takes no image attachments.',
+    ]);
+  });
+
+  it('sheds a model from another agent’s roster, which would fail every turn', async () => {
+    // `selectModelConfigOption` throws for kilo/devin/claude, so a codex id left
+    // stored would fail the thread forever — a failed turn posts no picker.
+    const { deps, posts, sheds } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, model: 'gpt-5.6-sol[high]' },
+      fails: new Error(
+        'acp:kilo slack-conv-1: model "gpt-5.6-sol[high]" is not offered by the agent; first offers: x',
+      ),
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(sheds, ['model:conv-1']);
+    assert.match(posts[1]!.text, /no longer offers `gpt-5\.6-sol\[high\]`.*retry with its default/);
+  });
+
+  it('says nothing about cost when the agent reported no total', async () => {
+    // An invented number is worse than none, and agents other than codex
+    // report nothing here at all.
+    const { deps, posts } = harness({ existing: CONVERSATION, usage: { cachedTokens: 12 } });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.equal(posts[1]!.notices, undefined);
   });
 
   it('names read-only for a workspace turn that picked nothing, picker included', async () => {
@@ -337,7 +567,7 @@ describe('dm message', () => {
     assert.match(posts[0]!.text, /in `symma` — `read-only` mode/);
     // The first workspace turn is exactly where the picker has to appear, or
     // there is no way to ever leave read-only.
-    assert.deepEqual(posts[1]!.modePicker, { conversation: 'conv-1', modes: roster });
+    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
   });
 
   it('sheds a mode the agent stopped offering, and says so', async () => {
@@ -353,7 +583,7 @@ describe('dm message', () => {
     // Without the shed this thread fails every turn from here on: the picker
     // that could fix it only rides answers, and there is no answer.
     assert.deepEqual(sheds, ['conv-1']);
-    assert.match(posts[1]!.text, /no longer offers `yolo` mode.*retry read-only/);
+    assert.match(posts[1]!.text, /no longer offers `yolo`.*retry with its default/);
     assert.equal(finished[0]!.status, 'failed');
   });
 
@@ -370,7 +600,7 @@ describe('dm message', () => {
     );
     // A stale mode still stored means the retry fails the same way — saying
     // "cleared" here would promise a recovery that did not happen.
-    assert.match(posts[1]!.text, /could not clear it/);
+    assert.match(posts[1]!.text, /no longer offers `yolo`, and I could not clear it/);
   });
 
   it('offers no picker outside a named workspace, wherever the roster came from', async () => {
@@ -384,7 +614,7 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'hi' },
       deps,
     );
-    assert.equal(posts[1]!.modePicker, undefined);
+    assert.equal(posts[1]!.pickers, undefined);
   });
 
   it('names the model as `provider/model`, which is the only shape that parses', async () => {
@@ -423,7 +653,7 @@ describe('dm message', () => {
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /in `weird` — `read-only` mode\./);
+    assert.match(posts[0]!.text, /in `weird` — `read-only` mode…/);
     // Two spans — label and mode — each opened and closed; the mode span is
     // safe by the wire's alphabet, so only the label needed stripping.
     assert.equal(posts[0]!.text.split('`').length - 1, 4, 'both spans opened and closed');

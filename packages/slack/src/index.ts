@@ -1,17 +1,25 @@
 /**
  * The bot. Holds one outbound WebSocket to Slack and no agent credentials, and
- * spawns nothing (§6). One command, deliberately: model, provider, directory
- * and shell controls are all support and security surface, and this workflow
- * has not earned any of them yet.
+ * spawns nothing (§6). Still one command: the controls a member has — the
+ * directory, the session mode, the model — ride the answers as pickers built
+ * from what their own agent advertised, so none of them is a name the bot knows
+ * or a shell it can reach.
  */
 import { runRemotePrompt } from '@symma/client';
-import { isWriteCapableMode, type SessionModes, type TurnTarget } from '@symma/protocol';
+import {
+  isWriteCapableMode,
+  type SessionModels,
+  type SessionModes,
+  type TurnUsage,
+  type TurnTarget,
+} from '@symma/protocol';
 
 import { connectMessage, runConnect, type MintResult } from './connect.js';
+import type { SlackFile } from './attachments.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
-import { slackApi, MODE_ACTION, SHARE_ACTION } from './slack-api.js';
+import { slackApi, MODE_ACTION, MODEL_ACTION, SHARE_ACTION } from './slack-api.js';
 import { readTurnTarget } from './turn-target.js';
 import { socketMode } from './socket-mode.js';
 
@@ -161,10 +169,16 @@ const depsFor = (user: string) => {
       mode,
       resume,
       context,
+      onProgress,
+      attachments,
     }: RunSpec) => {
       const notices: string[] = [];
       let session = '';
+      let resumeWith: string | undefined;
       let modes: SessionModes | undefined;
+      let models: SessionModels | undefined;
+      let usage: TurnUsage | undefined;
+      let unsupported: { name: string; kind: string }[] | undefined;
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -175,8 +189,16 @@ const depsFor = (user: string) => {
           agent,
           runId: conversation,
           onNotice: (notice) => notices.push(notice),
-          onSession: (id) => (session = id),
+          onSession: (id, cli) => {
+            session = id;
+            if (cli) resumeWith = cli;
+          },
           onModes: (roster) => (modes = roster),
+          onModels: (roster) => (models = roster),
+          onUsage: (spent) => (usage = spent),
+          onUnsupported: (files) => (unsupported = files),
+          ...(onProgress ? { onProgress } : {}),
+          ...(attachments ? { attachments } : {}),
           ...(resume ? { resume } : {}),
           ...(context ? { context } : {}),
           ...(workspace ? { workspace } : {}),
@@ -187,7 +209,16 @@ const depsFor = (user: string) => {
         `slack-${conversation}`,
         log,
       );
-      return { text, notices, session, ...(modes ? { modes } : {}) };
+      return {
+        text,
+        notices,
+        session,
+        ...(resumeWith ? { resumeWith } : {}),
+        ...(modes ? { modes } : {}),
+        ...(models ? { models } : {}),
+        ...(usage ? { usage } : {}),
+        ...(unsupported ? { unsupported } : {}),
+      };
     },
     finish: async (
       conversation: string,
@@ -222,6 +253,11 @@ const depsFor = (user: string) => {
     shedMode: async (conversation: string) => {
       await ask('/api/slack/mode', { user, conversation, mode: null });
     },
+    shedModel: async (conversation: string) => {
+      await ask('/api/slack/model', { user, conversation, model: null });
+    },
+    working: api.working,
+    fetchFile: api.fetchFile,
   };
 };
 
@@ -254,6 +290,7 @@ const connection = socketMode({
               ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
               eventId,
               text: typeof dm.text === 'string' ? dm.text : '',
+              ...(Array.isArray(dm.files) ? { files: dm.files as SlackFile[] } : {}),
             },
             {
               find: deps.findDm,
@@ -263,6 +300,9 @@ const connection = socketMode({
               run: deps.run,
               finish: deps.finish,
               shedMode: deps.shedMode,
+              shedModel: deps.shedModel,
+              working: deps.working,
+              fetchFile: deps.fetchFile,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,
@@ -305,37 +345,50 @@ const connection = socketMode({
           selected_option?: { value?: unknown };
         }[];
       };
-      // The mode picker: the selection names a conversation and a mode, and
+      // Either picker: the selection names a conversation and a chosen id, and
       // whether that conversation is this member's is the gateway's check —
       // the payload claims nothing the store does not verify.
-      const picked = actions?.find((a) => a.action_id === MODE_ACTION)?.selected_option?.value;
+      const chose = actions?.find(
+        (a) => a.action_id === MODE_ACTION || a.action_id === MODEL_ACTION,
+      );
+      const picked = chose?.selected_option?.value;
       if (typeof picked === 'string') {
+        const choice = chose?.action_id === MODEL_ACTION ? 'model' : 'mode';
         const who = user?.id;
         const where = channel?.id;
         const messageTs = message?.ts;
         const thread = typeof message?.thread_ts === 'string' ? message.thread_ts : messageTs;
         if (typeof who !== 'string' || typeof where !== 'string' || typeof thread !== 'string')
           return;
-        let selection: { c?: unknown; m?: unknown };
+        let selection: { c?: unknown; m?: unknown; a?: unknown };
         try {
-          selection = JSON.parse(picked) as { c?: unknown; m?: unknown };
+          selection = JSON.parse(picked) as { c?: unknown; m?: unknown; a?: unknown };
         } catch {
           return;
         }
-        const { c: conversationId, m: modeId } = selection;
-        if (typeof conversationId !== 'string' || typeof modeId !== 'string') return;
-        await announcing(who, 'mode', async () => {
-          await ask('/api/slack/mode', { user: who, conversation: conversationId, mode: modeId });
-          // Writes named out loud: the mode is their machine's permission
-          // tier, not a cosmetic setting.
+        const { c: conversationId, m: chosenId } = selection;
+        if (typeof conversationId !== 'string' || typeof chosenId !== 'string') return;
+        await announcing(who, choice, async () => {
+          await ask(`/api/slack/${choice}`, {
+            user: who,
+            conversation: conversationId,
+            [choice]: chosenId,
+            // Whose roster the model came from; the gateway serves it back only
+            // to that agent, since an id means nothing under another.
+            ...(typeof selection.a === 'string' ? { agent: selection.a } : {}),
+          });
+          // Writes named out loud: a mode is their machine's permission tier,
+          // not a cosmetic setting. A model is only ever a preference.
           await api.post(
             where,
-            `Mode set: \`${modeId}\` — applies from your next message.${
-              isWriteCapableMode(modeId) ? ' Writes are enabled in this workspace.' : ''
-            }`,
+            choice === 'mode'
+              ? `Mode set: \`${chosenId}\` — applies from your next message.${
+                  isWriteCapableMode(chosenId) ? ' Writes are enabled in this workspace.' : ''
+                }`
+              : `Model set: \`${chosenId}\` — applies from your next message.`,
             thread,
           );
-          return `set ${modeId} on ${conversationId}`;
+          return `set ${choice} ${chosenId} on ${conversationId}`;
         });
         return;
       }

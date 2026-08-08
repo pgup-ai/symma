@@ -91,6 +91,9 @@ export interface TurnTarget extends SelectedEndpoint {
   /** The conversation's session mode; absent is read-only. Served only for a
    * named workspace on an endpoint whose hello advertised modes for the agent. */
   mode?: string;
+  /** The model this conversation runs on, off the agent's own roster; absent
+   * leaves the agent's configured default. */
+  model?: string;
 }
 
 /**
@@ -169,6 +172,11 @@ export interface AckControl {
   workspace?: string;
   requirePlanMode?: boolean;
   modelCandidates?: string[];
+  /** How this agent's sessions are picked up locally — the command's verb, which
+   * a caller completes with the session id. Only agents whose sessions outlive
+   * the run have one, and it is what lets a member carry a turn from chat to
+   * their own terminal. */
+  resumeWith?: string;
 }
 
 export interface CloseControl {
@@ -190,6 +198,12 @@ export interface GoodbyeControl {
 export type RelayControl = HelloControl | OpenControl | AckControl | CloseControl | GoodbyeControl;
 
 const str = (v: unknown): v is string => typeof v === 'string';
+
+/** Every local resume command a spec supplies today. A closed set rather than a
+ * shape: `<word> resume` would still let an endpoint name a shell, and this
+ * value is rendered to a member as something to paste. One entry per agent that
+ * grows a resumable session. */
+const RESUME_COMMANDS = new Set(['codex resume']);
 
 /** Parse one control line; undefined for frames and malformed input. */
 export function parseRelayControl(line: string): RelayControl | undefined {
@@ -297,6 +311,13 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         if (Array.isArray(raw.modelCandidates) && raw.modelCandidates.every(str)) {
           ack.modelCandidates = raw.modelCandidates as string[];
         }
+        // A caller renders this beside a session id as a command a member can
+        // paste, so the shape is pinned here rather than trusted: `<cli> resume`
+        // and nothing else. A compromised endpoint is shut down and rotated
+        // (invariant 3), but it must not get a free line into someone's shell on
+        // the way there.
+        if (str(raw.resumeWith) && RESUME_COMMANDS.has(raw.resumeWith))
+          ack.resumeWith = raw.resumeWith;
       }
       return control;
     }
