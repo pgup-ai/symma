@@ -78,6 +78,27 @@ describe('attachments', () => {
     ]);
   });
 
+  it('does not let refusals spend the budget the readable files need', async () => {
+    // Five unreadable attachments ahead of the CSV a member actually wanted: the
+    // cap counts what was sent, so the sixth still travels.
+    const { fetchFile } = downloads(() => ({ ok: true, bytes: Buffer.from('a,b') }));
+    const junk = Array.from({ length: 5 }, (_, i) =>
+      file({
+        name: `book${String(i)}.xlsx`,
+        mimetype: 'application/vnd.ms-excel',
+        filetype: 'xlsx',
+      }),
+    );
+    const got = await collectAttachments(
+      [...junk, file({ name: 'rows.csv', mimetype: 'text/csv', filetype: 'csv' })],
+      fetchFile,
+    );
+    assert.deepEqual(
+      got.filter((entry) => entry.ok).map((entry) => (entry.ok ? entry.file.name : '')),
+      ['rows.csv'],
+    );
+  });
+
   it('turns a refused download into a line rather than a failed turn', async () => {
     const { fetchFile } = downloads(() => ({ ok: false, status: 403 }));
     const got = await collectAttachments([file()], fetchFile);

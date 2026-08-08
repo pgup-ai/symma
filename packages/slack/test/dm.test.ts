@@ -461,6 +461,34 @@ describe('dm message', () => {
     assert.deepEqual(runs, []);
   });
 
+  it('corrects the reading promise even when the run never finished', async () => {
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      fileBytes: 'x',
+      fails: new Error('agent exited 1'),
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'read these',
+        files: [
+          { name: 'a.md', filetype: 'md', size: 1, url_private_download: 'https://f/a.md' },
+          { name: 'b.xlsx', filetype: 'xlsx', size: 1, url_private_download: 'https://f/b.xlsx' },
+        ],
+      },
+      deps,
+    );
+    // The acknowledgement promised to read them; a turn that never reached the
+    // agent leaves that standing unless the failure says otherwise.
+    assert.match(posts[0]!.text, /Reading `a\.md`/);
+    assert.deepEqual(posts[1]!.notices, [
+      'Could not read b.xlsx (xlsx is not something I can pass along).',
+    ]);
+  });
+
   it('says what the turn cost, beside the model that charged it', async () => {
     const { deps, posts } = harness({
       existing: CONVERSATION,

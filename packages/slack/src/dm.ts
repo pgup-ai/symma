@@ -459,6 +459,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
           : `The agent no longer offers \`${dropped}\`, and I could not clear it. Send it again and I will keep trying.`
         : 'That run did not finish. Send it again and I will retry.',
       conversation.rootThread,
+      undefined,
+      // The acknowledgement named the files it fetched, and a turn that never
+      // reached the agent leaves that promise standing — so what could not be
+      // read is said here too, where the member is deciding whether to resend.
+      skippedNote(attached),
     );
     return 'failed';
   }

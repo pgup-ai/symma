@@ -115,10 +115,12 @@ export async function collectAttachments(
   let spent = 0;
   for (const file of files) {
     const name = str(file.name, 'file');
-    // Examined, not succeeded: counting only the successes would let fifty
-    // attached files each cost a classify and a download.
-    if (out.length >= MAX_FILES) {
-      out.push({ ok: false, name, why: `only the first ${String(MAX_FILES)} files were read` });
+    // Counted on what was sent, not what was looked at: five refusals ahead of
+    // the readable file a member actually wanted must not spend their budget on
+    // work nobody did. The cost of looking is a Set lookup, and the cost of
+    // fetching is bounded twice over below — per file, and across the turn.
+    if (out.filter((entry) => entry.ok).length >= MAX_FILES) {
+      out.push({ ok: false, name, why: `only the first ${String(MAX_FILES)} files were sent` });
       continue;
     }
     const kind = classify(file);
