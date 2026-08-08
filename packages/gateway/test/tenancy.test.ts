@@ -1440,6 +1440,50 @@ describe('tenancy', () => {
     }
   });
 
+  it('remembers the model per workspace, brackets and all', async () => {
+    const url = pg.getConnectionUri();
+    const mo = await provision(url, { team: 'ws', slackUser: 'mo', endpoint: 'mo-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const post = (path: string, body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'mo', ...body }),
+      });
+    const ask = async (conversation: string): Promise<Record<string, string>> =>
+      (await (await post('/api/slack/endpoint', { conversation })).json()) as Record<string, string>;
+    let detach: (() => void) | undefined;
+    try {
+      detach = await attach(mo.endpointToken, 'mo-box', ['kilo'], [{ id: 'eeeeeeeeeeee', label: 'symma' }]);
+      const first = await waitFor(async () => {
+        const opened = await store.openConversation(mo.owner, {
+          dmChannel: 'D-mo',
+          rootThread: '1.0',
+        });
+        return opened?.id;
+      }, 'a conversation to set a model on');
+
+      assert.equal((await ask(first)).model, undefined);
+      // The bracketed effort codex-acp folds into its ids has no room in
+      // `isSafeId`'s alphabet, so the model route takes the wider one.
+      assert.equal((await post('/api/slack/model', { conversation: first, model: 'gpt-5.6-sol[high]' })).status, 200);
+      assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]');
+      // No capability gate, unlike mode: `open.model` has always been on the
+      // wire, and a stale id costs a default rather than a refusal.
+      assert.equal((await ask(first)).mode, undefined);
+
+      // Inherited by the next thread in the same root, same as mode.
+      const second = (await store.openConversation(mo.owner, { dmChannel: 'D-mo', rootThread: '2.0' }))!.id;
+      assert.equal((await ask(second)).model, 'gpt-5.6-sol[high]');
+
+      // And still bounded: a quote would ride into the child's environment.
+      assert.equal((await post('/api/slack/model', { conversation: first, model: 'bad"id' })).status, 400);
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
   it('refuses a spent code, and a companion with nothing to run', async () => {
     const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });

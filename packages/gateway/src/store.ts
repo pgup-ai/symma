@@ -43,6 +43,15 @@ export type TurnOpened = { turn: string } | { refused: 'duplicate' | 'busy' };
  * thread until somebody notices. */
 const TURN_STALE_MINUTES = 30;
 
+/** The per-conversation selections a member makes in the DM root. Both are
+ * remembered and inherited the same way, so they share one implementation —
+ * this is the closed set that names their columns, never a caller's string. */
+export type ConversationChoice = 'mode' | 'model';
+const CHOICE_COLUMN: Record<ConversationChoice, string> = {
+  mode: 'mode_id',
+  model: 'model_id',
+};
+
 /** What an agent session id is only meaningful against (§4). */
 export interface ResumeKey {
   endpoint: string;
@@ -64,6 +73,9 @@ export interface Conversation {
    * back where it can be honored — a named workspace on an endpoint whose
    * hello advertised modes for the agent. */
   modeId?: string;
+  /** The model this thread runs on, off the agent's own roster; absent leaves
+   * the member's configured default. */
+  modelId?: string;
   /** Where a share goes back to, captured when the mention opened this (§5).
    * Absent for a conversation that began in the DM and has nowhere to return
    * to. Held here rather than travelling with the button, so a destination is
@@ -178,17 +190,30 @@ export interface Store {
   /** Records what this conversation ran on, so the next turn in the thread lands
    * on the same project (§4) rather than wherever the endpoint lists first. */
   bindConversation(owner: Owner, conversation: string, workspaceId: string): Promise<void>;
-  /** Records the mode this conversation runs under, chosen by its member in
-   * the DM root; `null` clears this one row (a workspace change shedding the
-   * old root's pick). Applies from the next turn. */
-  bindConversationMode(owner: Owner, conversation: string, modeId: string | null): Promise<void>;
-  /** Clears the mode across the conversation's whole workspace. A clear
-   * scoped to one row is not enough where it matters — `lastModeFor` would
-   * refill the same dead mode from a sibling thread on the very next turn. */
-  shedWorkspaceMode(owner: Owner, conversation: string): Promise<void>;
-  /** What this member last picked for a workspace, so a new thread there
-   * starts where they left off rather than back at read-only every time. */
-  lastModeFor(owner: Owner, workspaceId: string): Promise<string | undefined>;
+  /** Records what its member picked for this conversation; `null` clears this
+   * one row (a workspace change shedding the old root's pick). Applies from
+   * the next turn. */
+  bindConversationChoice(
+    owner: Owner,
+    conversation: string,
+    choice: ConversationChoice,
+    value: string | null,
+  ): Promise<void>;
+  /** Clears a choice across the conversation's whole workspace. Scoped to one
+   * row it would not hold where it matters — `lastChoiceFor` refills the same
+   * dead value from a sibling thread on the very next turn. */
+  shedWorkspaceChoice(
+    owner: Owner,
+    conversation: string,
+    choice: ConversationChoice,
+  ): Promise<void>;
+  /** What this member last picked for a workspace, so a new thread there starts
+   * where they left off rather than back at the default every time. */
+  lastChoiceFor(
+    owner: Owner,
+    workspaceId: string,
+    choice: ConversationChoice,
+  ): Promise<string | undefined>;
   /** The agent session this conversation last ran in, or undefined when it ran
    * somewhere this one cannot reach. A session id means nothing off the machine
    * that minted it, and little under a different agent or in another directory,
@@ -245,8 +270,9 @@ interface Row {
   root: string;
   seen: string | null;
   workspace: string | null;
-  /** Selected only by `conversationForId`; the other lookups never read it. */
+  /** Selected only by `conversationForId`; the other lookups never read them. */
   mode?: string | null;
+  model?: string | null;
   sourceChannel: string | null;
   sourceThread: string | null;
 }
@@ -257,6 +283,7 @@ const conversationFrom = (row: Row): Conversation => ({
   ...seen(row.seen),
   ...(row.workspace ? { workspaceId: row.workspace } : {}),
   ...(row.mode ? { modeId: row.mode } : {}),
+  ...(row.model ? { modelId: row.model } : {}),
   ...(row.sourceChannel && row.sourceThread
     ? { source: { channel: row.sourceChannel, thread: row.sourceThread } }
     : {}),
@@ -623,7 +650,7 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async conversationForId(owner, conversation) {
       const row = await one<Row>(
         `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
-                workspace_id AS workspace, mode_id AS mode,
+                workspace_id AS workspace, mode_id AS mode, model_id AS model,
                 source_channel_id AS "sourceChannel", source_thread_ts AS "sourceThread"
            FROM conversations
           WHERE user_id = $1 AND id = $2`,
@@ -637,36 +664,38 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [owner, conversation, workspaceId],
       );
     },
-    async bindConversationMode(owner, conversation, modeId) {
-      // A pick is also activity: the touch is what makes `lastModeFor` mean
+    async bindConversationChoice(owner, conversation, choice, value) {
+      const column = CHOICE_COLUMN[choice];
+      // A pick is also activity: the touch is what makes `lastChoiceFor` mean
       // "last chosen" rather than "attached to whichever thread spoke most
       // recently" — a re-pick on a quiet thread must win inheritance. A clear
       // is not a pick, and bumps nothing.
       await pool.query(
-        modeId === null
-          ? `UPDATE conversations SET mode_id = NULL WHERE id = $2 AND user_id = $1`
-          : `UPDATE conversations SET mode_id = $3, last_activity_at = now()
+        value === null
+          ? `UPDATE conversations SET ${column} = NULL WHERE id = $2 AND user_id = $1`
+          : `UPDATE conversations SET ${column} = $3, last_activity_at = now()
               WHERE id = $2 AND user_id = $1`,
-        modeId === null ? [owner, conversation] : [owner, conversation, modeId],
+        value === null ? [owner, conversation] : [owner, conversation, value],
       );
     },
-    async shedWorkspaceMode(owner, conversation) {
+    async shedWorkspaceChoice(owner, conversation, choice) {
       await pool.query(
-        `UPDATE conversations SET mode_id = NULL
+        `UPDATE conversations SET ${CHOICE_COLUMN[choice]} = NULL
           WHERE user_id = $1
             AND (id = $2 OR (workspace_id IS NOT NULL AND workspace_id =
               (SELECT workspace_id FROM conversations WHERE user_id = $1 AND id = $2)))`,
         [owner, conversation],
       );
     },
-    async lastModeFor(owner, workspaceId) {
-      const row = await one<{ mode: string }>(
-        `SELECT mode_id AS mode FROM conversations
-          WHERE user_id = $1 AND workspace_id = $2 AND mode_id IS NOT NULL
+    async lastChoiceFor(owner, workspaceId, choice) {
+      const column = CHOICE_COLUMN[choice];
+      const row = await one<{ value: string }>(
+        `SELECT ${column} AS value FROM conversations
+          WHERE user_id = $1 AND workspace_id = $2 AND ${column} IS NOT NULL
           ORDER BY last_activity_at DESC LIMIT 1`,
         [owner, workspaceId],
       );
-      return row?.mode;
+      return row?.value;
     },
     async resumeFor(owner, conversation, key) {
       // Joined through `conversations` for the owner check: the resume table
@@ -986,9 +1015,9 @@ export function localStore(
     endpointsFor: needsDatabase,
     mintClientToken: needsDatabase,
     bindConversation: needsDatabase,
-    bindConversationMode: needsDatabase,
-    shedWorkspaceMode: needsDatabase,
-    lastModeFor: needsDatabase,
+    bindConversationChoice: needsDatabase,
+    shedWorkspaceChoice: needsDatabase,
+    lastChoiceFor: needsDatabase,
     conversationForId: needsDatabase,
     recordResume: needsDatabase,
     resumeFor: needsDatabase,

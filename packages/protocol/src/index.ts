@@ -77,7 +77,7 @@ export {
   verifyJournalLines,
 } from './envelope-signature.js';
 
-export { isSafeId } from './ids.js';
+export { isSafeId, isSafeModelId } from './ids.js';
 export {
   assertValidKiloAuth,
   isKiloProvider,

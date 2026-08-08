@@ -91,6 +91,9 @@ export interface TurnTarget extends SelectedEndpoint {
   /** The conversation's session mode; absent is read-only. Served only for a
    * named workspace on an endpoint whose hello advertised modes for the agent. */
   mode?: string;
+  /** The model this conversation runs on, off the agent's own roster; absent
+   * leaves the agent's configured default. */
+  model?: string;
 }
 
 /**
