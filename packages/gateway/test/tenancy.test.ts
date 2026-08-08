@@ -1471,7 +1471,14 @@ describe('tenancy', () => {
         return opened?.id;
       }, 'a conversation to set a model on');
 
-      assert.equal((await ask(first)).model, undefined);
+      // Waited on, not assumed: a model is served only for a selected endpoint
+      // offering a root, so asserting on one that has not attached yet passes
+      // for the wrong reason and races whatever comes after it.
+      const ready = await waitFor(async () => {
+        const served = await ask(first);
+        return served.workspace === 'eeeeeeeeeeee' ? served : undefined;
+      }, 'the endpoint serving its workspace');
+      assert.equal(ready.model, undefined);
       // The bracketed effort codex-acp folds into its ids has no room in
       // `isSafeId`'s alphabet, so the model route takes the wider one.
       assert.equal(
