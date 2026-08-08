@@ -183,6 +183,29 @@ describe('slack api', () => {
     assert.equal(sent.get('text'), 'the answer');
   });
 
+  it('stops a download at the ceiling even when nothing declared its size', async () => {
+    // Chunked, no content-length: measuring after the read would mean buffering
+    // whatever a member chose to upload before anything could refuse it.
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024)),
+      cancel: () => {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = (() =>
+      Promise.resolve(new Response(body, { status: 200 }))) as unknown as typeof fetch;
+    const got = await slackApi('xoxb-test', { fetch: fetchImpl }).fetchFile(
+      'https://files/huge.log',
+      128 * 1024,
+    );
+    // `pulled` is what the caller charges the turn for: three 64kB chunks read
+    // before the fourth would have crossed the cap. An upstream 413 reports none,
+    // and that difference is the whole reason it is on the wire.
+    assert.deepEqual(got, { ok: false, status: 413, pulled: 192 * 1024 });
+    assert.equal(cancelled, true, 'the socket is dropped rather than drained');
+  });
+
   it('renders the mode picker off the roster, current selection marked', async () => {
     const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
     await slackApi('xoxb-test', { fetch: fetchImpl }).post(
@@ -193,12 +216,22 @@ describe('slack api', () => {
       undefined,
       {
         conversation: 'conv-1',
+        agent: 'codex',
         modes: {
           currentModeId: 'agent',
           availableModes: [
             { id: 'read-only', name: 'Read-only' },
             { id: 'agent', name: 'Agent' },
             { id: 'agent-full-access' },
+          ],
+        },
+        // Model ids carry a bracketed reasoning effort, which the mode
+        // alphabet has no room for — so this one rides its own check.
+        models: {
+          currentModelId: 'gpt-5.6-sol[high]',
+          availableModels: [
+            { modelId: 'gpt-5.6-sol[high]', name: 'GPT-5.6-Sol (high)' },
+            { modelId: 'gpt-5.4-mini[low]' },
           ],
         },
       },
@@ -213,11 +246,26 @@ describe('slack api', () => {
         initial_option?: { value: string };
       }[];
     }[];
-    const select = blocks
-      .find((b) => b.type === 'actions')
-      ?.elements?.find((e) => e.type === 'static_select');
+    const selects = blocks.find((b) => b.type === 'actions')?.elements ?? [];
+    const select = selects.find((e) => e.action_id === 'set_conversation_mode');
     assert.ok(select, 'the picker rides the answer');
-    assert.equal(select.action_id, 'set_conversation_mode');
+    const modelPick = selects.find((e) => e.action_id === 'set_conversation_model');
+    assert.deepEqual(
+      modelPick!.options!.map((o) => o.text.text),
+      ['GPT-5.6-Sol (high)', 'gpt-5.4-mini[low]'],
+      'bracketed ids survive the wider alphabet, and the id stands in for a missing name',
+    );
+    // The model option carries whose roster it came from: an id means nothing
+    // under another agent, and the gateway serves it back only to this one.
+    assert.deepEqual(JSON.parse(modelPick!.options![0]!.value), {
+      c: 'conv-1',
+      m: 'gpt-5.6-sol[high]',
+      a: 'codex',
+    });
+    // The mode select carries none — a mode id is the agent's own vocabulary
+    // either way, and the gateway gates it on the hello advertisement.
+    assert.deepEqual(JSON.parse(select.options![0]!.value), { c: 'conv-1', m: 'read-only' });
+    assert.deepEqual(modelPick!.initial_option, modelPick!.options![0]);
     // The agent's names verbatim, the id where it gave none — never our copy.
     assert.deepEqual(
       select.options!.map((o) => o.text.text),
@@ -226,6 +274,36 @@ describe('slack api', () => {
     assert.deepEqual(JSON.parse(select.options![1]!.value), { c: 'conv-1', m: 'agent' });
     // Slack accepts initial_option only when it deep-equals one of the options.
     assert.deepEqual(select.initial_option, select.options![1]);
+  });
+
+  it('offers no model picker for an agent the gateway cannot be told about', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'a',
+      '200.0',
+      undefined,
+      undefined,
+      {
+        conversation: 'conv-1',
+        // A custom `name=cmd` entry can be called anything; the model route takes
+        // an agent only in the wire's alphabet.
+        agent: 'my agent',
+        modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },
+        models: { currentModelId: 'a', availableModels: [{ modelId: 'a' }] },
+      },
+    );
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      elements?: { action_id?: string }[];
+    }[];
+    const actions = blocks.find((b) => b.type === 'actions')?.elements ?? [];
+    // The mode picker still rides — it carries no agent — but a model picker
+    // whose every selection would 400 is worse than none.
+    assert.deepEqual(
+      actions.map((e) => e.action_id),
+      ['set_conversation_mode'],
+    );
   });
 
   it('bounds the picker to what Slack will post and what can round-trip', async () => {
@@ -245,6 +323,7 @@ describe('slack api', () => {
       undefined,
       {
         conversation: 'c'.repeat(36),
+        agent: 'codex',
         modes: {
           currentModeId: 'mode-149',
           availableModes: [{ id: 'not safe' }, { id: oversized }, ...flood],

@@ -178,6 +178,12 @@ const as = (token: string, path: string, init?: RequestInit): Promise<Response> 
     headers: { authorization: `Bearer ${token}`, ...init?.headers },
   });
 
+/** Read a leg the test only means to hold open. Not optional: an unconsumed
+ * response body is unreachable, and undici destroys the socket when GC takes it
+ * — which the gateway reads as the peer detaching. A two-core runner collects
+ * mid-suite where a laptop never does, so skipping this fails only in CI. */
+const drain = (res: Response): Promise<unknown> => res.body!.pipeTo(new WritableStream());
+
 /** Attach a companion for `endpoint` and leave its SSE leg open. */
 const attach = async (
   token: string,
@@ -189,7 +195,9 @@ const attach = async (
   void fetch(`${base}/api/endpoints/${endpoint}/stream`, {
     headers: { authorization: `Bearer ${token}` },
     signal: abort.signal,
-  }).catch(() => undefined);
+  })
+    .then(drain)
+    .catch(() => undefined);
   await as(token, `/api/endpoints/${endpoint}/ingest`, {
     method: 'POST',
     body: `${JSON.stringify({
@@ -703,6 +711,7 @@ describe('tenancy', () => {
       headers: { authorization: `Bearer ${jo.clientToken}` },
       signal: abort.signal,
     });
+    void drain(held).catch(() => undefined);
     try {
       assert.equal(held.status, 200);
       assert.equal((await as(kim.clientToken, '/api/sessions/sid-claim/stream')).status, 404);
@@ -838,7 +847,6 @@ describe('tenancy', () => {
           () => true,
         ),
       )) === true;
-    const drain = (res: Response): Promise<unknown> => res.body!.pipeTo(new WritableStream());
     try {
       // A `hello` and then a body that never ends: the already-authenticated
       // leg an SSE-only sweep leaves usable for frames and for a re-`hello`.
@@ -864,14 +872,20 @@ describe('tenancy', () => {
         duplex: 'half',
         signal: legs.signal,
       } as RequestInit);
-      const survivor = await fetch(`${base}/api/endpoints/nia-box/stream`, {
-        headers: { authorization: `Bearer ${again.endpointToken}` },
-        signal: legs.signal,
-      });
-      const doomedClient = await fetch(`${base}/api/sessions/sid-nia/stream`, {
-        headers: { authorization: `Bearer ${nia.clientToken}` },
-        signal: legs.signal,
-      });
+      // Drained from the moment they open, not at the assertion: the revocation
+      // below awaits a pool round-trip, and an unread leg may not survive it.
+      const survivor = drain(
+        await fetch(`${base}/api/endpoints/nia-box/stream`, {
+          headers: { authorization: `Bearer ${again.endpointToken}` },
+          signal: legs.signal,
+        }),
+      );
+      const doomedClient = drain(
+        await fetch(`${base}/api/sessions/sid-nia/stream`, {
+          headers: { authorization: `Bearer ${nia.clientToken}` },
+          signal: legs.signal,
+        }),
+      );
 
       const pool = new Pool({ connectionString: url });
       try {
@@ -883,10 +897,10 @@ describe('tenancy', () => {
       }
 
       assert.equal(await closes(doomedIngest, 3000), true, 'ingest leg outlived its token');
-      assert.equal(await closes(drain(doomedClient), 3000), true, 'client leg outlived its token');
+      assert.equal(await closes(doomedClient, 3000), true, 'client leg outlived its token');
       // Same endpoint, different token, still serving: a revocation that took
       // the siblings with it would be an outage dressed as a security fix.
-      assert.equal(await closes(drain(survivor), 400), false, 'sibling token dropped too');
+      assert.equal(await closes(survivor, 400), false, 'sibling token dropped too');
     } finally {
       legs.abort();
     }
@@ -1434,6 +1448,200 @@ describe('tenancy', () => {
         const served = await ask(first);
         return served.mode === 'agent' ? off : (off(), undefined);
       }, 'the stored pick came back with the advertisement');
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
+  it('remembers the model per workspace, brackets and all', async () => {
+    const url = pg.getConnectionUri();
+    const mo = await provision(url, { team: 'ws', slackUser: 'mo', endpoint: 'mo-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const post = (path: string, body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'mo', ...body }),
+      });
+    const ask = async (conversation: string): Promise<Record<string, string>> =>
+      (await (await post('/api/slack/endpoint', { conversation })).json()) as Record<
+        string,
+        string
+      >;
+    let detach: (() => void) | undefined;
+    try {
+      detach = await attach(
+        mo.endpointToken,
+        'mo-box',
+        ['kilo'],
+        [{ id: 'eeeeeeeeeeee', label: 'symma' }],
+      );
+      const first = await waitFor(async () => {
+        const opened = await store.openConversation(mo.owner, {
+          dmChannel: 'D-mo',
+          rootThread: '1.0',
+        });
+        return opened?.id;
+      }, 'a conversation to set a model on');
+
+      // Waited on, not assumed: a model is served only for a selected endpoint
+      // offering a root, so asserting on one that has not attached yet passes
+      // for the wrong reason and races whatever comes after it.
+      const ready = await waitFor(async () => {
+        const served = await ask(first);
+        return served.workspace === 'eeeeeeeeeeee' ? served : undefined;
+      }, 'the endpoint serving its workspace');
+      assert.equal(ready.model, undefined);
+      // The bracketed effort codex-acp folds into its ids has no room in
+      // `isSafeId`'s alphabet, so the model route takes the wider one.
+      assert.equal(
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'gpt-5.6-sol[high]',
+            // Whose roster it came from — served back only to this agent.
+            agent: 'kilo',
+          })
+        ).status,
+        200,
+      );
+      assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]');
+      // No capability gate, unlike mode: `open.model` has always been on the
+      // wire, and a stale id costs a default rather than a refusal.
+      assert.equal((await ask(first)).mode, undefined);
+
+      // Inherited by the next thread in the same root, same as mode.
+      const second = (await store.openConversation(mo.owner, {
+        dmChannel: 'D-mo',
+        rootThread: '2.0',
+      }))!.id;
+      assert.equal((await ask(second)).model, 'gpt-5.6-sol[high]');
+
+      // And still bounded: a quote would ride into the child's environment.
+      assert.equal(
+        (await post('/api/slack/model', { conversation: first, model: 'bad"id' })).status,
+        400,
+      );
+
+      // A pick with no roster named is refused, not stored: it could never be
+      // served, and "Model set" over a change that never applies is worse than
+      // a failure the member sees.
+      assert.equal(
+        (await post('/api/slack/model', { conversation: first, model: 'mini[low]' })).status,
+        400,
+      );
+
+      // A model id belongs to the roster it came from: picked under kilo, it is
+      // not offered to an endpoint now serving codex — that turn would spawn
+      // with a model this agent refuses, and the agents that take it at spawn
+      // (codex's config, cursor/gemini/opencode's argv) cannot say why.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['codex']);
+        return (await ask(first)).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving codex');
+      assert.equal((await ask(first)).model, undefined, 'another agent’s id is not served');
+
+      // A shed clears the provenance with the value: a row naming the agent of a
+      // model it no longer holds is a fact nothing can act on.
+      const pool = new Pool({ connectionString: url });
+      try {
+        assert.equal(
+          (await post('/api/slack/model', { conversation: first, model: null })).status,
+          200,
+        );
+        assert.deepEqual(
+          (
+            await pool.query<{ model_id: string | null; model_agent: string | null }>(
+              `SELECT model_id, model_agent FROM conversations WHERE id = $1`,
+              [first],
+            )
+          ).rows,
+          [{ model_id: null, model_agent: null }],
+        );
+      } finally {
+        await pool.end();
+      }
+      // Put it back for what follows.
+      assert.equal(
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'gpt-5.6-sol[high]',
+            agent: 'kilo',
+          })
+        ).status,
+        200,
+      );
+
+      // An agent switch in the *same* root serves what that agent last used
+      // there without spending the row's one slot on it: the member's kilo pick
+      // is still theirs when kilo comes back.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['kilo'],
+          [{ id: 'eeeeeeeeeeee', label: 'symma' }],
+        );
+        return (await ask(first)).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving kilo in the same root');
+      assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]', 'the kilo pick survived codex');
+
+      // And a root change sheds it even while that other agent is selected —
+      // otherwise switching back to kilo later would find its model waiting in
+      // a project it was never picked for.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['codex'],
+          [{ id: 'aaaabbbbcccc', label: 'elsewhere' }],
+        );
+        return (await ask(first)).workspace === 'aaaabbbbcccc' ? off : (off(), undefined);
+      }, 'the endpoint reattached under codex with a different root');
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['kilo']);
+        return (await ask(first)).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving kilo again');
+      assert.equal((await ask(first)).model, undefined, 'the root change shed it regardless');
+
+      // A changed root sheds the model exactly as it sheds the mode: a pick made
+      // for one project must not follow the thread into another.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['kilo'],
+          [{ id: 'ffffffffffff', label: 'other' }],
+        );
+        return (await ask(first)).workspace === 'ffffffffffff' ? off : (off(), undefined);
+      }, 'the endpoint reattached with a different root');
+      assert.equal((await ask(first)).model, undefined, 'the old root model did not travel');
+
+      // But with no root at all there is nothing to scope a pick to, and the
+      // picker still offers one — so the row's own model is what that turn runs.
+      assert.equal(
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'mini[low]',
+            agent: 'kilo',
+          })
+        ).status,
+        200,
+      );
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['kilo']);
+        return (await ask(first)).workspace === undefined ? off : (off(), undefined);
+      }, 'the endpoint reattached offering no root');
+      assert.equal((await ask(first)).model, 'mini[low]');
     } finally {
       detach?.();
       await store.close();

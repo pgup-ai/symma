@@ -344,6 +344,21 @@ export interface AcpSessionOptions {
    * and endpoint-attributed — so it passes none rather than posting the same
    * frames a second time, unsigned, under a different id. */
   tee?: (dir: 'out' | 'in', frame: Record<string, unknown>) => void;
+  /** Files to hand the agent with the prompt. The caller fetches and classifies
+   * them; this only checks the agent said it can read each kind. */
+  attachments?: PromptAttachment[];
+  /** What the agent is doing right now, at its own pace — a chatty turn emits
+   * far more of these than any surface wants, so the caller throttles. */
+  onProgress?: (title: string) => void;
+}
+
+/** One file travelling with a prompt: `text` is the contents as they are,
+ * `image` is base64, which is what ACP's image block takes. */
+export interface PromptAttachment {
+  name: string;
+  mimeType: string;
+  kind: 'text' | 'image';
+  data: string;
 }
 
 export interface ModelOptionCandidate {
@@ -386,6 +401,54 @@ export interface SessionModes {
   availableModes: SessionMode[];
 }
 
+/** One entry of the agent's model roster. codex-acp 1.1.7 folds reasoning
+ * effort into the id — `gpt-5.6-sol[high]` — so a model and its effort are one
+ * choice here, exactly as codex itself presents them. */
+export interface SessionModel {
+  modelId: string;
+  name?: string;
+  description?: string;
+}
+
+/** Mirrors `SessionModes`: ACP serves both selectors the same shape. */
+export interface SessionModels {
+  currentModelId?: string;
+  availableModels: SessionModel[];
+}
+
+/** What one turn cost. Every field is optional because this is the agent's
+ * accounting, not the protocol's — codex-acp 1.1.7 serves all of them, another
+ * agent may serve none, and a caller must not invent a total. */
+export interface TurnUsage {
+  totalTokens?: number;
+  /** Input served from the model's cache — the difference between a cheap
+   * follow-up and an expensive one. */
+  cachedTokens?: number;
+}
+
+/** Keeps only the numbers the agent actually gave. codex-acp 1.1.7 spells
+ * cached reads `cachedReadTokens` (live-probed) where ACP says
+ * `cachedInputTokens`, so both are read rather than guessed between. */
+function readUsage(raw: unknown): TurnUsage | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const source = raw as Record<string, unknown>;
+  const count = (...names: string[]): number | undefined => {
+    for (const name of names) {
+      const value = source[name];
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    }
+    return undefined;
+  };
+  const usage: TurnUsage = {
+    ...pick('totalTokens', count('totalTokens')),
+    ...pick('cachedTokens', count('cachedReadTokens', 'cachedInputTokens')),
+  };
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+const pick = (key: keyof TurnUsage, value: number | undefined): Partial<TurnUsage> =>
+  value === undefined ? {} : { [key]: value };
+
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
@@ -401,6 +464,13 @@ export interface AcpSessionResult {
   /** Present when the agent served a mode roster — what a caller's member can
    * pick from next turn. */
   modes?: SessionModes;
+  /** The same, for models. */
+  models?: SessionModels;
+  /** What the turn cost, when the agent said so. */
+  usage?: TurnUsage;
+  /** Attachments this agent advertised no block for, so the caller can say so
+   * in its own words — it is the one that promised its member they were read. */
+  unsupported?: { name: string; kind: PromptAttachment['kind'] }[];
 }
 
 /**
@@ -424,6 +494,9 @@ export async function driveAcpSession(
   let lastMessageId: unknown;
   let seenChunk = false;
   let usesMessageIds = false;
+  /** True from the `session/load` request until this turn's prompt goes out, so
+   * the previous turn's replayed tool calls are never narrated as this one's. */
+  let replaying = false;
   const flush = () => {
     if (current.trim()) segments.push({ id: lastMessageId, text: current });
     current = '';
@@ -446,8 +519,21 @@ export async function driveAcpSession(
         lastMessageId = messageId;
         const content = update.content as { type?: string; text?: string } | undefined;
         if (content?.type === 'text' && typeof content.text === 'string') current += content.text;
-      } else if ((kind === 'tool_call' || kind === 'tool_call_update') && !usesMessageIds) {
-        flush();
+      } else if (kind === 'tool_call' || kind === 'tool_call_update') {
+        // `tool_call` carries the title, an update usually only a status — so a
+        // missing one is skipped rather than reported as a blank step.
+        // `session/load` replays the whole previous turn as these frames, and
+        // narrating it would show the wrong turn moving.
+        if (!replaying && typeof update.title === 'string' && update.title) {
+          // Inside the connection's message loop: a renderer that throws here
+          // would take the turn with it, and progress is only a hint.
+          try {
+            options.onProgress?.(update.title);
+          } catch (error) {
+            log(`acp:${agent} ${label}: progress sink threw, dropping one: ${String(error)}`);
+          }
+        }
+        if (!usesMessageIds) flush();
       }
     },
     (method, params) => {
@@ -511,6 +597,12 @@ export async function driveAcpSession(
   let session: Record<string, unknown> | undefined;
   if (options.resume !== undefined && loadable) {
     try {
+      // Held until the prompt is sent rather than until the load resolves: the
+      // frames worth narrating are the ones this turn causes, and nothing
+      // between the two is a step a member wants to watch. It also means a
+      // replay that trails its own response — this driver already drains for
+      // that ordering after `session/prompt` — cannot narrate the turn before.
+      replaying = true;
       const loaded = (await withAuth('session/load', () =>
         conn.request('session/load', {
           sessionId: options.resume,
@@ -550,6 +642,27 @@ export async function driveAcpSession(
   }
   if (options.configOptionModelIds?.length) {
     await selectModelConfigOption(conn, sessionId, session, options);
+  }
+  // The ACP model selector, for agents that serve one (codex-acp 1.1.7 does;
+  // its ids fold reasoning effort in). Applied by exact roster id — never by
+  // splitting the id apart, so whatever the member was shown is what runs.
+  const served = session.models as
+    { currentModelId?: string; availableModels?: Record<string, unknown>[] } | undefined;
+  const models = (served?.availableModels ?? []).flatMap((entry): SessionModel[] =>
+    typeof entry.modelId === 'string'
+      ? [
+          {
+            modelId: entry.modelId,
+            ...(typeof entry.name === 'string' ? { name: entry.name } : {}),
+            ...(typeof entry.description === 'string' ? { description: entry.description } : {}),
+          },
+        ]
+      : [],
+  );
+  const wanted = options.model === undefined ? undefined : parseModelName(options.model).modelID;
+  const offeredModel = models.some((entry) => entry.modelId === wanted) ? wanted : undefined;
+  if (offeredModel !== undefined && served?.currentModelId !== offeredModel) {
+    await conn.request('session/set_model', { sessionId, modelId: offeredModel });
   }
   const modes = session.modes as
     { currentModeId?: string; availableModes?: Record<string, unknown>[] } | undefined;
@@ -605,9 +718,45 @@ export async function driveAcpSession(
       }
     }
   }
+  // Attachments lead, question last — the way round a human would write it.
+  // Only kinds the agent advertised are sent (codex-acp 1.1.7 serves both): a
+  // block it cannot read fails the whole prompt, losing the question too.
+  // Nested under `agentCapabilities`, where the spec puts it and where
+  // codex-acp 1.1.7 was observed to serve it. The top level is read too, for an
+  // agent that flattens it.
+  const promptCapabilities = ((
+    init?.agentCapabilities as { promptCapabilities?: unknown } | undefined
+  )?.promptCapabilities ??
+    init?.promptCapabilities ??
+    {}) as Record<string, unknown>;
+  const carries = (file: PromptAttachment): boolean =>
+    promptCapabilities[file.kind === 'image' ? 'image' : 'embeddedContext'] === true;
+  const attached = (options.attachments ?? [])
+    .filter(carries)
+    .map((file): Record<string, unknown> =>
+      file.kind === 'image'
+        ? { type: 'image', mimeType: file.mimeType, data: file.data }
+        : {
+            type: 'resource',
+            // Encoded: a name with a space or a `#` would otherwise make a URI
+            // a stricter consumer can reject, dropping the file it names.
+            resource: {
+              uri: `symma://attachment/${encodeURIComponent(file.name)}`,
+              mimeType: file.mimeType,
+              text: file.data,
+            },
+          },
+    );
+  // Named rather than phrased: the caller has already told its member it was
+  // reading these, and only the caller knows how its surface renders a filename.
+  const unsupported = (options.attachments ?? [])
+    .filter((file) => !carries(file))
+    .map((file) => ({ name: file.name, kind: file.kind }));
+  replaying = false;
   const result = (await conn.request('session/prompt', {
     sessionId,
     prompt: [
+      ...attached,
       {
         type: 'text',
         text:
@@ -640,15 +789,28 @@ export async function driveAcpSession(
   // fail open") — an aside shown as the answer is recoverable, a lost answer is
   // not — so the asides are taken back rather than returning silence.
   const kept = answered.length ? answered : segments;
+  const usage = readUsage(result?.usage);
   const finalMode =
     options.mode ?? (typeof modes?.currentModeId === 'string' ? modes.currentModeId : undefined);
   return {
     text: (kept[kept.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
     sessionId,
+    ...(usage ? { usage } : {}),
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
+    ...(unsupported.length ? { unsupported } : {}),
     ...(roster.length
       ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
+      : {}),
+    ...(models.length
+      ? {
+          models: {
+            ...((offeredModel ?? served?.currentModelId)
+              ? { currentModelId: offeredModel ?? served?.currentModelId }
+              : {}),
+            availableModels: models,
+          },
+        }
       : {}),
   };
 }
@@ -780,6 +942,10 @@ export interface AcpAgentSpec {
   requirePlanMode?: boolean;
   /** Advertised in hello: sessions honor a caller-chosen mode (§4). */
   modes?: boolean;
+  /** How a member picks this agent's session up in their own terminal. Only for
+   * agents whose sessions are addressable after the run — codex writes a
+   * rollout under the home it ran in, so its id is still good there. */
+  resumeWith?: string;
 }
 export function cursorAcpSpec(apiKey: string): AcpAgentSpec {
   return {
@@ -867,6 +1033,16 @@ export function kiloAcpSpec(auth: string): AcpAgentSpec {
   };
 }
 
+/** Splits codex-acp's roster id into the config keys codex itself takes. A
+ * plain id (the review path's `gpt-5.2-codex`) carries no effort and leaves the
+ * member's configured one alone. */
+function codexModelConfig(modelID: string): Record<string, string> {
+  const bracketed = modelID.match(/^(.+)\[([^[\]]+)\]$/);
+  return bracketed
+    ? { model: bracketed[1]!, model_reasoning_effort: bracketed[2]! }
+    : { model: modelID };
+}
+
 /** `codexHome` is the member's own — only `auth.json` is read out of it.
  * `runHome` is symma's, and persists; see `prepareCodexRunHome`. */
 export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
@@ -890,7 +1066,11 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
       delete env.MODEL_PROVIDER;
       const { modelID } = parseModelName(model);
       if (modelID === 'default') delete env.CODEX_CONFIG;
-      else env.CODEX_CONFIG = JSON.stringify({ model: modelID });
+      // codex-acp's roster ids fold reasoning effort in (`gpt-5.6-sol[high]`),
+      // while the config takes the pair apart — live-probed both ways on
+      // 1.1.7. Splitting here pins the session on the model the member picked
+      // at spawn, so the driver's `session/set_model` has nothing left to do.
+      else env.CODEX_CONFIG = JSON.stringify(codexModelConfig(modelID));
       // Always pinned: live-probed on codex-acp 1.1.7, an unpinned session
       // opens in `agent` — write-capable — not read-only and not the config's
       // sandbox default.
@@ -899,6 +1079,11 @@ export function codexAcpSpec(codexHome: string, runHome: string): AcpAgentSpec {
       return { env };
     },
     modes: true,
+    // Live-probed on codex-cli 0.145: `codex resume <uuid>` addresses the
+    // rollout this session writes, so a Slack turn can be carried to a
+    // terminal. The picker lists it by first message rather than a generated
+    // name, which is why the id is worth handing over.
+    resumeWith: 'codex resume',
   };
 }
 
