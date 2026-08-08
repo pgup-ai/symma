@@ -8,7 +8,20 @@
  * up from this thread when it does not — both travel, because which applies is
  * not known until the agent has been asked (§4).
  */
-import type { SessionModels, SessionModes, TurnTarget, TurnUsage } from '@symma/protocol';
+import type {
+  PromptAttachment,
+  SessionModels,
+  SessionModes,
+  TurnTarget,
+  TurnUsage,
+} from '@symma/protocol';
+
+import {
+  collectAttachments,
+  skippedNote,
+  type FetchedFile,
+  type SlackFile,
+} from './attachments.js';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
@@ -25,6 +38,9 @@ export interface DmMessage {
   /** What they asked, as Slack sent it: `<@U123>` and `<#C123>` stay unresolved,
    * since expanding them is a lookup each and the question is about code. */
   text: string;
+  /** What they attached, as Slack described it. Fetched here rather than named
+   * in a transcript: an agent told a CSV exists can only say so back. */
+  files?: SlackFile[];
 }
 
 /**
@@ -78,6 +94,8 @@ export interface RunSpec {
   context?: string;
   /** What the agent is doing, for the acknowledgement to show while it runs. */
   onProgress?: (title: string) => void;
+  /** The member's own files, already fetched, for the agent to read. */
+  attachments?: PromptAttachment[];
 }
 
 /** How often the acknowledgement may be rewritten. `chat.update` is rate
@@ -149,6 +167,8 @@ export interface DmDeps {
    * the agent no longer offers it — the picker that could fix it only rides
    * answers, so without this the thread would fail every turn from here on. */
   shedMode: (conversation: string) => Promise<void>;
+  /** Downloads one of the member's Slack files. */
+  fetchFile: (url: string) => Promise<FetchedFile>;
   /** Rewrites the acknowledgement while the run is out, so a member watching a
    * long turn can see it is still moving. Fails open: this is a hint, and
    * losing one must not cost the answer it was a hint about. */
@@ -296,6 +316,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // thread is the half that cannot be recovered from (§4).
   const caught = existing ? await catchUp(message, conversation, deps) : undefined;
 
+  // Fetched before the run so a refusal is one aside rather than a failed turn,
+  // and after the endpoint check so a shut laptop costs no downloads.
+  const attached = message.files?.length
+    ? await collectAttachments(message.files, deps.fetchFile)
+    : [];
+  const attachments = attached.flatMap((entry) => (entry.ok ? [entry.file] : []));
+
   // A run has twenty minutes to answer, so silence that long reads as broken.
   // §4 wants the scope in the DM root rather than guessed at, so the answer
   // says which project it is about — or that it can see no files at all, which
@@ -313,7 +340,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
   const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
-  const ack = note ? `${scope} ${note}` : scope;
+  // Named up front: a member who attached three files and sees two read should
+  // learn it now, not from an answer that quietly used one.
+  const reading = attachments.length
+    ? `Reading ${attachments.map((file) => `\`${file.name.replaceAll('`', '')}\``).join(', ')}.`
+    : undefined;
+  const ack = [scope, note, reading].filter(Boolean).join(' ');
   const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
@@ -359,6 +391,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
       ...(decision.mode ? { mode: decision.mode } : {}),
+      ...(attachments.length ? { attachments } : {}),
     });
   } catch (error) {
     // Posted into the thread they are watching rather than left to the socket's
@@ -416,6 +449,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // is the one line that turns "it ran somewhere" into somewhere reachable.
       [
         ...answer.notices,
+        ...skippedNote(attached),
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
         ...(answer.resumeWith ? [`\`${answer.resumeWith} ${answer.session}\``] : []),
       ],

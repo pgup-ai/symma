@@ -344,10 +344,24 @@ export interface AcpSessionOptions {
    * and endpoint-attributed — so it passes none rather than posting the same
    * frames a second time, unsigned, under a different id. */
   tee?: (dir: 'out' | 'in', frame: Record<string, unknown>) => void;
+  /** Files to hand the agent with the prompt. The caller fetches and classifies
+   * them; this only decides whether the agent said it can read each kind. */
+  attachments?: PromptAttachment[];
   /** What the agent is doing right now, for a caller with somewhere to show it.
    * Titles only, at the agent's own pace — the caller throttles, since a
    * chatty turn emits far more of these than any surface wants to render. */
   onProgress?: (title: string) => void;
+}
+
+/** One file travelling with a prompt. `text` carries the file's contents as
+ * they are; `image` carries base64, which is what ACP's image block takes. The
+ * caller decides which a file is — this layer only asks whether the agent
+ * advertised the block it would need. */
+export interface PromptAttachment {
+  name: string;
+  mimeType: string;
+  kind: 'text' | 'image';
+  data: string;
 }
 
 export interface ModelOptionCandidate {
@@ -694,9 +708,34 @@ export async function driveAcpSession(
       }
     }
   }
+  // Attachments lead, question last: the agent reads the blocks in order, and
+  // an instruction that arrives after its material is the way round a human
+  // would write it. Only kinds the agent advertised are sent — `image` and
+  // `resource` are capability-gated (codex-acp 1.1.7 advertises both), and one
+  // it cannot read would fail the whole prompt rather than the attachment.
+  const promptCapabilities = (init?.promptCapabilities ?? {}) as Record<string, unknown>;
+  const attached = (options.attachments ?? []).flatMap((file): Record<string, unknown>[] =>
+    file.kind === 'image'
+      ? promptCapabilities.image === true
+        ? [{ type: 'image', mimeType: file.mimeType, data: file.data }]
+        : []
+      : promptCapabilities.embeddedContext === true
+        ? [
+            {
+              type: 'resource',
+              resource: {
+                uri: `symma://attachment/${file.name}`,
+                mimeType: file.mimeType,
+                text: file.data,
+              },
+            },
+          ]
+        : [],
+  );
   const result = (await conn.request('session/prompt', {
     sessionId,
     prompt: [
+      ...attached,
       {
         type: 'text',
         text:

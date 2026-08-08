@@ -15,6 +15,7 @@ import {
 } from '@symma/protocol';
 
 import { connectMessage, runConnect, type MintResult } from './connect.js';
+import type { SlackFile } from './attachments.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
@@ -169,6 +170,7 @@ const depsFor = (user: string) => {
       resume,
       context,
       onProgress,
+      attachments,
     }: RunSpec) => {
       const notices: string[] = [];
       let session = '';
@@ -194,6 +196,7 @@ const depsFor = (user: string) => {
           onModels: (roster) => (models = roster),
           onUsage: (spent) => (usage = spent),
           ...(onProgress ? { onProgress } : {}),
+          ...(attachments ? { attachments } : {}),
           ...(resume ? { resume } : {}),
           ...(context ? { context } : {}),
           ...(workspace ? { workspace } : {}),
@@ -248,6 +251,7 @@ const depsFor = (user: string) => {
       await ask('/api/slack/mode', { user, conversation, mode: null });
     },
     working: api.working,
+    fetchFile: api.fetchFile,
   };
 };
 
@@ -280,6 +284,7 @@ const connection = socketMode({
               ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
               eventId,
               text: typeof dm.text === 'string' ? dm.text : '',
+              ...(Array.isArray(dm.files) ? { files: dm.files as SlackFile[] } : {}),
             },
             {
               find: deps.findDm,
@@ -290,6 +295,7 @@ const connection = socketMode({
               finish: deps.finish,
               shedMode: deps.shedMode,
               working: deps.working,
+              fetchFile: deps.fetchFile,
               mark: api.mark,
               threadReplies: deps.threadReplies,
               destination: deps.destination,

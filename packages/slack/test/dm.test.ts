@@ -35,6 +35,8 @@ function harness(
     resumeWith?: string;
     /** What the agent said the turn cost. */
     usage?: TurnUsage;
+    /** What a file download hands back; absent is a download that fails. */
+    fileBytes?: string;
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
@@ -112,6 +114,12 @@ function harness(
       finished.push({ conversation, turn, status, ...ran });
       return Promise.resolve();
     },
+    fetchFile: () =>
+      Promise.resolve(
+        over.fileBytes === undefined
+          ? { ok: false, status: 404 }
+          : { ok: true, bytes: Buffer.from(over.fileBytes) },
+      ),
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
       return Promise.resolve();
@@ -378,6 +386,63 @@ describe('dm message', () => {
     runs[0]!.onProgress!('Running git log');
     assert.equal(updates.length, 1);
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', models });
+  });
+
+  it('hands the member’s own files to the agent, and names what it could not', async () => {
+    const { deps, posts, runs } = harness({ existing: CONVERSATION, fileBytes: 'a,b\n1,2\n' });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'what is in this?',
+        files: [
+          {
+            name: 'rows.csv',
+            mimetype: 'text/csv',
+            filetype: 'csv',
+            size: 8,
+            url_private_download: 'https://files/rows.csv',
+          },
+          { name: 'book.xlsx', mimetype: 'application/vnd.ms-excel', filetype: 'xlsx', size: 20 },
+        ],
+      },
+      deps,
+    );
+    // The readable one travels as content, not as a filename in a transcript —
+    // which is the whole difference from what v1 did.
+    assert.deepEqual(runs[0]!.attachments, [
+      { name: 'rows.csv', mimeType: 'text/csv', kind: 'text', data: 'a,b\n1,2\n' },
+    ]);
+    assert.match(posts[0]!.text, /Reading `rows\.csv`\./);
+    // And the one it could not read is said out loud rather than quietly
+    // missing from an answer that used the rest.
+    assert.deepEqual(posts[1]!.notices, [
+      'Could not read book.xlsx (xlsx is not something I can pass along).',
+    ]);
+  });
+
+  it('does not spend downloads on a machine that cannot take the turn', async () => {
+    const { deps, runs } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, state: 'asleep' },
+      fileBytes: 'x',
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'read this',
+        files: [
+          { name: 'a.md', filetype: 'md', size: 1, url_private_download: 'https://files/a.md' },
+        ],
+      },
+      deps,
+    );
+    assert.deepEqual(runs, [], 'refused before anything was fetched');
   });
 
   it('says what the turn cost, beside the model that charged it', async () => {

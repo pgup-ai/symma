@@ -9,6 +9,7 @@ import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } fro
 
 import { isSafeId, isSafeModelId, type SessionModels, type SessionModes } from '@symma/protocol';
 
+import type { FetchedFile } from './attachments.js';
 import type { ThreadMessage } from './snapshot.js';
 
 export interface SlackApi {
@@ -49,6 +50,10 @@ export interface SlackApi {
    * lands. Never throws: the mark is a hint, and losing one must not cost them
    * the answer it was a hint about. */
   mark: (channel: string, ts: string, state: MarkState) => Promise<void>;
+  /** Downloads one of Slack's own file URLs. `url_private_download` is not a
+   * public link — it needs the bot token as a bearer header, which is why this
+   * lives here and not in whatever wants the bytes. */
+  fetchFile: (url: string) => Promise<FetchedFile>;
   /** Publishes into the source thread. Returns why it could not rather than
    * throwing: §5 keeps the answer in the DM and names which of these happened,
    * and a publication that cannot land is not a lost answer. */
@@ -89,6 +94,9 @@ const MAX_PAGES = 20;
 /** Slack's own caps on a message. Exceeding either block one is a rejected post,
  * and a rejected post turns a finished run into a reported failure — which is
  * how an answer gets lost rather than merely mis-rendered. */
+/** A Slack file download is a CDN fetch, not an API call — bounded on its own
+ * because a stalled one would otherwise hold the whole turn. */
+const FILE_FETCH_TIMEOUT_MS = 20_000;
 const BLOCK_TEXT_LIMIT = 3000;
 const MESSAGE_BLOCK_LIMIT = 50;
 const FALLBACK_TEXT_LIMIT = 40_000;
@@ -368,6 +376,16 @@ export function slackApi(
         // is invisible otherwise, and the answer still arrives either way.
         options.log?.(`progress update failed: ${slackCode(error) ?? String(error)}`);
       }
+    },
+    async fetchFile(url) {
+      // The SDK covers `api.slack.com` calls; a file URL is plain HTTP with the
+      // same token, so it goes through fetch directly.
+      const res = await (options.fetch ?? fetch)(url, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(FILE_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) return { ok: false, status: res.status };
+      return { ok: true, bytes: Buffer.from(await res.arrayBuffer()) };
     },
     async settle(channel, ts, text) {
       try {

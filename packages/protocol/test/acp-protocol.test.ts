@@ -54,6 +54,10 @@ interface FakeAgentScript {
   /** First session/new fails -32000 until authenticate is called. */
   authGate?: boolean;
   capabilities?: Record<string, unknown>;
+  /** What the agent says it can be handed with a prompt. */
+  promptCapabilities?: Record<string, unknown>;
+  /** Every prompt block the agent received, for asserting what travelled. */
+  onPromptBlocks?: (blocks: Record<string, unknown>[]) => void;
   /** Answers session/load. Returning an error is an agent that has forgotten
    * the session; the replay it would otherwise send is the script's to write. */
   onLoad?: (agent: FakeAgentApi, authed: boolean) => Record<string, unknown>;
@@ -103,6 +107,7 @@ function fakeAgentIo(script: FakeAgentScript): {
           protocolVersion: 1,
           ...(script.authMethods ? { authMethods: script.authMethods } : {}),
           ...(script.capabilities ? { agentCapabilities: script.capabilities } : {}),
+          ...(script.promptCapabilities ? { promptCapabilities: script.promptCapabilities } : {}),
         },
       });
     } else if (method === 'authenticate') {
@@ -148,6 +153,7 @@ function fakeAgentIo(script: FakeAgentScript): {
     } else if (method === 'session/prompt') {
       promptId = id;
       const blocks = (message.params as { prompt?: { text?: string }[] }).prompt ?? [];
+      script.onPromptBlocks?.(blocks as Record<string, unknown>[]);
       script.onPrompt(agent, blocks.map((block) => block.text ?? '').join(''));
     } else if (method === undefined && id !== undefined) {
       script.onClientResponse?.(id, (message as { result?: unknown }).result, agent);
@@ -500,6 +506,52 @@ describe('acp', () => {
     );
     assert.deepEqual(steps, ['Reading dm.ts']);
     assert.equal(result.text, 'done');
+  });
+
+  it('sends attachments as the blocks the agent advertised, and only those', async () => {
+    const sent: Record<string, unknown>[][] = [];
+    const attachments = [
+      { name: 'rows.csv', mimeType: 'text/csv', kind: 'text' as const, data: 'a,b' },
+      { name: 'shot.png', mimeType: 'image/png', kind: 'image' as const, data: 'iVA=' },
+    ];
+    const drive = (promptCapabilities: Record<string, unknown>) =>
+      driveAcpSession(
+        fakeAgentIo({
+          promptCapabilities,
+          onPromptBlocks: (blocks) => sent.push(blocks),
+          onPrompt: (agent) => {
+            agent.update({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'ok' },
+            });
+            agent.finish();
+          },
+        }),
+        {
+          cwd: '/tmp',
+          prompt: 'what is this?',
+          agent: 'codex',
+          label: 't',
+          log: noLog,
+          attachments,
+        },
+      );
+
+    await drive({ embeddedContext: true, image: true });
+    // Material first, question last — the order a human would write it in.
+    assert.deepEqual(sent[0], [
+      {
+        type: 'resource',
+        resource: { uri: 'symma://attachment/rows.csv', mimeType: 'text/csv', text: 'a,b' },
+      },
+      { type: 'image', mimeType: 'image/png', data: 'iVA=' },
+      { type: 'text', text: 'what is this?' },
+    ]);
+
+    // An agent that advertised neither is sent neither: a block it cannot read
+    // would fail the whole prompt, costing the question as well as the file.
+    await drive({});
+    assert.deepEqual(sent[1], [{ type: 'text', text: 'what is this?' }]);
   });
 
   it('leaves the model alone when the roster does not hold it', async () => {

@@ -15,6 +15,7 @@ import {
   type AckControl,
   type EndpointPresence,
   type RefusalCode,
+  type PromptAttachment,
   type SessionModels,
   type SessionModes,
   type TurnUsage,
@@ -57,6 +58,8 @@ export interface RemoteAcpConfig {
   onModes?: (modes: SessionModes) => void;
   /** The same, for the model roster. */
   onModels?: (models: SessionModels) => void;
+  /** Files to hand the agent with the prompt; the caller fetched them. */
+  attachments?: PromptAttachment[];
   /** What the turn cost, when the agent reported it. */
   onUsage?: (usage: TurnUsage) => void;
   /** What the agent is doing right now, unthrottled — a caller rendering this
@@ -289,6 +292,7 @@ export async function runRemotePrompt(
             ...(ack.requirePlanMode ? { requirePlanMode: true } : {}),
             ...(config.mode !== undefined ? { mode: config.mode } : {}),
             ...(config.onProgress ? { onProgress: config.onProgress } : {}),
+            ...(config.attachments?.length ? { attachments: config.attachments } : {}),
             ...(config.resume !== undefined ? { resume: config.resume } : {}),
             ...(config.context !== undefined ? { context: config.context } : {}),
           },

@@ -25,6 +25,7 @@ export {
   type AcpSessionResult,
   type ModelOptionCandidate,
   type PermissionPolicy,
+  type PromptAttachment,
   type PermissionRequestParams,
   type PermissionResponse,
   type SessionMode,
