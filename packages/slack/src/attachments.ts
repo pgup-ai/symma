@@ -113,13 +113,14 @@ export async function collectAttachments(
 ): Promise<Attached[]> {
   const out: Attached[] = [];
   let spent = 0;
+  let carried = 0;
   for (const file of files) {
     const name = str(file.name, 'file');
     // Counted on what was sent, not what was looked at: five refusals ahead of
     // the readable file a member actually wanted must not spend their budget on
     // work nobody did. The cost of looking is a Set lookup, and the cost of
     // fetching is bounded twice over below — per file, and across the turn.
-    if (out.filter((entry) => entry.ok).length >= MAX_FILES) {
+    if (carried >= MAX_FILES) {
       out.push({ ok: false, name, why: `only the first ${String(MAX_FILES)} files were sent` });
       continue;
     }
@@ -147,12 +148,25 @@ export async function collectAttachments(
       out.push({ ok: false, name, why: `too big to send (${String(Math.round(size / 1024))}kB)` });
       continue;
     }
+    // The turn's ceiling, refused from the declaration for the same reason the
+    // per-file one is. Judged after the download it bounded only what was kept:
+    // every file past the ceiling was still pulled in full first, so twenty
+    // 400kB files spent 8MB of transfer to send two.
+    if (spent + size > MAX_TOTAL_BYTES) {
+      out.push({ ok: false, name, why: 'the files together were more than one turn can carry' });
+      continue;
+    }
     const url = str(file.url_private_download);
     if (!url) {
       out.push({ ok: false, name, why: 'Slack gave me no way to download it' });
       continue;
     }
-    const got = await fetchFile(url, MAX_FILE_BYTES).catch((): FetchedFile => ({ ok: false }));
+    // Capped at what is left of the turn, not at one file's share: a size Slack
+    // under-reported is then cut off at the ceiling rather than carried past it,
+    // which is why nothing weighs the bytes again once they are here.
+    const got = await fetchFile(url, Math.min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - spent)).catch(
+      (): FetchedFile => ({ ok: false }),
+    );
     if (!got.ok || !got.bytes) {
       out.push({
         ok: false,
@@ -161,11 +175,8 @@ export async function collectAttachments(
       });
       continue;
     }
-    if (spent + got.bytes.byteLength > MAX_TOTAL_BYTES) {
-      out.push({ ok: false, name, why: 'the files together were more than one turn can carry' });
-      continue;
-    }
     spent += got.bytes.byteLength;
+    carried += 1;
     out.push({
       ok: true,
       file: {

@@ -7,9 +7,14 @@ const downloads = (answer: (url: string) => { ok: boolean; bytes?: Buffer; statu
   const asked: string[] = [];
   return {
     asked,
-    fetchFile: (url: string) => {
+    // Caps like the real one, so a test can see what happens to a size Slack
+    // under-reported rather than only to one it declared honestly.
+    fetchFile: (url: string, maxBytes: number) => {
       asked.push(url);
-      return Promise.resolve(answer(url));
+      const got = answer(url);
+      return Promise.resolve(
+        got.bytes && got.bytes.byteLength > maxBytes ? { ok: false, status: 413 } : got,
+      );
     },
   };
 };
@@ -108,7 +113,7 @@ describe('attachments', () => {
   it('stops at the total budget rather than burying the question', async () => {
     // Each file passes the per-file bar; together they must not.
     const big = Buffer.alloc(400 * 1024, 'x');
-    const { fetchFile } = downloads(() => ({ ok: true, bytes: big }));
+    const { fetchFile, asked } = downloads(() => ({ ok: true, bytes: big }));
     const got = await collectAttachments(
       [
         file({ size: big.byteLength }),
@@ -120,6 +125,24 @@ describe('attachments', () => {
     assert.deepEqual(
       got.map((entry) => (entry.ok ? 'sent' : entry.why)),
       ['sent', 'sent', 'the files together were more than one turn can carry'],
+    );
+    // Refused from its declaration, not its bytes: a ceiling judged afterwards
+    // still pulled every file past it in full.
+    assert.equal(asked.length, 2);
+  });
+
+  it('cuts a size Slack under-reported off at the turn ceiling', async () => {
+    // 800kB sent, then a file that says 100kB and serves 400kB. Nothing weighs
+    // the bytes once they are here, so the fetch cap is the whole ceiling.
+    const big = Buffer.alloc(400 * 1024, 'x');
+    const { fetchFile } = downloads(() => ({ ok: true, bytes: big }));
+    const got = await collectAttachments(
+      [file({ size: big.byteLength }), file({ size: big.byteLength }), file({ size: 100 * 1024 })],
+      fetchFile,
+    );
+    assert.deepEqual(
+      got.map((entry) => (entry.ok ? 'sent' : entry.why)),
+      ['sent', 'sent', 'it turned out too big to send'],
     );
   });
 });

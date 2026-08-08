@@ -371,7 +371,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // Named up front: a member who attached three files and sees two read should
   // learn it now, not from an answer that quietly used one.
   const reading = attachments.length
-    ? `Reading ${attachments.map((file) => `\`${file.name.replaceAll('`', '')}\``).join(', ')}.`
+    ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
   // The trailing ellipsis is the standing "still going" cue, so it belongs on
   // the end of whatever the acknowledgement turned out to be — not on the scope
