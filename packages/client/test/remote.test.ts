@@ -16,12 +16,14 @@ const noLog = (): void => undefined;
 const REVIEW_AGENT = `
 let buf = '';
 let mode = 'read-only';
+let model = 'sol[high]';
 process.stdin.setEncoding('utf8');
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 const REVIEW = () => JSON.stringify({
   summary: 'remote review ok',
   cwd: process.cwd(),
   mode,
+  model,
   findings: [{ path: 'src/a.ts', line: 1, severity: 'P2', title: 'remote finding', body: 'b' }],
   addressedPriorComments: [],
 });
@@ -33,9 +35,11 @@ process.stdin.on('data', (c) => {
     if (!line.trim()) continue;
     const m = JSON.parse(line);
     if (m.id === undefined) continue;
-    if (m.method === 'session/new') out({ jsonrpc: '2.0', id: m.id, result: { sessionId: 'a1', modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }, { id: 'agent', name: 'Agent' }] } } });
+    if (m.method === 'session/new') out({ jsonrpc: '2.0', id: m.id, result: { sessionId: 'a1', modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }, { id: 'agent', name: 'Agent' }] }, models: { currentModelId: 'sol[high]', availableModels: [{ modelId: 'sol[high]' }, { modelId: 'mini[low]' }] } } });
     else if (m.method === 'session/set_mode') { mode = m.params.modeId; out({ jsonrpc: '2.0', id: m.id, result: {} }); }
+    else if (m.method === 'session/set_model') { model = m.params.modelId; out({ jsonrpc: '2.0', id: m.id, result: {} }); }
     else if (m.method === 'session/prompt') {
+      out({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'a1', update: { sessionUpdate: 'tool_call', title: 'Reading a.ts' } } });
       out({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'a1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: REVIEW() } } } });
       out({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } });
     } else out({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } });
@@ -192,6 +196,28 @@ describe('remote acp prompt', () => {
         currentModeId: 'agent',
         availableModes: [{ id: 'read-only' }, { id: 'agent', name: 'Agent' }],
       });
+
+      // The model travels the same wire, and the agent's own narration comes
+      // back for a caller with somewhere to show it.
+      let models: unknown;
+      const steps: string[] = [];
+      const picked = await runRemotePrompt(
+        {
+          ...config,
+          agent: 'probe',
+          runId: 'run-model',
+          workspace: id,
+          onModels: (roster) => (models = roster),
+          onProgress: (title) => steps.push(title),
+        },
+        'probe/mini[low]',
+        'PR CONTEXT',
+        'review',
+        noLog,
+      );
+      assert.equal((JSON.parse(picked) as { model: string }).model, 'mini[low]');
+      assert.equal((models as { currentModelId?: string }).currentModelId, 'mini[low]');
+      assert.deepEqual(steps, ['Reading a.ts']);
 
       // The reply above already proves the round trip; what only this test
       // covers is that it was journaled under the client's run id, one session

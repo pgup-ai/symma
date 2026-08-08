@@ -15,6 +15,7 @@ import {
   type AckControl,
   type EndpointPresence,
   type RefusalCode,
+  type SessionModels,
   type SessionModes,
 } from '@symma/protocol';
 
@@ -53,6 +54,11 @@ export interface RemoteAcpConfig {
   /** Receives the agent's mode roster when it serves one, for whoever renders
    * the member's picker. Absent drops it. */
   onModes?: (modes: SessionModes) => void;
+  /** The same, for the model roster. */
+  onModels?: (models: SessionModels) => void;
+  /** What the agent is doing right now, unthrottled — a caller rendering this
+   * anywhere rate-limited does its own throttling. */
+  onProgress?: (title: string) => void;
   /** Receives `AcpSessionResult.notices` — what the agent said about itself
    * rather than about the prompt. Absent drops them. */
   onNotice?: (notice: string) => void;
@@ -277,6 +283,7 @@ export async function runRemotePrompt(
             ...(ack.modelCandidates ? { configOptionModelIds: ack.modelCandidates } : {}),
             ...(ack.requirePlanMode ? { requirePlanMode: true } : {}),
             ...(config.mode !== undefined ? { mode: config.mode } : {}),
+            ...(config.onProgress ? { onProgress: config.onProgress } : {}),
             ...(config.resume !== undefined ? { resume: config.resume } : {}),
             ...(config.context !== undefined ? { context: config.context } : {}),
           },
@@ -302,6 +309,8 @@ export async function runRemotePrompt(
     deliver('session', () => config.onSession?.(result.sessionId));
     const roster = result.modes;
     if (roster) deliver('modes', () => config.onModes?.(roster));
+    const modelRoster = result.models;
+    if (modelRoster) deliver('models', () => config.onModels?.(modelRoster));
     for (const notice of result.notices) deliver('notice', () => config.onNotice?.(notice));
     if (!result.text) {
       throw new Error(
