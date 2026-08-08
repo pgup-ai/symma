@@ -568,7 +568,8 @@ describe('dm message', () => {
         currentModelId: 'gpt-5.6-sol[high]',
         availableModels: [{ modelId: 'gpt-5.6-sol[high]' }],
       },
-      usage: { totalTokens: 24237, cachedTokens: 11008 },
+      // Expensive by what the model had not seen: 108k of this was new to it.
+      usage: { totalTokens: 168_237, cachedTokens: 60_008 },
       notices: ['Warning: skills were shortened.'],
       resumeWith: 'codex resume',
     });
@@ -581,7 +582,7 @@ describe('dm message', () => {
     // token count is notice a turn that cost ten times the last one.
     assert.deepEqual(posts[1]!.notices, [
       'Warning: skills were shortened.',
-      '`gpt-5.6-sol[high]` · 24.2k tokens · 11k cached',
+      '`gpt-5.6-sol[high]` · 168.2k tokens · 60k cached',
       '`codex resume acp-1`',
     ]);
   });
@@ -637,15 +638,29 @@ describe('dm message', () => {
     assert.match(posts[1]!.text, /no longer offers `gpt-5\.6-sol\[high\]`.*retry with its default/);
   });
 
-  it('says nothing about cost when the agent reported no total', async () => {
-    // An invented number is worse than none, and agents other than codex
-    // report nothing here at all.
+  it('says nothing about cost with no total to report, or nothing to report it for', async () => {
+    // An invented number is worse than none, and agents other than codex report
+    // nothing here at all.
     const { deps, posts } = harness({ existing: CONVERSATION, usage: { cachedTokens: 12 } });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,
     );
     assert.equal(posts[1]!.notices, undefined);
+
+    // And a question answered out of context that was already there. 120k of
+    // repo and instructions, all but 2k of it cached: a bar on the total would
+    // call this expensive on the strength of a big `AGENTS.md`, which every turn
+    // in that workspace carries whether it did any work or not.
+    const cheap = harness({
+      existing: CONVERSATION,
+      usage: { totalTokens: 120_000, cachedTokens: 118_000 },
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-2', text: 'hello' },
+      cheap.deps,
+    );
+    assert.equal(cheap.posts[1]!.notices, undefined);
   });
 
   it('names read-only for a workspace turn that picked nothing, picker included', async () => {

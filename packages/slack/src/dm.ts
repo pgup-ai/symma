@@ -116,11 +116,21 @@ const asStep = (title: string): string =>
 const thousands = (tokens: number): string =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}k`;
 
+/** Measured on what was not cached, not on the total: the context a workspace
+ * turn carries is re-sent every turn whether it did any work or not, so a total
+ * crosses any bar the moment `AGENTS.md` is big, which is every turn. What is
+ * new to the model is what the turn actually chewed through — a few thousand for
+ * a question answered from context, an order more for one that read the repo. */
+const EXPENSIVE_TOKENS = 25_000;
+
 /** The cost beside the model that charged it — the two only mean something
  * together, now that the model is the member's own choice. Absent when the
- * agent reported no total: an invented number is worse than none. */
+ * agent reported no total: an invented number is worse than none. Absent for a
+ * cheap turn too, since a count on every answer is a number nobody reads and
+ * the point of it is noticing the turn that cost ten times the last one. */
 function spent(model: string | undefined, usage: TurnUsage | undefined): string[] | undefined {
   if (usage?.totalTokens === undefined) return undefined;
+  if (usage.totalTokens - (usage.cachedTokens ?? 0) < EXPENSIVE_TOKENS) return undefined;
   const parts = [
     ...(model ? [`\`${plainly(model)}\``] : []),
     `${thousands(usage.totalTokens)} tokens`,
