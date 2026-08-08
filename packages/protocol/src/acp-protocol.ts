@@ -405,6 +405,47 @@ export interface SessionModels {
   availableModels: SessionModel[];
 }
 
+/** What one turn cost, as the agent reported it on the prompt result. Every
+ * field is optional because this is the agent's accounting and not the
+ * protocol's: codex-acp 1.1.7 serves all of these, another agent may serve
+ * none, and a caller showing a total must not invent one. */
+export interface TurnUsage {
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  /** Input served from the model's cache — the difference between a cheap
+   * follow-up and an expensive one, so it is worth showing beside the total. */
+  cachedTokens?: number;
+  /** Reasoning tokens, which the effort suffix on a model id buys. */
+  thoughtTokens?: number;
+}
+
+/** Reads the agent's own numbers, keeping only the ones it actually gave.
+ * codex-acp spells cached reads `cachedReadTokens`; the ACP field is
+ * `cachedInputTokens`, so both are accepted rather than guessed between. */
+function readUsage(raw: unknown): TurnUsage | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const source = raw as Record<string, unknown>;
+  const count = (...names: string[]): number | undefined => {
+    for (const name of names) {
+      const value = source[name];
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    }
+    return undefined;
+  };
+  const usage: TurnUsage = {
+    ...pick('totalTokens', count('totalTokens')),
+    ...pick('inputTokens', count('inputTokens')),
+    ...pick('outputTokens', count('outputTokens')),
+    ...pick('cachedTokens', count('cachedReadTokens', 'cachedInputTokens')),
+    ...pick('thoughtTokens', count('thoughtTokens', 'reasoningOutputTokens')),
+  };
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+const pick = (key: keyof TurnUsage, value: number | undefined): Partial<TurnUsage> =>
+  value === undefined ? {} : { [key]: value };
+
 export interface AcpSessionResult {
   text: string;
   stopReason: string;
@@ -422,6 +463,8 @@ export interface AcpSessionResult {
   modes?: SessionModes;
   /** Present when the agent served a model roster, same purpose. */
   models?: SessionModels;
+  /** What the turn cost, when the agent said. */
+  usage?: TurnUsage;
 }
 
 /**
@@ -686,12 +729,14 @@ export async function driveAcpSession(
   // fail open") — an aside shown as the answer is recoverable, a lost answer is
   // not — so the asides are taken back rather than returning silence.
   const kept = answered.length ? answered : segments;
+  const usage = readUsage(result?.usage);
   const finalMode =
     options.mode ?? (typeof modes?.currentModeId === 'string' ? modes.currentModeId : undefined);
   return {
     text: (kept[kept.length - 1]?.text ?? '').trim(),
     stopReason: String(result?.stopReason ?? 'unknown'),
     sessionId,
+    ...(usage ? { usage } : {}),
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
     ...(roster.length
       ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }

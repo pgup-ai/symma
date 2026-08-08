@@ -8,7 +8,7 @@
  * up from this thread when it does not — both travel, because which applies is
  * not known until the agent has been asked (§4).
  */
-import type { SessionModels, SessionModes, TurnTarget } from '@symma/protocol';
+import type { SessionModels, SessionModes, TurnTarget, TurnUsage } from '@symma/protocol';
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
@@ -85,6 +85,26 @@ export interface RunSpec {
  * budget on frames nobody reads. */
 const PROGRESS_MIN_MS = 4_000;
 
+/** Thousands, because a token count read to the digit is noise: what a member
+ * does with this is notice a turn that cost ten times the last one. */
+const thousands = (tokens: number): string =>
+  tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+
+/** What the turn cost, beside the model that charged it — the two only mean
+ * something together now that the model is a member's own choice. Absent
+ * whenever the agent reported no total: an invented number is worse than none. */
+function spent(model: string | undefined, usage: TurnUsage | undefined): string[] | undefined {
+  if (usage?.totalTokens === undefined) return undefined;
+  const parts = [
+    ...(model ? [`\`${model}\``] : []),
+    `${thousands(usage.totalTokens)} tokens`,
+    // Cached input is the difference between a cheap follow-up and an
+    // expensive one, which is the one comparison worth surfacing unprompted.
+    ...(usage.cachedTokens ? [`${thousands(usage.cachedTokens)} cached`] : []),
+  ];
+  return [parts.join(' · ')];
+}
+
 /** What the answer can offer to change for the next turn, or nothing. */
 function pickers(
   conversation: string,
@@ -122,6 +142,8 @@ export interface DmDeps {
     resumeWith?: string;
     modes?: SessionModes;
     models?: SessionModels;
+    /** What the turn cost, when the agent said. */
+    usage?: TurnUsage;
   }>;
   /** Clears the conversation's stored mode. Called when a turn failed because
    * the agent no longer offers it — the picker that could fix it only rides
@@ -318,6 +340,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     resumeWith?: string;
     modes?: SessionModes;
     models?: SessionModels;
+    usage?: TurnUsage;
   };
   try {
     answer = await deps.run({
@@ -391,9 +414,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // The handoff back to the terminal, as an aside rather than in the answer:
       // the session the turn ran in is listed by the agent's own CLI, and this
       // is the one line that turns "it ran somewhere" into somewhere reachable.
-      answer.resumeWith
-        ? [...answer.notices, `\`${answer.resumeWith} ${answer.session}\``]
-        : answer.notices,
+      [
+        ...answer.notices,
+        ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
+        ...(answer.resumeWith ? [`\`${answer.resumeWith} ${answer.session}\``] : []),
+      ],
       // The picker renders the agent's own roster, so it exists exactly where
       // the agent serves one — and only inside a named workspace, the one
       // place a mode means anything (§4).

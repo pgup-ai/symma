@@ -17,6 +17,7 @@ import {
   type RefusalCode,
   type SessionModels,
   type SessionModes,
+  type TurnUsage,
 } from '@symma/protocol';
 
 const REMOTE_PROMPT_TIMEOUT_MS = 20 * 60_000;
@@ -56,6 +57,8 @@ export interface RemoteAcpConfig {
   onModes?: (modes: SessionModes) => void;
   /** The same, for the model roster. */
   onModels?: (models: SessionModels) => void;
+  /** What the turn cost, when the agent reported it. */
+  onUsage?: (usage: TurnUsage) => void;
   /** What the agent is doing right now, unthrottled — a caller rendering this
    * anywhere rate-limited does its own throttling. */
   onProgress?: (title: string) => void;
@@ -313,6 +316,8 @@ export async function runRemotePrompt(
     if (roster) deliver('modes', () => config.onModes?.(roster));
     const modelRoster = result.models;
     if (modelRoster) deliver('models', () => config.onModels?.(modelRoster));
+    const spent = result.usage;
+    if (spent) deliver('usage', () => config.onUsage?.(spent));
     for (const notice of result.notices) deliver('notice', () => config.onNotice?.(notice));
     if (!result.text) {
       throw new Error(

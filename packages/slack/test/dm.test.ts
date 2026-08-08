@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import type { SessionModels, SessionModes, TurnTarget } from '@symma/protocol';
+import type { SessionModels, SessionModes, TurnTarget, TurnUsage } from '@symma/protocol';
 
 import { handleDm, isMemberDm, type DmDeps, type RunSpec } from '../src/dm.js';
 import type { ThreadMessage } from '../src/snapshot.js';
@@ -33,6 +33,8 @@ function harness(
     shedFails?: boolean;
     /** How the agent's own CLI picks the session up, when it has a command. */
     resumeWith?: string;
+    /** What the agent said the turn cost. */
+    usage?: TurnUsage;
     fails?: Error;
     /** The DM thread a follow-up is caught up from; `null` is a channel the bot
      * cannot read. */
@@ -86,6 +88,7 @@ function harness(
             ...(over.modes ? { modes: over.modes } : {}),
             ...(over.models ? { models: over.models } : {}),
             ...(over.resumeWith ? { resumeWith: over.resumeWith } : {}),
+            ...(over.usage ? { usage: over.usage } : {}),
           });
     },
     find: () => Promise.resolve(over.existing),
@@ -375,6 +378,42 @@ describe('dm message', () => {
     runs[0]!.onProgress!('Running git log');
     assert.equal(updates.length, 1);
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', models });
+  });
+
+  it('says what the turn cost, beside the model that charged it', async () => {
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      models: {
+        currentModelId: 'gpt-5.6-sol[high]',
+        availableModels: [{ modelId: 'gpt-5.6-sol[high]' }],
+      },
+      usage: { totalTokens: 24237, inputTokens: 13224, cachedTokens: 11008, outputTokens: 5 },
+      notices: ['Warning: skills were shortened.'],
+      resumeWith: 'codex resume',
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    // Asides in order: the agent's own first, then what it cost, then the
+    // handoff back to a terminal. Rounded, because what a member does with a
+    // token count is notice a turn that cost ten times the last one.
+    assert.deepEqual(posts[1]!.notices, [
+      'Warning: skills were shortened.',
+      '`gpt-5.6-sol[high]` · 24.2k tokens · 11k cached',
+      '`codex resume acp-1`',
+    ]);
+  });
+
+  it('says nothing about cost when the agent reported no total', async () => {
+    // An invented number is worse than none, and agents other than codex
+    // report nothing here at all.
+    const { deps, posts } = harness({ existing: CONVERSATION, usage: { inputTokens: 12 } });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.equal(posts[1]!.notices, undefined);
   });
 
   it('names read-only for a workspace turn that picked nothing, picker included', async () => {

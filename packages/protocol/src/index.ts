@@ -31,6 +31,7 @@ export {
   type SessionModel,
   type SessionModels,
   type SessionModes,
+  type TurnUsage,
 } from './acp-protocol.js';
 
 export {

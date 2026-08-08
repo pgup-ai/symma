@@ -10,6 +10,7 @@ import {
   isWriteCapableMode,
   type SessionModels,
   type SessionModes,
+  type TurnUsage,
   type TurnTarget,
 } from '@symma/protocol';
 
@@ -174,6 +175,7 @@ const depsFor = (user: string) => {
       let resumeWith: string | undefined;
       let modes: SessionModes | undefined;
       let models: SessionModels | undefined;
+      let usage: TurnUsage | undefined;
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -190,6 +192,7 @@ const depsFor = (user: string) => {
           },
           onModes: (roster) => (modes = roster),
           onModels: (roster) => (models = roster),
+          onUsage: (spent) => (usage = spent),
           ...(onProgress ? { onProgress } : {}),
           ...(resume ? { resume } : {}),
           ...(context ? { context } : {}),
@@ -208,6 +211,7 @@ const depsFor = (user: string) => {
         ...(resumeWith ? { resumeWith } : {}),
         ...(modes ? { modes } : {}),
         ...(models ? { models } : {}),
+        ...(usage ? { usage } : {}),
       };
     },
     finish: async (
