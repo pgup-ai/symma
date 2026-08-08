@@ -572,6 +572,43 @@ describe('acp', () => {
     assert.deepEqual(bare.notices, []);
   });
 
+  it('does not narrate the turn a resume replayed at it', async () => {
+    const steps: string[] = [];
+    const fake = fakeAgentIo({
+      capabilities: { loadSession: true },
+      onLoad: (agent) => {
+        // What a resume replays: the previous turn's steps and its answer.
+        agent.update({ sessionUpdate: 'tool_call', title: 'Reading last time' });
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'the old answer' },
+        });
+        return { result: {} };
+      },
+      onPrompt: (agent) => {
+        agent.update({ sessionUpdate: 'tool_call', title: 'Reading this time' });
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'the new answer' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      resume: 'old-session',
+      onProgress: (title) => steps.push(title),
+    });
+    // Only this turn's step: narrating the replay would show the wrong turn
+    // moving on an acknowledgement the member is watching.
+    assert.deepEqual(steps, ['Reading this time']);
+    assert.equal(result.text, 'the new answer');
+  });
+
   it('encodes an attachment name into its uri', async () => {
     // A space or a `#` in a name would otherwise make a uri a stricter consumer
     // can reject, dropping the file it names.

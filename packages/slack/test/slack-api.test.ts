@@ -273,6 +273,36 @@ describe('slack api', () => {
     assert.deepEqual(select.initial_option, select.options![1]);
   });
 
+  it('offers no model picker for an agent the gateway cannot be told about', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
+    await slackApi('xoxb-test', { fetch: fetchImpl }).post(
+      'D-nel',
+      'a',
+      '200.0',
+      undefined,
+      undefined,
+      {
+        conversation: 'conv-1',
+        // A custom `name=cmd` entry can be called anything; the model route takes
+        // an agent only in the wire's alphabet.
+        agent: 'my agent',
+        modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },
+        models: { currentModelId: 'a', availableModels: [{ modelId: 'a' }] },
+      },
+    );
+    const blocks = JSON.parse(new URLSearchParams(String(seen[0])).get('blocks') ?? '[]') as {
+      type: string;
+      elements?: { action_id?: string }[];
+    }[];
+    const actions = blocks.find((b) => b.type === 'actions')?.elements ?? [];
+    // The mode picker still rides — it carries no agent — but a model picker
+    // whose every selection would 400 is worse than none.
+    assert.deepEqual(
+      actions.map((e) => e.action_id),
+      ['set_conversation_mode'],
+    );
+  });
+
   it('bounds the picker to what Slack will post and what can round-trip', async () => {
     const { fetchImpl, seen } = answering({ ok: true, channel: 'D-nel', ts: '1.0' });
     // 150 modes, one un-postable id (space fails the wire's alphabet) and one

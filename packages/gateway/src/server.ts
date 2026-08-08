@@ -959,8 +959,14 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           // so does an agent that cannot use this model — only a changed root
           // clears, which is why this reads `held` and not `usable`.
           const next = serve[choice] ?? (kept ? held[choice] : null);
-          if (next !== held[choice])
-            await store.bindConversationChoice(owner, conversation, choice, next, agent);
+          if (next === held[choice]) continue;
+          // Which is also why an inherited model is served without being stored
+          // when the row already holds another agent's: writing it would spend
+          // the one slot this row has on a preference the member never made
+          // here, and lose the one they did. Inheritance recomputes every turn,
+          // so nothing is lost by not writing it.
+          if (choice === 'model' && kept && held.model && row?.modelAgent !== agent) continue;
+          await store.bindConversationChoice(owner, conversation, choice, next, agent);
         }
       }
       const mode = serve.mode;

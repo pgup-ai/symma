@@ -251,21 +251,26 @@ const modelSelect = (
   models: SessionModels,
   agent: string,
 ): Record<string, unknown>[] =>
-  rosterSelect(
-    conversation,
-    MODEL_ACTION,
-    'Model',
-    models.availableModels.map((model) => ({
-      id: model.modelId,
-      label: model.name ?? model.modelId,
-      ...(model.description ? { about: model.description } : {}),
-      // Model ids carry a bracketed reasoning effort, so they need the wider
-      // alphabet — the same one the gateway's route accepts.
-      safe: isSafeModelId(model.modelId),
-    })),
-    models.currentModelId,
-    agent,
-  );
+  // A model pick is stored against the agent that offered it, and the gateway
+  // takes an agent name only in the wire's alphabet — a custom `name=cmd` entry
+  // can be called anything. No picker beats one whose every selection 400s.
+  !isSafeId(agent)
+    ? []
+    : rosterSelect(
+        conversation,
+        MODEL_ACTION,
+        'Model',
+        models.availableModels.map((model) => ({
+          id: model.modelId,
+          label: model.name ?? model.modelId,
+          ...(model.description ? { about: model.description } : {}),
+          // Model ids carry a bracketed reasoning effort, so they need the wider
+          // alphabet — the same one the gateway's route accepts.
+          safe: isSafeModelId(model.modelId),
+        })),
+        models.currentModelId,
+        agent,
+      );
 
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */

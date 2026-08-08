@@ -1529,6 +1529,21 @@ describe('tenancy', () => {
       }, 'the endpoint reattached serving codex');
       assert.equal((await ask(first)).model, undefined, 'another agent’s id is not served');
 
+      // An agent switch in the *same* root serves what that agent last used
+      // there without spending the row's one slot on it: the member's kilo pick
+      // is still theirs when kilo comes back.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['kilo'],
+          [{ id: 'eeeeeeeeeeee', label: 'symma' }],
+        );
+        return (await ask(first)).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving kilo in the same root');
+      assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]', 'the kilo pick survived codex');
+
       // And a root change sheds it even while that other agent is selected —
       // otherwise switching back to kilo later would find its model waiting in
       // a project it was never picked for.

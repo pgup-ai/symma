@@ -494,7 +494,8 @@ export async function driveAcpSession(
   let lastMessageId: unknown;
   let seenChunk = false;
   let usesMessageIds = false;
-  /** True while `session/load` is replaying the previous turn at us. */
+  /** True from the `session/load` request until this turn's prompt goes out, so
+   * the previous turn's replayed tool calls are never narrated as this one's. */
   let replaying = false;
   const flush = () => {
     if (current.trim()) segments.push({ id: lastMessageId, text: current });
@@ -596,6 +597,11 @@ export async function driveAcpSession(
   let session: Record<string, unknown> | undefined;
   if (options.resume !== undefined && loadable) {
     try {
+      // Held until the prompt is sent rather than until the load resolves: the
+      // frames worth narrating are the ones this turn causes, and nothing
+      // between the two is a step a member wants to watch. It also means a
+      // replay that trails its own response — this driver already drains for
+      // that ordering after `session/prompt` — cannot narrate the turn before.
       replaying = true;
       const loaded = (await withAuth('session/load', () =>
         conn.request('session/load', {
@@ -603,7 +609,7 @@ export async function driveAcpSession(
           cwd: options.cwd,
           mcpServers: [],
         }),
-      ).finally(() => (replaying = false))) as Record<string, unknown>;
+      )) as Record<string, unknown>;
       // Same `modes` and `configOptions` a new session returns — plan mode and
       // model selection read them off this, so a resume that dropped them
       // would fail closed on every agent whose read-only layer is plan mode.
@@ -746,6 +752,7 @@ export async function driveAcpSession(
   const unsupported = (options.attachments ?? [])
     .filter((file) => !carries(file))
     .map((file) => ({ name: file.name, kind: file.kind }));
+  replaying = false;
   const result = (await conn.request('session/prompt', {
     sessionId,
     prompt: [
