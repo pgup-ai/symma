@@ -1510,6 +1510,14 @@ describe('tenancy', () => {
         400,
       );
 
+      // A pick with no roster named is refused, not stored: it could never be
+      // served, and "Model set" over a change that never applies is worse than
+      // a failure the member sees.
+      assert.equal(
+        (await post('/api/slack/model', { conversation: first, model: 'mini[low]' })).status,
+        400,
+      );
+
       // A model id belongs to the roster it came from: picked under kilo, it is
       // not offered to an endpoint now serving codex — that turn would spawn
       // with a model this agent refuses, and the agents that take it at spawn
@@ -1520,6 +1528,26 @@ describe('tenancy', () => {
         return (await ask(first)).agent === 'codex' ? off : (off(), undefined);
       }, 'the endpoint reattached serving codex');
       assert.equal((await ask(first)).model, undefined, 'another agent’s id is not served');
+
+      // And a root change sheds it even while that other agent is selected —
+      // otherwise switching back to kilo later would find its model waiting in
+      // a project it was never picked for.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          mo.endpointToken,
+          'mo-box',
+          ['codex'],
+          [{ id: 'aaaabbbbcccc', label: 'elsewhere' }],
+        );
+        return (await ask(first)).workspace === 'aaaabbbbcccc' ? off : (off(), undefined);
+      }, 'the endpoint reattached under codex with a different root');
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['kilo']);
+        return (await ask(first)).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving kilo again');
+      assert.equal((await ask(first)).model, undefined, 'the root change shed it regardless');
 
       // A changed root sheds the model exactly as it sheds the mode: a pick made
       // for one project must not follow the thread into another.

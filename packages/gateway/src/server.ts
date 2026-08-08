@@ -908,48 +908,46 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const workspace = offered.find((w) => w.id === row?.workspaceId) ?? offered[0];
       const kept = workspace !== undefined && workspace.id === row?.workspaceId;
 
-      // The mode, by the workspace's own rule — except that a workspace change
-      // sheds the thread's pick instead of carrying it: write permission
-      // chosen for one directory must not follow the thread into another. The
-      // new root still inherits what its member last picked *for it*, and
-      // read-only is what is left when they never have. Served only where it
-      // can be honored — a named root, on an endpoint whose hello advertised
-      // modes for the agent — so an old companion is never sent a mode it
-      // would drop on the floor and quietly run read-only against a picker
-      // that said otherwise.
+      // What the row holds, before anything decides whether it can be used. The
+      // shed below compares against *these*, not against what is servable: a
+      // model this agent cannot take is still a model that has to leave when the
+      // thread changes root, or switching back to its agent later would find it
+      // waiting in the wrong project.
+      const held: Record<ConversationChoice, string | null> = {
+        mode: row?.modeId ?? null,
+        model: row?.modelId ?? null,
+      };
+      // Whether each is usable on this turn. A mode reaches only a companion
+      // whose hello advertised one, so an old one stays read-only rather than
+      // ignoring a picker that said otherwise. A model id belongs to the roster
+      // it came from — handed to another agent it spawns a turn that agent
+      // refuses, and the ones that take it at spawn (codex's config,
+      // cursor/gemini/opencode's argv) leave nothing downstream to say why.
       const modeCapable = attached?.agents.find((a) => a.agent === agent)?.modes === true;
-      // The model rides the same rule and needs no capability gate: `open.model`
-      // has always been on the wire. It is not harmless, though — model ids are
-      // an agent's own, and the config-option path (kilo, devin, claude) *throws*
-      // on one it does not offer. So a stale pick fails its turn, and the caller
-      // sheds it on that failure the way it sheds an unofferable mode; nothing
-      // here can tell which agent minted the id.
-      // A model id belongs to the roster it came from, so one picked under
-      // another agent is not offered back — that turn would spawn with a model
-      // this agent refuses, and for the ones that take it at spawn (codex's
-      // config, cursor/gemini/opencode's argv) nothing downstream can tell why.
-      const stored: Record<ConversationChoice, string | undefined> = {
-        mode: row?.modeId,
-        model: row?.modelAgent === agent ? row.modelId : undefined,
+      const usable: Record<ConversationChoice, string | undefined> = {
+        mode: modeCapable ? (held.mode ?? undefined) : undefined,
+        model: row?.modelAgent === agent ? (held.model ?? undefined) : undefined,
       };
       const serve: Partial<Record<ConversationChoice, string>> = {};
-      // Read before the workspace rebind below: once this thread's row names the
-      // new root, its own not-yet-shed choices satisfy the inheritance query and
-      // the stale picks follow it in.
+      // Read before the rebind below: once this thread's row names the new root,
+      // its own not-yet-shed picks satisfy the inheritance query and follow it in.
       if (workspace && conversation) {
         for (const choice of ['mode', 'model'] as const) {
+          // The gate covers inheritance too: a sibling thread's mode is no more
+          // servable to a companion that cannot honor one than this row's is.
           if (choice === 'mode' && !modeCapable) continue;
+          // A changed root sheds the thread's own pick rather than carrying it —
+          // write permission and a model chosen for one project are not the next
+          // one's — but what its member last picked *for that root* is inherited.
           const inherited =
-            (kept ? stored[choice] : undefined) ??
+            (kept ? usable[choice] : undefined) ??
             (await store.lastChoiceFor(owner, workspace.id, choice, agent));
           if (inherited) serve[choice] = inherited;
         }
-      } else if (stored.model) {
-        // No root to scope it to, and the picker still offers a model there — so
-        // the row's own pick is what a turn with no workspace runs on. Only this
-        // branch reads it unscoped: under a root, a *changed* root sheds the
-        // model exactly as it sheds the mode.
-        serve.model = stored.model;
+      } else if (usable.model) {
+        // No root to scope a pick to, and the picker still offers a model there,
+        // so the row's own is what this turn runs on.
+        serve.model = usable.model;
       }
       // Written back so the thread keeps its project. Only on a change, or every
       // turn costs a write to say what the row already says.
@@ -957,11 +955,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         await store.bindConversation(owner, conversation, workspace.id);
       if (workspace && conversation) {
         for (const choice of ['mode', 'model'] as const) {
-          const was = stored[choice] ?? null;
-          // An advertisement that lapsed (an older companion reattaching) keeps
-          // the stored pick for when it returns; only a workspace change clears.
-          const next = serve[choice] ?? (kept ? was : null);
-          if (next !== was)
+          // A lapsed advertisement keeps the stored pick for when it returns, and
+          // so does an agent that cannot use this model — only a changed root
+          // clears, which is why this reads `held` and not `usable`.
+          const next = serve[choice] ?? (kept ? held[choice] : null);
+          if (next !== held[choice])
             await store.bindConversationChoice(owner, conversation, choice, next, agent);
         }
       }
@@ -1007,6 +1005,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const bounded = choice === 'model' ? isSafeModelId(value) : isSafeId(value);
       if (!str(conversation) || (value !== null && !bounded))
         return sendJson(res, 400, { error: 'request' });
+      // A model without the roster it came from could be stored but never
+      // served, so the pick is refused rather than confirmed and dropped. Every
+      // picker sends it; a request without one is a stale bot or a hand-made
+      // call, and both are better told.
+      if (choice === 'model' && value !== null && !isSafeId(pickedUnder))
+        return sendJson(res, 400, { error: 'agent' });
       // Scoped to the caller's own conversation, like `seen`: the bot speaks
       // for whichever member picked, not for all of them.
       if (!(await store.conversationForId(owner, conversation)))

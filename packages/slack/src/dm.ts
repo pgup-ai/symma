@@ -429,15 +429,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // Posted into the thread they are watching rather than left to the socket's
     // catch, which answers at the DM root where this reply is not.
     deps.log(`run failed: ${String(error)}`);
-    // The driver names this failure precisely — matched on its exact shape,
-    // because "agent X not offered" is a different refusal — and it is the one
-    // that would otherwise repeat forever: the stored mode has drifted off the
-    // agent's roster, and nothing that fails a turn can offer the picker that
-    // would fix it.
-    // Both drift the same way and both would otherwise repeat forever: a mode
-    // the roster dropped fails the turn in the driver, and a model from another
-    // agent's roster throws in config-option selection. Matched on their exact
-    // shapes, since "agent X not offered" is a different refusal.
+    // A stored pick the agent's roster dropped would repeat forever otherwise:
+    // nothing that fails a turn can offer the picker that would fix it. Matched
+    // on each failure's exact shape, since "agent X not offered" is a different
+    // refusal from either of these.
     const failed = String(error);
     const staleMode = decision.mode !== undefined && /: mode \S+ not offered \(/.test(failed);
     const staleModel =
