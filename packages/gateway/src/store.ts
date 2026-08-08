@@ -699,7 +699,12 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async shedWorkspaceChoice(owner, conversation, choice) {
       await pool.query(
-        `UPDATE conversations SET ${CHOICE_COLUMN[choice]} = NULL
+        // Provenance goes with the value it describes: a row naming the agent of
+        // a model it no longer holds is a fact nothing can act on, and every
+        // other write here clears the pair together.
+        `UPDATE conversations SET ${CHOICE_COLUMN[choice]} = NULL${
+          choice === 'model' ? ', model_agent = NULL' : ''
+        }
           WHERE user_id = $1
             AND (id = $2 OR (workspace_id IS NOT NULL AND workspace_id =
               (SELECT workspace_id FROM conversations WHERE user_id = $1 AND id = $2)))`,

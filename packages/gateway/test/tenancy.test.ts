@@ -1529,6 +1529,38 @@ describe('tenancy', () => {
       }, 'the endpoint reattached serving codex');
       assert.equal((await ask(first)).model, undefined, 'another agent’s id is not served');
 
+      // A shed clears the provenance with the value: a row naming the agent of a
+      // model it no longer holds is a fact nothing can act on.
+      const pool = new Pool({ connectionString: url });
+      try {
+        assert.equal(
+          (await post('/api/slack/model', { conversation: first, model: null })).status,
+          200,
+        );
+        assert.deepEqual(
+          (
+            await pool.query<{ model_id: string | null; model_agent: string | null }>(
+              `SELECT model_id, model_agent FROM conversations WHERE id = $1`,
+              [first],
+            )
+          ).rows,
+          [{ model_id: null, model_agent: null }],
+        );
+      } finally {
+        await pool.end();
+      }
+      // Put it back for what follows.
+      assert.equal(
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'gpt-5.6-sol[high]',
+            agent: 'kilo',
+          })
+        ).status,
+        200,
+      );
+
       // An agent switch in the *same* root serves what that agent last used
       // there without spending the row's one slot on it: the member's kilo pick
       // is still theirs when kilo comes back.
