@@ -229,3 +229,8 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS mode_id text;
 -- leaves whatever the agent is configured for, which is every conversation
 -- that predates the column.
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_id text;
+
+-- Which agent's roster the stored model came from (§4). Model ids are an
+-- agent's own, and one agent's id handed to another is a turn that fails at
+-- spawn — so a pick is served only back to the agent that offered it.
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_agent text;

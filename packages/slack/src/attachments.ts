@@ -126,7 +126,9 @@ export async function collectAttachments(
       out.push({
         ok: false,
         name,
-        why: `${str(file.filetype, 'that type')} is not something I can pass along`,
+        // Slack's own word for the type, riding the same mrkdwn aside the name
+        // does.
+        why: `${plainly(str(file.filetype, 'that type')) || 'that type'} is not something I can pass along`,
       });
       continue;
     }

@@ -360,7 +360,7 @@ describe('dm message', () => {
     // Read back on every turn — the member should never have to remember what
     // tier their own machine is running at.
     assert.match(posts[0]!.text, /in `symma` — `agent` mode/);
-    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', modes: roster });
+    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
   });
 
   it('runs the picked model and narrates the agent onto its own acknowledgement', async () => {
@@ -396,7 +396,7 @@ describe('dm message', () => {
     // frames nobody reads.
     runs[0]!.onProgress!('Running git log');
     assert.equal(updates.length, 1);
-    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', models });
+    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {
@@ -567,7 +567,7 @@ describe('dm message', () => {
     assert.match(posts[0]!.text, /in `symma` — `read-only` mode/);
     // The first workspace turn is exactly where the picker has to appear, or
     // there is no way to ever leave read-only.
-    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', modes: roster });
+    assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
   });
 
   it('sheds a mode the agent stopped offering, and says so', async () => {

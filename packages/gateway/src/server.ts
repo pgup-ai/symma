@@ -924,9 +924,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // on one it does not offer. So a stale pick fails its turn, and the caller
       // sheds it on that failure the way it sheds an unofferable mode; nothing
       // here can tell which agent minted the id.
+      // A model id belongs to the roster it came from, so one picked under
+      // another agent is not offered back — that turn would spawn with a model
+      // this agent refuses, and for the ones that take it at spawn (codex's
+      // config, cursor/gemini/opencode's argv) nothing downstream can tell why.
       const stored: Record<ConversationChoice, string | undefined> = {
         mode: row?.modeId,
-        model: row?.modelId,
+        model: row?.modelAgent === agent ? row.modelId : undefined,
       };
       const serve: Partial<Record<ConversationChoice, string>> = {};
       // Read before the workspace rebind below: once this thread's row names the
@@ -937,7 +941,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           if (choice === 'mode' && !modeCapable) continue;
           const inherited =
             (kept ? stored[choice] : undefined) ??
-            (await store.lastChoiceFor(owner, workspace.id, choice));
+            (await store.lastChoiceFor(owner, workspace.id, choice, agent));
           if (inherited) serve[choice] = inherited;
         }
       } else if (stored.model) {
@@ -957,7 +961,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           // An advertisement that lapsed (an older companion reattaching) keeps
           // the stored pick for when it returns; only a workspace change clears.
           const next = serve[choice] ?? (kept ? was : null);
-          if (next !== was) await store.bindConversationChoice(owner, conversation, choice, next);
+          if (next !== was)
+            await store.bindConversationChoice(owner, conversation, choice, next, agent);
         }
       }
       const mode = serve.mode;
@@ -988,7 +993,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     if (url.pathname === '/api/slack/mode' || url.pathname === '/api/slack/model') {
       const choice: ConversationChoice = url.pathname.endsWith('model') ? 'model' : 'mode';
-      const { conversation } = body as { conversation?: unknown };
+      const { conversation, agent: pickedUnder } = body as {
+        conversation?: unknown;
+        agent?: unknown;
+      };
       const value = (body as Record<string, unknown>)[choice];
       // Bounded like everything that crosses to a companion: the value ends up
       // in a child process env var there. Model ids carry the bracketed effort
@@ -1004,7 +1012,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (!(await store.conversationForId(owner, conversation)))
         return sendJson(res, 404, { error: 'not found' });
       if (value === null) await store.shedWorkspaceChoice(owner, conversation, choice);
-      else await store.bindConversationChoice(owner, conversation, choice, value as string);
+      else
+        await store.bindConversationChoice(
+          owner,
+          conversation,
+          choice,
+          value as string,
+          // Whose roster the member picked from, so it is only ever served back
+          // to that agent. Absent from an older bot, which then stores nothing
+          // and simply never has its model served.
+          isSafeId(pickedUnder) ? pickedUnder : undefined,
+        );
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/turn/done') {

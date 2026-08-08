@@ -33,7 +33,13 @@ export interface SlackApi {
     /** §4's pickers, rendered from the agent's own rosters. A selection carries
      * the conversation and the chosen id; what to do with them is the gateway's
      * to decide, same as the share button. */
-    pickers?: { conversation: string; modes?: SessionModes; models?: SessionModels },
+    pickers?: {
+      conversation: string;
+      /** Whose rosters these are — a model id is only meaningful under it. */
+      agent: string;
+      modes?: SessionModes;
+      models?: SessionModels;
+    },
   ) => Promise<{ channel: string; ts: string }>;
   /** Rewrites the acknowledgement while a run is out, so a long turn can show
    * what the agent is doing. Never throws, and carries no blocks of its own: a
@@ -94,18 +100,28 @@ const MAX_PAGES = 20;
 /** Slack's own caps on a message. Exceeding either block one is a rejected post,
  * and a rejected post turns a finished run into a reported failure — which is
  * how an answer gets lost rather than merely mis-rendered. */
-/** A Slack file download is a CDN fetch, not an API call — bounded on its own
- * because a stalled one would otherwise hold the whole turn. */
-const FILE_FETCH_TIMEOUT_MS = 20_000;
 const BLOCK_TEXT_LIMIT = 3000;
 const MESSAGE_BLOCK_LIMIT = 50;
 const FALLBACK_TEXT_LIMIT = 40_000;
+
+/** A file download is a CDN fetch, not an API call — bounded on its own because
+ * a stalled one would otherwise hold the whole turn. */
+const FILE_FETCH_TIMEOUT_MS = 20_000;
 
 /** A name or a title the member or their agent chose, on its way into mrkdwn:
  * a backtick would open a code span that swallows the rest of the sentence, and
  * a newline would break the block it sits in. */
 export const plainly = (text: string): string =>
-  text.replaceAll(/[`\n]/g, ' ').replace(/\s+/g, ' ').trim();
+  text
+    // Slack's three mrkdwn entities, ampersand first or the escapes double up.
+    // `<!channel>` in a filename would otherwise broadcast when an answer is
+    // shared, and `<http://x|y>` would render as a link nobody wrote.
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll(/[`\n]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
 /** Cut to `limit` and say so, so what is missing is visible rather than a
  * sentence that stops. */
@@ -163,11 +179,19 @@ const PICKER_VALUE_LIMIT = 150;
 /** One roster entry as the picker shows it and hands it back. `initial_option`
  * must deep-equal one of `options` for Slack to accept it, so both are built
  * here and nowhere else. */
-const pickerOption = (conversation: string, id: string, label: string, about?: string) => ({
+const pickerOption = (
+  conversation: string,
+  id: string,
+  label: string,
+  about?: string,
+  agent?: string,
+) => ({
   // Slack caps both of these at 75 characters.
   text: { type: 'plain_text' as const, text: label.slice(0, 75) },
   ...(about ? { description: { type: 'plain_text' as const, text: about.slice(0, 75) } } : {}),
-  value: JSON.stringify({ c: conversation, m: id }),
+  // `a` is whose roster this came from — a model id means nothing under another
+  // agent, so the selection carries where it was offered.
+  value: JSON.stringify({ c: conversation, m: id, ...(agent ? { a: agent } : {}) }),
 });
 
 /** A select, bounded to what Slack will post and what can round-trip: an id
@@ -181,15 +205,18 @@ function rosterSelect(
   placeholder: string,
   entries: { id: string; label: string; about?: string; safe: boolean }[],
   currentId: string | undefined,
+  agent?: string,
 ): Record<string, unknown>[] {
+  const option = (entry: { id: string; label: string; about?: string }) =>
+    pickerOption(conversation, entry.id, entry.label, entry.about, agent);
   const options = entries
     .filter((entry) => entry.safe)
-    .map((entry) => pickerOption(conversation, entry.id, entry.label, entry.about))
-    .filter((option) => option.value.length <= PICKER_VALUE_LIMIT)
+    .map(option)
+    .filter((value) => value.value.length <= PICKER_VALUE_LIMIT)
     .slice(0, PICKER_OPTION_LIMIT);
   if (!options.length) return [];
   const current = entries.find((entry) => entry.id === currentId);
-  const initial = current && pickerOption(conversation, current.id, current.label, current.about);
+  const initial = current && option(current);
   return [
     {
       type: 'static_select',
@@ -219,7 +246,11 @@ const modeSelect = (conversation: string, modes: SessionModes): Record<string, u
     modes.currentModeId,
   );
 
-const modelSelect = (conversation: string, models: SessionModels): Record<string, unknown>[] =>
+const modelSelect = (
+  conversation: string,
+  models: SessionModels,
+  agent: string,
+): Record<string, unknown>[] =>
   rosterSelect(
     conversation,
     MODEL_ACTION,
@@ -233,6 +264,7 @@ const modelSelect = (conversation: string, models: SessionModels): Record<string
       safe: isSafeModelId(model.modelId),
     })),
     models.currentModelId,
+    agent,
   );
 
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
@@ -333,7 +365,9 @@ export function slackApi(
             ]
           : []),
         ...(pickers?.modes ? modeSelect(pickers.conversation, pickers.modes) : []),
-        ...(pickers?.models ? modelSelect(pickers.conversation, pickers.models) : []),
+        ...(pickers?.models
+          ? modelSelect(pickers.conversation, pickers.models, pickers.agent)
+          : []),
       ];
       const actions = elements.length ? [{ type: 'actions', elements }] : [];
       // The answer takes the blocks it needs and the asides take what is left,

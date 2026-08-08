@@ -213,6 +213,7 @@ describe('slack api', () => {
       undefined,
       {
         conversation: 'conv-1',
+        agent: 'codex',
         modes: {
           currentModeId: 'agent',
           availableModes: [
@@ -251,10 +252,16 @@ describe('slack api', () => {
       ['GPT-5.6-Sol (high)', 'gpt-5.4-mini[low]'],
       'bracketed ids survive the wider alphabet, and the id stands in for a missing name',
     );
+    // The model option carries whose roster it came from: an id means nothing
+    // under another agent, and the gateway serves it back only to this one.
     assert.deepEqual(JSON.parse(modelPick!.options![0]!.value), {
       c: 'conv-1',
       m: 'gpt-5.6-sol[high]',
+      a: 'codex',
     });
+    // The mode select carries none — a mode id is the agent's own vocabulary
+    // either way, and the gateway gates it on the hello advertisement.
+    assert.deepEqual(JSON.parse(select.options![0]!.value), { c: 'conv-1', m: 'read-only' });
     assert.deepEqual(modelPick!.initial_option, modelPick!.options![0]);
     // The agent's names verbatim, the id where it gave none — never our copy.
     assert.deepEqual(
@@ -283,6 +290,7 @@ describe('slack api', () => {
       undefined,
       {
         conversation: 'c'.repeat(36),
+        agent: 'codex',
         modes: {
           currentModeId: 'mode-149',
           availableModes: [{ id: 'not safe' }, { id: oversized }, ...flood],

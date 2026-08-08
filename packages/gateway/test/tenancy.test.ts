@@ -1482,8 +1482,14 @@ describe('tenancy', () => {
       // The bracketed effort codex-acp folds into its ids has no room in
       // `isSafeId`'s alphabet, so the model route takes the wider one.
       assert.equal(
-        (await post('/api/slack/model', { conversation: first, model: 'gpt-5.6-sol[high]' }))
-          .status,
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'gpt-5.6-sol[high]',
+            // Whose roster it came from — served back only to this agent.
+            agent: 'kilo',
+          })
+        ).status,
         200,
       );
       assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]');
@@ -1504,6 +1510,17 @@ describe('tenancy', () => {
         400,
       );
 
+      // A model id belongs to the roster it came from: picked under kilo, it is
+      // not offered to an endpoint now serving codex — that turn would spawn
+      // with a model this agent refuses, and the agents that take it at spawn
+      // (codex's config, cursor/gemini/opencode's argv) cannot say why.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['codex']);
+        return (await ask(first)).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving codex');
+      assert.equal((await ask(first)).model, undefined, 'another agent’s id is not served');
+
       // A changed root sheds the model exactly as it sheds the mode: a pick made
       // for one project must not follow the thread into another.
       detach();
@@ -1521,7 +1538,13 @@ describe('tenancy', () => {
       // But with no root at all there is nothing to scope a pick to, and the
       // picker still offers one — so the row's own model is what that turn runs.
       assert.equal(
-        (await post('/api/slack/model', { conversation: first, model: 'mini[low]' })).status,
+        (
+          await post('/api/slack/model', {
+            conversation: first,
+            model: 'mini[low]',
+            agent: 'kilo',
+          })
+        ).status,
         200,
       );
       detach();

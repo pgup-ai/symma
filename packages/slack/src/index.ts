@@ -360,9 +360,9 @@ const connection = socketMode({
         const thread = typeof message?.thread_ts === 'string' ? message.thread_ts : messageTs;
         if (typeof who !== 'string' || typeof where !== 'string' || typeof thread !== 'string')
           return;
-        let selection: { c?: unknown; m?: unknown };
+        let selection: { c?: unknown; m?: unknown; a?: unknown };
         try {
-          selection = JSON.parse(picked) as { c?: unknown; m?: unknown };
+          selection = JSON.parse(picked) as { c?: unknown; m?: unknown; a?: unknown };
         } catch {
           return;
         }
@@ -373,6 +373,9 @@ const connection = socketMode({
             user: who,
             conversation: conversationId,
             [choice]: chosenId,
+            // Whose roster the model came from; the gateway serves it back only
+            // to that agent, since an id means nothing under another.
+            ...(typeof selection.a === 'string' ? { agent: selection.a } : {}),
           });
           // Writes named out loud: a mode is their machine's permission tier,
           // not a cosmetic setting. A model is only ever a preference.

@@ -76,6 +76,9 @@ export interface Conversation {
   /** The model this thread runs on, off the agent's own roster; absent leaves
    * the member's configured default. */
   modelId?: string;
+  /** Whose roster `modelId` came from. Model ids are agent-scoped, so one
+   * agent's id is only ever served back to that agent. */
+  modelAgent?: string;
   /** Where a share goes back to, captured when the mention opened this (§5).
    * Absent for a conversation that began in the DM and has nowhere to return
    * to. Held here rather than travelling with the button, so a destination is
@@ -198,6 +201,9 @@ export interface Store {
     conversation: string,
     choice: ConversationChoice,
     value: string | null,
+    /** For a model, whose roster it came from — stored beside it so it is never
+     * handed to a different agent. */
+    agent?: string,
   ): Promise<void>;
   /** Clears a choice across the conversation's whole workspace. Scoped to one
    * row it would not hold where it matters — `lastChoiceFor` refills the same
@@ -213,6 +219,8 @@ export interface Store {
     owner: Owner,
     workspaceId: string,
     choice: ConversationChoice,
+    /** Only a model this agent offered is worth inheriting. */
+    agent?: string,
   ): Promise<string | undefined>;
   /** The agent session this conversation last ran in, or undefined when it ran
    * somewhere this one cannot reach. A session id means nothing off the machine
@@ -273,6 +281,7 @@ interface Row {
   /** Selected only by `conversationForId`; the other lookups never read them. */
   mode?: string | null;
   model?: string | null;
+  modelAgent?: string | null;
   sourceChannel: string | null;
   sourceThread: string | null;
 }
@@ -284,6 +293,7 @@ const conversationFrom = (row: Row): Conversation => ({
   ...(row.workspace ? { workspaceId: row.workspace } : {}),
   ...(row.mode ? { modeId: row.mode } : {}),
   ...(row.model ? { modelId: row.model } : {}),
+  ...(row.modelAgent ? { modelAgent: row.modelAgent } : {}),
   ...(row.sourceChannel && row.sourceThread
     ? { source: { channel: row.sourceChannel, thread: row.sourceThread } }
     : {}),
@@ -651,6 +661,7 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       const row = await one<Row>(
         `SELECT id, dm_channel_id AS dm, root_thread_ts AS root, seen_through_ts AS seen,
                 workspace_id AS workspace, mode_id AS mode, model_id AS model,
+                model_agent AS "modelAgent",
                 source_channel_id AS "sourceChannel", source_thread_ts AS "sourceThread"
            FROM conversations
           WHERE user_id = $1 AND id = $2`,
@@ -664,18 +675,26 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [owner, conversation, workspaceId],
       );
     },
-    async bindConversationChoice(owner, conversation, choice, value) {
+    async bindConversationChoice(owner, conversation, choice, value, agent) {
       const column = CHOICE_COLUMN[choice];
+      // Written together, so a row can never name a model without saying whose
+      // roster it came from.
+      const withAgent = choice === 'model' ? ', model_agent = $4' : '';
       // A pick is also activity: the touch is what makes `lastChoiceFor` mean
       // "last chosen" rather than "attached to whichever thread spoke most
       // recently" — a re-pick on a quiet thread must win inheritance. A clear
       // is not a pick, and bumps nothing.
       await pool.query(
         value === null
-          ? `UPDATE conversations SET ${column} = NULL WHERE id = $2 AND user_id = $1`
-          : `UPDATE conversations SET ${column} = $3, last_activity_at = now()
+          ? `UPDATE conversations SET ${column} = NULL${withAgent ? ', model_agent = NULL' : ''}
+              WHERE id = $2 AND user_id = $1`
+          : `UPDATE conversations SET ${column} = $3${withAgent}, last_activity_at = now()
               WHERE id = $2 AND user_id = $1`,
-        value === null ? [owner, conversation] : [owner, conversation, value],
+        value === null
+          ? [owner, conversation]
+          : withAgent
+            ? [owner, conversation, value, agent ?? null]
+            : [owner, conversation, value],
       );
     },
     async shedWorkspaceChoice(owner, conversation, choice) {
@@ -687,13 +706,14 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         [owner, conversation],
       );
     },
-    async lastChoiceFor(owner, workspaceId, choice) {
+    async lastChoiceFor(owner, workspaceId, choice, agent) {
       const column = CHOICE_COLUMN[choice];
       const row = await one<{ value: string }>(
         `SELECT ${column} AS value FROM conversations
           WHERE user_id = $1 AND workspace_id = $2 AND ${column} IS NOT NULL
+            ${choice === 'model' ? 'AND model_agent = $3' : ''}
           ORDER BY last_activity_at DESC LIMIT 1`,
-        [owner, workspaceId],
+        choice === 'model' ? [owner, workspaceId, agent ?? null] : [owner, workspaceId],
       );
       return row?.value;
     },

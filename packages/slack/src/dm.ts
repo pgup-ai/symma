@@ -118,7 +118,7 @@ const thousands = (tokens: number): string =>
 function spent(model: string | undefined, usage: TurnUsage | undefined): string[] | undefined {
   if (usage?.totalTokens === undefined) return undefined;
   const parts = [
-    ...(model ? [`\`${model}\``] : []),
+    ...(model ? [`\`${plainly(model)}\``] : []),
     `${thousands(usage.totalTokens)} tokens`,
     ...(usage.cachedTokens ? [`${thousands(usage.cachedTokens)} cached`] : []),
   ];
@@ -142,14 +142,17 @@ function unsupportedNote(agent: string, files?: { name: string; kind: string }[]
 /** What the answer can offer to change for the next turn, or nothing. */
 function pickers(
   conversation: string,
+  agent: string,
   answer: { modes?: SessionModes; models?: SessionModels },
   inWorkspace: boolean,
-): { conversation: string; modes?: SessionModes; models?: SessionModels } | undefined {
+):
+  | { conversation: string; agent: string; modes?: SessionModes; models?: SessionModels }
+  | undefined {
   const offer = {
     ...(answer.modes && inWorkspace ? { modes: answer.modes } : {}),
     ...(answer.models ? { models: answer.models } : {}),
   };
-  return Object.keys(offer).length ? { conversation, ...offer } : undefined;
+  return Object.keys(offer).length ? { conversation, agent, ...offer } : undefined;
 }
 
 export interface DmDeps {
@@ -215,7 +218,12 @@ export interface DmDeps {
     threadTs?: string,
     offerShare?: { conversation: string; destination: string },
     notices?: string[],
-    pickers?: { conversation: string; modes?: SessionModes; models?: SessionModels },
+    pickers?: {
+      conversation: string;
+      agent: string;
+      modes?: SessionModes;
+      models?: SessionModels;
+    },
   ) => Promise<{ channel: string; ts: string }>;
   /** Marks the member's own message for the length of the run. Only the run is
    * worth marking — everything refused answers in words, immediately. */
@@ -487,7 +495,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         // acknowledgement already promised the member it was being read.
         ...unsupportedNote(decision.agent, answer.unsupported),
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
-        ...(answer.resumeWith ? [`\`${answer.resumeWith} ${answer.session}\``] : []),
+        // The command is a closed set at the parse boundary; the session id is
+        // the agent's own string and is not.
+        ...(answer.resumeWith ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``] : []),
       ],
       // The picker renders the agent's own roster, so it exists exactly where
       // the agent serves one — and only inside a named workspace, the one
@@ -496,7 +506,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // named workspace — where the model is a preference anywhere. Nothing to
       // render means no payload at all, rather than a conversation id with no
       // picker to carry.
-      pickers(conversation.id, answer, decision.workspace !== undefined),
+      pickers(conversation.id, decision.agent, answer, decision.workspace !== undefined),
     );
   } catch (error) {
     // The run is over either way, and `announcing` tells them the delivery
