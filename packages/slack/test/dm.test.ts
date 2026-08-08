@@ -67,6 +67,7 @@ function harness(
   const finished: Record<string, string>[] = [];
   const sheds: string[] = [];
   const updates: { channel: string; ts: string; text: string }[] = [];
+  let fetches = 0;
   let asked = 0;
   const askedFor: string[] = [];
   // Absent is a machine that is there; `null` is a member who has paired none,
@@ -114,12 +115,14 @@ function harness(
       finished.push({ conversation, turn, status, ...ran });
       return Promise.resolve();
     },
-    fetchFile: () =>
-      Promise.resolve(
+    fetchFile: () => {
+      fetches += 1;
+      return Promise.resolve(
         over.fileBytes === undefined
           ? { ok: false, status: 404 }
           : { ok: true, bytes: Buffer.from(over.fileBytes) },
-      ),
+      );
+    },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
       return Promise.resolve();
@@ -162,6 +165,7 @@ function harness(
     updates,
     askedFor,
     asked: () => asked,
+    fetches: () => fetches,
   };
 }
 
@@ -424,7 +428,7 @@ describe('dm message', () => {
   });
 
   it('does not spend downloads on a machine that cannot take the turn', async () => {
-    const { deps, runs } = harness({
+    const { deps, runs, fetches } = harness({
       existing: CONVERSATION,
       endpoint: { ...READY, state: 'asleep' },
       fileBytes: 'x',
@@ -442,7 +446,10 @@ describe('dm message', () => {
       },
       deps,
     );
-    assert.deepEqual(runs, [], 'refused before anything was fetched');
+    // The ordering is the assertion: a fetch hoisted above the endpoint check
+    // would pull megabytes for a laptop that was never going to answer.
+    assert.equal(fetches(), 0);
+    assert.deepEqual(runs, []);
   });
 
   it('says what the turn cost, beside the model that charged it', async () => {

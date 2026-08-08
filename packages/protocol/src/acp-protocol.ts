@@ -345,18 +345,15 @@ export interface AcpSessionOptions {
    * frames a second time, unsigned, under a different id. */
   tee?: (dir: 'out' | 'in', frame: Record<string, unknown>) => void;
   /** Files to hand the agent with the prompt. The caller fetches and classifies
-   * them; this only decides whether the agent said it can read each kind. */
+   * them; this only checks the agent said it can read each kind. */
   attachments?: PromptAttachment[];
-  /** What the agent is doing right now, for a caller with somewhere to show it.
-   * Titles only, at the agent's own pace — the caller throttles, since a
-   * chatty turn emits far more of these than any surface wants to render. */
+  /** What the agent is doing right now, at its own pace — a chatty turn emits
+   * far more of these than any surface wants, so the caller throttles. */
   onProgress?: (title: string) => void;
 }
 
-/** One file travelling with a prompt. `text` carries the file's contents as
- * they are; `image` carries base64, which is what ACP's image block takes. The
- * caller decides which a file is — this layer only asks whether the agent
- * advertised the block it would need. */
+/** One file travelling with a prompt: `text` is the contents as they are,
+ * `image` is base64, which is what ACP's image block takes. */
 export interface PromptAttachment {
   name: string;
   mimeType: string;
@@ -419,24 +416,23 @@ export interface SessionModels {
   availableModels: SessionModel[];
 }
 
-/** What one turn cost, as the agent reported it on the prompt result. Every
- * field is optional because this is the agent's accounting and not the
- * protocol's: codex-acp 1.1.7 serves all of these, another agent may serve
- * none, and a caller showing a total must not invent one. */
+/** What one turn cost. Every field is optional because this is the agent's
+ * accounting, not the protocol's — codex-acp 1.1.7 serves all of them, another
+ * agent may serve none, and a caller must not invent a total. */
 export interface TurnUsage {
   totalTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
   /** Input served from the model's cache — the difference between a cheap
-   * follow-up and an expensive one, so it is worth showing beside the total. */
+   * follow-up and an expensive one. */
   cachedTokens?: number;
-  /** Reasoning tokens, which the effort suffix on a model id buys. */
+  /** Reasoning tokens — what the effort suffix on a model id buys. */
   thoughtTokens?: number;
 }
 
-/** Reads the agent's own numbers, keeping only the ones it actually gave.
- * codex-acp spells cached reads `cachedReadTokens`; the ACP field is
- * `cachedInputTokens`, so both are accepted rather than guessed between. */
+/** Keeps only the numbers the agent actually gave. codex-acp spells cached
+ * reads `cachedReadTokens` where ACP says `cachedInputTokens`, so both are
+ * read rather than guessed between. */
 function readUsage(raw: unknown): TurnUsage | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const source = raw as Record<string, unknown>;
@@ -475,9 +471,9 @@ export interface AcpSessionResult {
   /** Present when the agent served a mode roster — what a caller's member can
    * pick from next turn. */
   modes?: SessionModes;
-  /** Present when the agent served a model roster, same purpose. */
+  /** The same, for models. */
   models?: SessionModels;
-  /** What the turn cost, when the agent said. */
+  /** What the turn cost, when the agent said so. */
   usage?: TurnUsage;
 }
 
@@ -525,9 +521,8 @@ export async function driveAcpSession(
         const content = update.content as { type?: string; text?: string } | undefined;
         if (content?.type === 'text' && typeof content.text === 'string') current += content.text;
       } else if (kind === 'tool_call' || kind === 'tool_call_update') {
-        // The agent's own words for what it is doing — `tool_call` carries the
-        // title, an update usually only a status, so a missing one is skipped
-        // rather than reported as a blank step.
+        // `tool_call` carries the title, an update usually only a status — so a
+        // missing one is skipped rather than reported as a blank step.
         if (typeof update.title === 'string' && update.title) options.onProgress?.(update.title);
         if (!usesMessageIds) flush();
       }
@@ -708,11 +703,9 @@ export async function driveAcpSession(
       }
     }
   }
-  // Attachments lead, question last: the agent reads the blocks in order, and
-  // an instruction that arrives after its material is the way round a human
-  // would write it. Only kinds the agent advertised are sent — `image` and
-  // `resource` are capability-gated (codex-acp 1.1.7 advertises both), and one
-  // it cannot read would fail the whole prompt rather than the attachment.
+  // Attachments lead, question last — the way round a human would write it.
+  // Only kinds the agent advertised are sent (codex-acp 1.1.7 serves both): a
+  // block it cannot read fails the whole prompt, losing the question too.
   const promptCapabilities = (init?.promptCapabilities ?? {}) as Record<string, unknown>;
   const attached = (options.attachments ?? []).flatMap((file): Record<string, unknown>[] =>
     file.kind === 'image'

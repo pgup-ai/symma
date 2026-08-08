@@ -1,17 +1,16 @@
 /**
- * Slack files, fetched so the agent can actually read them (§10 amended: v1
- * named them and never fetched, which is why an agent asked about a CSV could
- * only report that one existed).
+ * Slack files, fetched so the agent can read them — v1 named them and never
+ * fetched, which is why an agent asked about a CSV could only confirm one
+ * existed (§10).
  *
- * Its own module because two decisions live here and neither belongs in a
- * handler: which files are worth sending at all, and what the download is
- * allowed to cost. Both are policy the bot owns — the protocol only asks
- * whether the agent advertised the block a file would need.
+ * Its own module because the two decisions here are the bot's policy and not a
+ * handler's: which files are worth sending, and what the download may cost. The
+ * protocol only asks whether the agent advertised the block a file needs.
  */
 import type { PromptAttachment } from '@symma/protocol';
 
-/** What Slack says about one file on a message. `url_private_download` needs
- * the bot token as a bearer header; it is not a public link. */
+/** `url_private_download` needs the bot token as a bearer header; it is not a
+ * public link. */
 export interface SlackFile {
   name?: unknown;
   mimetype?: unknown;
@@ -20,26 +19,20 @@ export interface SlackFile {
   url_private_download?: unknown;
 }
 
-/** What a download hands back. Named because three layers pass it along, and
- * an inline shape repeated three times drifts on the first change. */
 export interface FetchedFile {
   ok: boolean;
   bytes?: Buffer;
   status?: number;
 }
 
-/** Per-file ceiling. A spreadsheet dumped into a channel is routinely megabytes
- * of base64 that would crowd out the question itself, and the member gets told
- * which files were skipped either way. */
 const MAX_FILE_BYTES = 512 * 1024;
-/** Total across one turn, so five files cannot each pass the per-file bar and
- * together bury the prompt. */
+/** So five files that each clear the per-file bar cannot together bury the
+ * question they came with. */
 const MAX_TOTAL_BYTES = 1024 * 1024;
 const MAX_FILES = 5;
 
-/** Text this agent can read as-is. Deliberately extension-and-mime based rather
- * than sniffed: a wrong guess here sends binary as text, which is worse than
- * skipping the file and saying so. */
+/** Matched on mime and Slack's own type name rather than sniffed: guessing
+ * wrong sends a binary as text, which is worse than skipping it and saying so. */
 const TEXT_TYPES = new Set([
   'text/plain',
   'text/markdown',
@@ -78,19 +71,18 @@ const TEXT_FILETYPES = new Set([
   'sh',
   'shell',
 ]);
-/** Images ACP's image block takes; anything else Slack calls an image is not
- * something a model is promised to decode. */
+/** What ACP's image block promises a model can decode; not everything Slack
+ * files under "image". */
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-/** What one file turned into, or why it did not. The refusal is a sentence for
- * the member: a file silently absent is the failure this module exists to fix. */
+/** A refusal carries a sentence for the member — a file silently absent from an
+ * answer is the failure this module exists to fix. */
 export type Attached =
   { ok: true; file: PromptAttachment } | { ok: false; name: string; why: string };
 
 const str = (value: unknown, fallback = ''): string =>
   typeof value === 'string' && value ? value : fallback;
 
-/** How a file should travel, by what Slack claims it is. */
 function classify(file: SlackFile): 'text' | 'image' | undefined {
   const mime = str(file.mimetype).toLowerCase().split(';')[0]!;
   const kind = str(file.filetype).toLowerCase();
@@ -102,9 +94,8 @@ function classify(file: SlackFile): 'text' | 'image' | undefined {
 }
 
 /**
- * Fetches what the agent can use and says what it skipped. Never throws: a file
- * that will not download must cost its own line in the answer's asides, not the
- * turn — the question is usually answerable without it.
+ * Never throws: a file that will not download costs its own line in the asides,
+ * not the turn — the question is usually answerable without it.
  */
 export async function collectAttachments(
   files: SlackFile[],
@@ -127,8 +118,8 @@ export async function collectAttachments(
       });
       continue;
     }
-    // Checked before the download, not after: the point of a ceiling is to not
-    // pull the bytes.
+    // Before the download, not after: the point of a ceiling is to not pull the
+    // bytes.
     const size = typeof file.size === 'number' ? file.size : 0;
     if (size > MAX_FILE_BYTES) {
       out.push({ ok: false, name, why: `too big to send (${String(Math.round(size / 1024))}kB)` });

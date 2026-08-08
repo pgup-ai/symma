@@ -50,6 +50,7 @@ describe('attachments', () => {
         ['image', 'iVA='],
       ],
     );
+    assert.deepEqual(skippedNote(got), [], 'nothing to apologise for');
   });
 
   it('skips what it cannot pass along, and says which', async () => {
@@ -97,10 +98,5 @@ describe('attachments', () => {
       got.map((entry) => (entry.ok ? 'sent' : entry.why)),
       ['sent', 'sent', 'the files together were more than one turn can carry'],
     );
-  });
-
-  it('says nothing when everything came through', async () => {
-    const { fetchFile } = downloads(() => ({ ok: true, bytes: Buffer.from('hi') }));
-    assert.deepEqual(skippedNote(await collectAttachments([file()], fetchFile)), []);
   });
 });

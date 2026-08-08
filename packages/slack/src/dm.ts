@@ -38,8 +38,8 @@ export interface DmMessage {
   /** What they asked, as Slack sent it: `<@U123>` and `<#C123>` stay unresolved,
    * since expanding them is a lookup each and the question is about code. */
   text: string;
-  /** What they attached, as Slack described it. Fetched here rather than named
-   * in a transcript: an agent told a CSV exists can only say so back. */
+  /** What they attached, as Slack described it. Fetched rather than named: an
+   * agent told a CSV exists can only say so back. */
   files?: SlackFile[];
 }
 
@@ -98,26 +98,23 @@ export interface RunSpec {
   attachments?: PromptAttachment[];
 }
 
-/** How often the acknowledgement may be rewritten. `chat.update` is rate
- * limited per channel, and a turn that narrates every file read would spend the
- * budget on frames nobody reads. */
+/** `chat.update` is rate limited per channel, and a turn narrating every file
+ * read would spend that budget on frames nobody reads. */
 const PROGRESS_MIN_MS = 4_000;
 
-/** Thousands, because a token count read to the digit is noise: what a member
- * does with this is notice a turn that cost ten times the last one. */
+/** Rounded: what a member does with a token count is notice a turn that cost
+ * ten times the last one. */
 const thousands = (tokens: number): string =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}k`;
 
-/** What the turn cost, beside the model that charged it — the two only mean
- * something together now that the model is a member's own choice. Absent
- * whenever the agent reported no total: an invented number is worse than none. */
+/** The cost beside the model that charged it — the two only mean something
+ * together, now that the model is the member's own choice. Absent when the
+ * agent reported no total: an invented number is worse than none. */
 function spent(model: string | undefined, usage: TurnUsage | undefined): string[] | undefined {
   if (usage?.totalTokens === undefined) return undefined;
   const parts = [
     ...(model ? [`\`${model}\``] : []),
     `${thousands(usage.totalTokens)} tokens`,
-    // Cached input is the difference between a cheap follow-up and an
-    // expensive one, which is the one comparison worth surfacing unprompted.
     ...(usage.cachedTokens ? [`${thousands(usage.cachedTokens)} cached`] : []),
   ];
   return [parts.join(' · ')];
@@ -169,9 +166,8 @@ export interface DmDeps {
   shedMode: (conversation: string) => Promise<void>;
   /** Downloads one of the member's Slack files. */
   fetchFile: (url: string) => Promise<FetchedFile>;
-  /** Rewrites the acknowledgement while the run is out, so a member watching a
-   * long turn can see it is still moving. Fails open: this is a hint, and
-   * losing one must not cost the answer it was a hint about. */
+  /** Rewrites the acknowledgement while the run is out, so a long turn shows
+   * it is still moving. Fails open, like every hint here. */
   working: (channel: string, ts: string, text: string) => Promise<void>;
   /** Ends the turn, and remembers the session it ran in when there was one —
    * against what it ran under, since an id means nothing on another machine,
