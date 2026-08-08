@@ -112,6 +112,9 @@ export async function collectAttachments(
   fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>,
 ): Promise<Attached[]> {
   const out: Attached[] = [];
+  /** Bytes off the network this turn, not bytes kept: a download the ceiling cut
+   * off cost the same transfer as one it let through, and charging only what
+   * survived lets a list of under-reported files each be allowed it again. */
   let spent = 0;
   let carried = 0;
   for (const file of files) {
@@ -164,10 +167,13 @@ export async function collectAttachments(
     // Capped at what is left of the turn, not at one file's share: a size Slack
     // under-reported is then cut off at the ceiling rather than carried past it,
     // which is why nothing weighs the bytes again once they are here.
-    const got = await fetchFile(url, Math.min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - spent)).catch(
-      (): FetchedFile => ({ ok: false }),
-    );
+    const room = Math.min(MAX_FILE_BYTES, MAX_TOTAL_BYTES - spent);
+    const got = await fetchFile(url, room).catch((): FetchedFile => ({ ok: false }));
     if (!got.ok || !got.bytes) {
+      // 413 is this cap cutting the stream off, so those bytes are spent even
+      // though none arrived. Every other refusal transferred nothing and costs
+      // nothing — the same reason the file cap counts what was sent.
+      if (got.status === 413) spent += room;
       out.push({
         ok: false,
         name,

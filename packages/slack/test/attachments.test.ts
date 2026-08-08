@@ -139,18 +139,31 @@ describe('attachments', () => {
     assert.deepEqual(got, [{ ok: false, name: 'notes.md', why: 'it came back empty' }]);
   });
 
-  it('cuts a size Slack under-reported off at the turn ceiling', async () => {
-    // 800kB sent, then a file that says 100kB and serves 400kB. Nothing weighs
-    // the bytes once they are here, so the fetch cap is the whole ceiling.
+  it('cuts a size Slack under-reported off at the ceiling, and charges it', async () => {
+    // 800kB sent, then two files that each say 100kB and serve 400kB. Nothing
+    // weighs the bytes once they are here, so the fetch cap is the whole
+    // ceiling — and the bytes it cuts off are spent, or the second file is
+    // allowed the same transfer over again.
     const big = Buffer.alloc(400 * 1024, 'x');
-    const { fetchFile } = downloads(() => ({ ok: true, bytes: big }));
+    const { fetchFile, asked } = downloads(() => ({ ok: true, bytes: big }));
     const got = await collectAttachments(
-      [file({ size: big.byteLength }), file({ size: big.byteLength }), file({ size: 100 * 1024 })],
+      [
+        file({ size: big.byteLength }),
+        file({ size: big.byteLength }),
+        file({ size: 100 * 1024 }),
+        file({ size: 100 * 1024 }),
+      ],
       fetchFile,
     );
     assert.deepEqual(
       got.map((entry) => (entry.ok ? 'sent' : entry.why)),
-      ['sent', 'sent', 'it turned out too big to send'],
+      [
+        'sent',
+        'sent',
+        'it turned out too big to send',
+        'the files together were more than one turn can carry',
+      ],
     );
+    assert.equal(asked.length, 3, 'the fourth was refused without a request');
   });
 });
