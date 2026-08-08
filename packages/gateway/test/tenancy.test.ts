@@ -1503,6 +1503,16 @@ describe('tenancy', () => {
         (await post('/api/slack/model', { conversation: first, model: 'bad"id' })).status,
         400,
       );
+
+      // A model outlives the root it was picked in: the picker rides every
+      // answer, including a turn with no root at all, so a pick stored there
+      // has to come back or the next turn silently runs the agent's default.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(mo.endpointToken, 'mo-box', ['kilo']);
+        return (await ask(first)).workspace === undefined ? off : (off(), undefined);
+      }, 'the endpoint reattached offering no root');
+      assert.equal((await ask(first)).model, 'gpt-5.6-sol[high]');
     } finally {
       detach?.();
       await store.close();

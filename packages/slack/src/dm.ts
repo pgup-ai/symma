@@ -102,6 +102,16 @@ export interface RunSpec {
  * read would spend that budget on frames nobody reads. */
 const PROGRESS_MIN_MS = 4_000;
 
+/** The agent's own words, put inside mrkdwn italics: an underscore or backtick
+ * of its own would close the span and spill the rest into formatting, and a
+ * newline would break the block. Clamped, since a title is a label. */
+const plainly = (title: string): string =>
+  title
+    .replaceAll(/[_`\n]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+
 /** Rounded: what a member does with a token count is notice a turn that cost
  * ten times the last one. */
 const thousands = (tokens: number): string =>
@@ -165,7 +175,7 @@ export interface DmDeps {
    * answers, so without this the thread would fail every turn from here on. */
   shedMode: (conversation: string) => Promise<void>;
   /** Downloads one of the member's Slack files. */
-  fetchFile: (url: string) => Promise<FetchedFile>;
+  fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>;
   /** Rewrites the acknowledgement while the run is out, so a long turn shows
    * it is still moving. Fails open, like every hint here. */
   working: (channel: string, ts: string, text: string) => Promise<void>;
@@ -331,8 +341,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // absent mode is named too — read-only is the floor's truth for every
   // workspace turn that never picked one, old companions included.
   const scope = decision.label
-    ? `On it, in \`${decision.label.replaceAll('`', '')}\` — \`${decision.mode ?? 'read-only'}\` mode…`
-    : 'On it… It has no access to your files, so keep the question self-contained.';
+    ? `On it, in \`${decision.label.replaceAll('`', '')}\` — \`${decision.mode ?? 'read-only'}\` mode.`
+    : 'On it. It has no access to your files, so keep the question self-contained.';
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
   const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
@@ -341,7 +351,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${file.name.replaceAll('`', '')}\``).join(', ')}.`
     : undefined;
-  const ack = [scope, note, reading].filter(Boolean).join(' ');
+  // The trailing ellipsis is the standing "still going" cue, so it belongs on
+  // the end of whatever the acknowledgement turned out to be — not on the scope
+  // sentence, which a resume note or a file list then follows.
+  const ack = `${[scope, note, reading].filter(Boolean).join(' ').replace(/\.$/, '')}…`;
   const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
@@ -357,7 +370,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     if (now - lastShown < PROGRESS_MIN_MS) return;
     lastShown = now;
     void deps
-      .working(acked.channel, acked.ts, `${ack}\n\n_${title.replaceAll('_', ' ').slice(0, 200)}_`)
+      .working(acked.channel, acked.ts, `${ack}\n\n_${plainly(title)}_`)
       .catch(() => undefined);
   };
 

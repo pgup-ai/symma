@@ -83,6 +83,18 @@ export type Attached =
 const str = (value: unknown, fallback = ''): string =>
   typeof value === 'string' && value ? value : fallback;
 
+/** What a download's own status is worth saying to a member. Anything else is
+ * a transport problem they can only retry. */
+const DOWNLOAD_REFUSALS: Record<number, string> = {
+  403: 'I am not allowed to read it',
+  // The CDN served more than Slack said it would.
+  413: 'it turned out too big to send',
+};
+
+/** A file name is the member's own and lands in a mrkdwn aside, where a
+ * backtick would open a code span that swallows the rest of the sentence. */
+const plain = (name: string): string => name.replaceAll('`', '');
+
 function classify(file: SlackFile): 'text' | 'image' | undefined {
   const mime = str(file.mimetype).toLowerCase().split(';')[0]!;
   const kind = str(file.filetype).toLowerCase();
@@ -99,13 +111,15 @@ function classify(file: SlackFile): 'text' | 'image' | undefined {
  */
 export async function collectAttachments(
   files: SlackFile[],
-  fetchFile: (url: string) => Promise<FetchedFile>,
+  fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>,
 ): Promise<Attached[]> {
   const out: Attached[] = [];
   let spent = 0;
   for (const file of files) {
     const name = str(file.name, 'file');
-    if (out.filter((entry) => entry.ok).length >= MAX_FILES) {
+    // Examined, not succeeded: counting only the successes would let fifty
+    // attached files each cost a classify and a download.
+    if (out.length >= MAX_FILES) {
       out.push({ ok: false, name, why: `only the first ${String(MAX_FILES)} files were read` });
       continue;
     }
@@ -119,8 +133,14 @@ export async function collectAttachments(
       continue;
     }
     // Before the download, not after: the point of a ceiling is to not pull the
-    // bytes.
-    const size = typeof file.size === 'number' ? file.size : 0;
+    // bytes. An unreported size is refused rather than read as zero — the
+    // fetch below caps what Slack under-reports, but a file nobody sized is
+    // one nothing bounded.
+    const size = typeof file.size === 'number' && file.size > 0 ? file.size : undefined;
+    if (size === undefined) {
+      out.push({ ok: false, name, why: 'Slack did not say how big it is' });
+      continue;
+    }
     if (size > MAX_FILE_BYTES) {
       out.push({ ok: false, name, why: `too big to send (${String(Math.round(size / 1024))}kB)` });
       continue;
@@ -130,12 +150,12 @@ export async function collectAttachments(
       out.push({ ok: false, name, why: 'Slack gave me no way to download it' });
       continue;
     }
-    const got = await fetchFile(url).catch((): FetchedFile => ({ ok: false }));
+    const got = await fetchFile(url, MAX_FILE_BYTES).catch((): FetchedFile => ({ ok: false }));
     if (!got.ok || !got.bytes) {
       out.push({
         ok: false,
         name,
-        why: got.status === 403 ? 'I am not allowed to read it' : 'it would not download',
+        why: DOWNLOAD_REFUSALS[got.status ?? 0] ?? 'it would not download',
       });
       continue;
     }
@@ -163,6 +183,6 @@ export async function collectAttachments(
 export function skippedNote(attached: Attached[]): string[] {
   const skipped = attached.filter((entry) => !entry.ok);
   return skipped.length
-    ? [`Could not read ${skipped.map((s) => `${s.name} (${s.why})`).join(', ')}.`]
+    ? [`Could not read ${skipped.map((s) => `${plain(s.name)} (${s.why})`).join(', ')}.`]
     : [];
 }

@@ -421,18 +421,14 @@ export interface SessionModels {
  * agent may serve none, and a caller must not invent a total. */
 export interface TurnUsage {
   totalTokens?: number;
-  inputTokens?: number;
-  outputTokens?: number;
   /** Input served from the model's cache — the difference between a cheap
    * follow-up and an expensive one. */
   cachedTokens?: number;
-  /** Reasoning tokens — what the effort suffix on a model id buys. */
-  thoughtTokens?: number;
 }
 
-/** Keeps only the numbers the agent actually gave. codex-acp spells cached
- * reads `cachedReadTokens` where ACP says `cachedInputTokens`, so both are
- * read rather than guessed between. */
+/** Keeps only the numbers the agent actually gave. codex-acp 1.1.7 spells
+ * cached reads `cachedReadTokens` (live-probed) where ACP says
+ * `cachedInputTokens`, so both are read rather than guessed between. */
 function readUsage(raw: unknown): TurnUsage | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const source = raw as Record<string, unknown>;
@@ -445,10 +441,7 @@ function readUsage(raw: unknown): TurnUsage | undefined {
   };
   const usage: TurnUsage = {
     ...pick('totalTokens', count('totalTokens')),
-    ...pick('inputTokens', count('inputTokens')),
-    ...pick('outputTokens', count('outputTokens')),
     ...pick('cachedTokens', count('cachedReadTokens', 'cachedInputTokens')),
-    ...pick('thoughtTokens', count('thoughtTokens', 'reasoningOutputTokens')),
   };
   return Object.keys(usage).length ? usage : undefined;
 }
@@ -523,7 +516,15 @@ export async function driveAcpSession(
       } else if (kind === 'tool_call' || kind === 'tool_call_update') {
         // `tool_call` carries the title, an update usually only a status — so a
         // missing one is skipped rather than reported as a blank step.
-        if (typeof update.title === 'string' && update.title) options.onProgress?.(update.title);
+        if (typeof update.title === 'string' && update.title) {
+          // Inside the connection's message loop: a renderer that throws here
+          // would take the turn with it, and progress is only a hint.
+          try {
+            options.onProgress?.(update.title);
+          } catch (error) {
+            log(`acp:${agent} ${label}: progress sink threw, dropping one: ${String(error)}`);
+          }
+        }
         if (!usesMessageIds) flush();
       }
     },
@@ -706,25 +707,37 @@ export async function driveAcpSession(
   // Attachments lead, question last — the way round a human would write it.
   // Only kinds the agent advertised are sent (codex-acp 1.1.7 serves both): a
   // block it cannot read fails the whole prompt, losing the question too.
-  const promptCapabilities = (init?.promptCapabilities ?? {}) as Record<string, unknown>;
-  const attached = (options.attachments ?? []).flatMap((file): Record<string, unknown>[] =>
-    file.kind === 'image'
-      ? promptCapabilities.image === true
-        ? [{ type: 'image', mimeType: file.mimeType, data: file.data }]
-        : []
-      : promptCapabilities.embeddedContext === true
-        ? [
-            {
-              type: 'resource',
-              resource: {
-                uri: `symma://attachment/${file.name}`,
-                mimeType: file.mimeType,
-                text: file.data,
-              },
+  // Nested under `agentCapabilities`, where the spec puts it and where
+  // codex-acp 1.1.7 was observed to serve it. The top level is read too, for an
+  // agent that flattens it.
+  const promptCapabilities = ((
+    init?.agentCapabilities as { promptCapabilities?: unknown } | undefined
+  )?.promptCapabilities ??
+    init?.promptCapabilities ??
+    {}) as Record<string, unknown>;
+  const carries = (file: PromptAttachment): boolean =>
+    promptCapabilities[file.kind === 'image' ? 'image' : 'embeddedContext'] === true;
+  const attached = (options.attachments ?? [])
+    .filter(carries)
+    .map((file): Record<string, unknown> =>
+      file.kind === 'image'
+        ? { type: 'image', mimeType: file.mimeType, data: file.data }
+        : {
+            type: 'resource',
+            // Encoded: a name with a space or a `#` would otherwise make a URI
+            // a stricter consumer can reject, dropping the file it names.
+            resource: {
+              uri: `symma://attachment/${encodeURIComponent(file.name)}`,
+              mimeType: file.mimeType,
+              text: file.data,
             },
-          ]
-        : [],
-  );
+          },
+    );
+  // A file the agent cannot be handed is said out loud, not dropped: the caller
+  // has already told its member it was reading them.
+  const unreadable = (options.attachments ?? [])
+    .filter((file) => !carries(file))
+    .map((file) => `${file.name} did not reach ${agent}: it takes no ${file.kind} attachments.`);
   const result = (await conn.request('session/prompt', {
     sessionId,
     prompt: [
@@ -769,7 +782,10 @@ export async function driveAcpSession(
     stopReason: String(result?.stopReason ?? 'unknown'),
     sessionId,
     ...(usage ? { usage } : {}),
-    notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
+    notices: [
+      ...unreadable,
+      ...(answered.length ? segments.filter(aside).map((s) => s.text.trim()) : []),
+    ],
     ...(roster.length
       ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
       : {}),

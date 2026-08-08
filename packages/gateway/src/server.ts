@@ -931,11 +931,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // Read before the workspace rebind below: once this thread's row names the
       // new root, its own not-yet-shed choices satisfy the inheritance query and
       // the stale picks follow it in.
+      // The model is served with or without a root, because the picker offers it
+      // either way — only its *inheritance* is per-workspace. A mode has no
+      // meaning outside one, and none is served to a companion that cannot
+      // honor it, inheritance included.
+      if (stored.model) serve.model = stored.model;
       if (workspace && conversation) {
         for (const choice of ['mode', 'model'] as const) {
-          // The gate covers inheritance too, not just this row: a sibling
-          // thread's mode is no more servable to a companion that cannot
-          // honor one.
           if (choice === 'mode' && !modeCapable) continue;
           const inherited =
             (kept ? stored[choice] : undefined) ??

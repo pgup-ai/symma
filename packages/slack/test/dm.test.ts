@@ -419,7 +419,9 @@ describe('dm message', () => {
     assert.deepEqual(runs[0]!.attachments, [
       { name: 'rows.csv', mimeType: 'text/csv', kind: 'text', data: 'a,b\n1,2\n' },
     ]);
-    assert.match(posts[0]!.text, /Reading `rows\.csv`\./);
+    // The moving cue lands on the end of the whole acknowledgement, whatever it
+    // turned out to say.
+    assert.match(posts[0]!.text, /Reading `rows\.csv`…$/);
     // And the one it could not read is said out loud rather than quietly
     // missing from an answer that used the rest.
     assert.deepEqual(posts[1]!.notices, [
@@ -459,7 +461,7 @@ describe('dm message', () => {
         currentModelId: 'gpt-5.6-sol[high]',
         availableModels: [{ modelId: 'gpt-5.6-sol[high]' }],
       },
-      usage: { totalTokens: 24237, inputTokens: 13224, cachedTokens: 11008, outputTokens: 5 },
+      usage: { totalTokens: 24237, cachedTokens: 11008 },
       notices: ['Warning: skills were shortened.'],
       resumeWith: 'codex resume',
     });
@@ -480,7 +482,7 @@ describe('dm message', () => {
   it('says nothing about cost when the agent reported no total', async () => {
     // An invented number is worse than none, and agents other than codex
     // report nothing here at all.
-    const { deps, posts } = harness({ existing: CONVERSATION, usage: { inputTokens: 12 } });
+    const { deps, posts } = harness({ existing: CONVERSATION, usage: { cachedTokens: 12 } });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,

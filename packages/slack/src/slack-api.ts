@@ -53,7 +53,7 @@ export interface SlackApi {
   /** Downloads one of Slack's own file URLs. `url_private_download` is not a
    * public link — it needs the bot token as a bearer header, which is why this
    * lives here and not in whatever wants the bytes. */
-  fetchFile: (url: string) => Promise<FetchedFile>;
+  fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>;
   /** Publishes into the source thread. Returns why it could not rather than
    * throwing: §5 keeps the answer in the DM and names which of these happened,
    * and a publication that cannot land is not a lost answer. */
@@ -373,11 +373,16 @@ export function slackApi(
         await client.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
       } catch (error) {
         // Said once rather than swallowed: a scope or rate-limit problem here
-        // is invisible otherwise, and the answer still arrives either way.
-        options.log?.(`progress update failed: ${slackCode(error) ?? String(error)}`);
+        // is invisible otherwise, and the answer still arrives either way. The
+        // logger is a caller's callback, so it gets `mark`'s treatment too.
+        try {
+          options.log?.(`progress update failed: ${slackCode(error) ?? String(error)}`);
+        } catch {
+          /* a caller's logger is not worth the turn either */
+        }
       }
     },
-    async fetchFile(url) {
+    async fetchFile(url, maxBytes) {
       // The SDK covers `api.slack.com` calls; a file URL is plain HTTP with the
       // same token, so it goes through fetch directly.
       const res = await (options.fetch ?? fetch)(url, {
@@ -385,7 +390,17 @@ export function slackApi(
         signal: AbortSignal.timeout(FILE_FETCH_TIMEOUT_MS),
       });
       if (!res.ok) return { ok: false, status: res.status };
-      return { ok: true, bytes: Buffer.from(await res.arrayBuffer()) };
+      // Checked before the body is read, because the caller's ceiling stands on
+      // a size Slack reported and this is the one the CDN is serving.
+      const declared = Number(res.headers.get('content-length'));
+      if (declared > maxBytes) {
+        // Not awaited: dropping the socket is best effort, and a cancel that
+        // rejects would lose the reason the caller is about to report.
+        void res.body?.cancel().catch(() => undefined);
+        return { ok: false, status: 413 };
+      }
+      const bytes = Buffer.from(await res.arrayBuffer());
+      return bytes.byteLength > maxBytes ? { ok: false, status: 413 } : { ok: true, bytes };
     },
     async settle(channel, ts, text) {
       try {

@@ -59,20 +59,22 @@ describe('attachments', () => {
       [
         file({ name: 'book.xlsx', mimetype: 'application/vnd.ms-excel', filetype: 'xlsx' }),
         file({ name: 'huge.log', filetype: 'log', size: 900_000 }),
-        file({ name: 'nolink.md', url_private_download: undefined }),
+        file({ name: 'we`ird.md', url_private_download: undefined }),
       ],
       fetchFile,
     );
     assert.deepEqual(
       got.map((entry) => (entry.ok ? 'sent' : entry.name)),
-      ['book.xlsx', 'huge.log', 'nolink.md'],
+      ['book.xlsx', 'huge.log', 'we`ird.md'],
     );
     // The ceiling exists to not pull the bytes, so an oversized file is never
     // downloaded — and a binary is refused before the network too.
     assert.deepEqual(asked, []);
     assert.deepEqual(skippedNote(got), [
       'Could not read book.xlsx (xlsx is not something I can pass along), ' +
-        'huge.log (too big to send (879kB)), nolink.md (Slack gave me no way to download it).',
+        // Backtick stripped: the aside is mrkdwn, and a code span opened here
+        // would swallow the rest of the sentence.
+        'huge.log (too big to send (879kB)), weird.md (Slack gave me no way to download it).',
     ]);
   });
 

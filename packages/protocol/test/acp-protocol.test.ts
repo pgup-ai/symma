@@ -106,8 +106,18 @@ function fakeAgentIo(script: FakeAgentScript): {
         result: {
           protocolVersion: 1,
           ...(script.authMethods ? { authMethods: script.authMethods } : {}),
-          ...(script.capabilities ? { agentCapabilities: script.capabilities } : {}),
-          ...(script.promptCapabilities ? { promptCapabilities: script.promptCapabilities } : {}),
+          // Nested where the spec and codex-acp both put it — a fake that
+          // flattened this is what let the driver read the wrong level.
+          ...(script.capabilities || script.promptCapabilities
+            ? {
+                agentCapabilities: {
+                  ...script.capabilities,
+                  ...(script.promptCapabilities
+                    ? { promptCapabilities: script.promptCapabilities }
+                    : {}),
+                },
+              }
+            : {}),
         },
       });
     } else if (method === 'authenticate') {
@@ -550,8 +560,47 @@ describe('acp', () => {
 
     // An agent that advertised neither is sent neither: a block it cannot read
     // would fail the whole prompt, costing the question as well as the file.
-    await drive({});
+    const bare = await drive({});
     assert.deepEqual(sent[1], [{ type: 'text', text: 'what is this?' }]);
+    // And says so, because the caller has already told its member it was
+    // reading them — a silent drop is the failure this whole path exists for.
+    assert.deepEqual(bare.notices, [
+      'rows.csv did not reach codex: it takes no text attachments.',
+      'shot.png did not reach codex: it takes no image attachments.',
+    ]);
+  });
+
+  it('encodes an attachment name into its uri', async () => {
+    // A space or a `#` in a name would otherwise make a uri a stricter consumer
+    // can reject, dropping the file it names.
+    const sent: Record<string, unknown>[][] = [];
+    await driveAcpSession(
+      fakeAgentIo({
+        promptCapabilities: { embeddedContext: true },
+        onPromptBlocks: (blocks) => sent.push(blocks),
+        onPrompt: (agent) => {
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ok' },
+          });
+          agent.finish();
+        },
+      }),
+      {
+        cwd: '/tmp',
+        prompt: 'p',
+        agent: 'codex',
+        label: 't',
+        log: noLog,
+        attachments: [
+          { name: 'my notes #2.md', mimeType: 'text/markdown', kind: 'text', data: 'x' },
+        ],
+      },
+    );
+    assert.equal(
+      (sent[0]![0] as { resource: { uri: string } }).resource.uri,
+      'symma://attachment/my%20notes%20%232.md',
+    );
   });
 
   it('leaves the model alone when the roster does not hold it', async () => {

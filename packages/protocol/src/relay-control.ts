@@ -199,6 +199,9 @@ export type RelayControl = HelloControl | OpenControl | AckControl | CloseContro
 
 const str = (v: unknown): v is string => typeof v === 'string';
 
+/** What an `opened` ack may claim as a local resume command. */
+const RESUME_COMMAND = /^[a-z][a-z0-9-]{0,31} resume$/;
+
 /** Parse one control line; undefined for frames and malformed input. */
 export function parseRelayControl(line: string): RelayControl | undefined {
   let raw: Record<string, unknown>;
@@ -305,7 +308,12 @@ export function parseRelayControl(line: string): RelayControl | undefined {
         if (Array.isArray(raw.modelCandidates) && raw.modelCandidates.every(str)) {
           ack.modelCandidates = raw.modelCandidates as string[];
         }
-        if (str(raw.resumeWith)) ack.resumeWith = raw.resumeWith;
+        // A caller renders this beside a session id as a command a member can
+        // paste, so the shape is pinned here rather than trusted: `<cli> resume`
+        // and nothing else. A compromised endpoint is shut down and rotated
+        // (invariant 3), but it must not get a free line into someone's shell on
+        // the way there.
+        if (RESUME_COMMAND.test(String(raw.resumeWith))) ack.resumeWith = raw.resumeWith as string;
       }
       return control;
     }
