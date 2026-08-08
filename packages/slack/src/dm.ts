@@ -395,14 +395,19 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // place a long turn can show it is still moving. Throttled because
   // `chat.update` is rate-limited and a busy turn narrates far faster than
   // anyone reads; fails open, since this is a hint and not the answer.
+  //
+  // Queued rather than concurrent: two updates in flight on one message can land
+  // in either order, and the cleanup below losing that race would leave a step
+  // sitting above the answer — the thing it is there to take away.
   let lastShown = 0;
+  let updating = Promise.resolve();
   const narrate = (title: string): void => {
     const now = Date.now();
     if (now - lastShown < PROGRESS_MIN_MS) return;
     lastShown = now;
-    void deps
-      .working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`)
-      .catch(() => undefined);
+    updating = updating.then(() =>
+      deps.working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`).catch(() => undefined),
+    );
   };
 
   let answer: {
@@ -530,11 +535,15 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     await deps.finish(conversation.id, turn, 'completed', ran);
     throw error;
   }
-  // Slack cannot fold the narration away the way a terminal does, so once the
-  // answer is here the last step is only in the way. Guarded so a turn that never
-  // narrated spends no update, and fail-open like `narrate`.
-  if (lastShown) await deps.working(acked.channel, acked.ts, ack).catch(() => undefined);
   await deps.mark(message.channel, message.ts, 'done');
   await deps.finish(conversation.id, turn, 'completed', ran);
+  // Slack cannot fold the narration away the way a terminal does, so once the
+  // answer is here the last step is only in the way. Queued behind the narration
+  // it is undoing, and left until after the turn is closed: a `chat.update` Slack
+  // is slow to take would otherwise hold the turn open, and a member's next
+  // message would be refused for a line nobody is waiting on. Guarded so a turn
+  // that never narrated spends no update, and fail-open like `narrate`.
+  if (lastShown)
+    await updating.then(() => deps.working(acked.channel, acked.ts, ack)).catch(() => undefined);
   return existing ? 'resumed' : 'opened';
 }

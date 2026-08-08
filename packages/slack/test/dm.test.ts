@@ -8,6 +8,10 @@ import type { ThreadMessage } from '../src/snapshot.js';
 import type { ConversationRef } from '../src/mention.js';
 import type { MarkState } from '../src/slack-api.js';
 
+/** Narration is queued rather than sent where it is reported, so a step is a tick
+ * away from the update that shows it. */
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 const CONVERSATION: ConversationRef = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
 const READY: TurnTarget = {
   endpoint: 'ep-1',
@@ -39,6 +43,8 @@ function harness(
     unsupported?: { name: string; kind: string }[];
     /** A step the run reports while it is still in flight. */
     narrates?: string;
+    /** How long each acknowledgement update takes, by call order. */
+    updateDelays?: number[];
     /** What a file download hands back; absent is a download that fails. */
     fileBytes?: string;
     fails?: Error;
@@ -71,6 +77,10 @@ function harness(
   const finished: Record<string, string>[] = [];
   const sheds: string[] = [];
   const updates: { channel: string; ts: string; text: string }[] = [];
+  /** Acknowledgement updates in the order Slack finished applying them — not the
+   * order they were sent — interleaved with the marks, so what the turn waits on
+   * and what it has already closed can be told apart. */
+  const timeline: string[] = [];
   let fetches = 0;
   let asked = 0;
   const askedFor: string[] = [];
@@ -131,7 +141,12 @@ function harness(
     },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
-      return Promise.resolve();
+      // Settles out of call order when asked to, which is the only way a restore
+      // that races the narration rather than queueing behind it is visible.
+      const delay = over.updateDelays?.[updates.length - 1] ?? 0;
+      return new Promise<void>((resolve) => setTimeout(resolve, delay)).then(() => {
+        timeline.push(text);
+      });
     },
     shedModel: (conversation) => {
       sheds.push(`model:${conversation}`);
@@ -143,6 +158,7 @@ function harness(
     },
     mark: (channel, ts, state) => {
       marks.push({ channel, ts, state });
+      timeline.push(`mark:${state}`);
       return Promise.resolve();
     },
     turn: (spec) => {
@@ -173,6 +189,7 @@ function harness(
     finished,
     sheds,
     updates,
+    timeline,
     askedFor,
     asked: () => asked,
     fetches: () => fetches,
@@ -395,12 +412,14 @@ describe('dm message', () => {
     // that same message rather than a second post.
     assert.match(posts[0]!.text, /mode…$/);
     runs[0]!.onProgress!('Reading dm.ts');
+    await flush();
     assert.deepEqual(updates, [
       { channel: 'D-nel', ts: '300.0', text: `${posts[0]!.text}\n\n_Reading dm.ts_` },
     ]);
     // Throttled: a turn narrating every file read would spend the rate limit on
     // frames nobody reads.
     runs[0]!.onProgress!('Running git log');
+    await flush();
     assert.equal(updates.length, 1);
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
   });
@@ -430,18 +449,26 @@ describe('dm message', () => {
   });
 
   it('takes the narration back off once the answer is there to read', async () => {
-    const { deps, posts, updates } = harness({
+    // Asserted on what Slack finished applying, with the step deliberately the
+    // slower of the two: concurrent updates on one message can land either way
+    // round, and a restore that lost that race would put the step back.
+    const { deps, posts, timeline } = harness({
       existing: CONVERSATION,
       narrates: 'Reading dm.ts',
+      updateDelays: [20, 0],
     });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,
     );
     assert.deepEqual(
-      updates.map((update) => update.text),
+      timeline.filter((entry) => !entry.startsWith('mark:')),
       [`${posts[0]!.text}\n\n_Reading dm.ts_`, posts[0]!.text],
     );
+    // Last of everything, marks included: the turn is closed before this update
+    // is waited on, or one Slack sits on would hold the thread against the
+    // member's next message.
+    assert.equal(timeline.at(-1), posts[0]!.text);
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {
