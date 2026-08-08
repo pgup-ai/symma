@@ -178,6 +178,12 @@ const as = (token: string, path: string, init?: RequestInit): Promise<Response> 
     headers: { authorization: `Bearer ${token}`, ...init?.headers },
   });
 
+/** Read a leg the test only means to hold open. Not optional: an unconsumed
+ * response body is unreachable, and undici destroys the socket when GC takes it
+ * — which the gateway reads as the peer detaching. A two-core runner collects
+ * mid-suite where a laptop never does, so skipping this fails only in CI. */
+const drain = (res: Response): Promise<unknown> => res.body!.pipeTo(new WritableStream());
+
 /** Attach a companion for `endpoint` and leave its SSE leg open. */
 const attach = async (
   token: string,
@@ -189,7 +195,9 @@ const attach = async (
   void fetch(`${base}/api/endpoints/${endpoint}/stream`, {
     headers: { authorization: `Bearer ${token}` },
     signal: abort.signal,
-  }).catch(() => undefined);
+  })
+    .then(drain)
+    .catch(() => undefined);
   await as(token, `/api/endpoints/${endpoint}/ingest`, {
     method: 'POST',
     body: `${JSON.stringify({
@@ -703,6 +711,7 @@ describe('tenancy', () => {
       headers: { authorization: `Bearer ${jo.clientToken}` },
       signal: abort.signal,
     });
+    void drain(held).catch(() => undefined);
     try {
       assert.equal(held.status, 200);
       assert.equal((await as(kim.clientToken, '/api/sessions/sid-claim/stream')).status, 404);
@@ -838,7 +847,6 @@ describe('tenancy', () => {
           () => true,
         ),
       )) === true;
-    const drain = (res: Response): Promise<unknown> => res.body!.pipeTo(new WritableStream());
     try {
       // A `hello` and then a body that never ends: the already-authenticated
       // leg an SSE-only sweep leaves usable for frames and for a re-`hello`.
@@ -864,14 +872,20 @@ describe('tenancy', () => {
         duplex: 'half',
         signal: legs.signal,
       } as RequestInit);
-      const survivor = await fetch(`${base}/api/endpoints/nia-box/stream`, {
-        headers: { authorization: `Bearer ${again.endpointToken}` },
-        signal: legs.signal,
-      });
-      const doomedClient = await fetch(`${base}/api/sessions/sid-nia/stream`, {
-        headers: { authorization: `Bearer ${nia.clientToken}` },
-        signal: legs.signal,
-      });
+      // Drained from the moment they open, not at the assertion: the revocation
+      // below awaits a pool round-trip, and an unread leg may not survive it.
+      const survivor = drain(
+        await fetch(`${base}/api/endpoints/nia-box/stream`, {
+          headers: { authorization: `Bearer ${again.endpointToken}` },
+          signal: legs.signal,
+        }),
+      );
+      const doomedClient = drain(
+        await fetch(`${base}/api/sessions/sid-nia/stream`, {
+          headers: { authorization: `Bearer ${nia.clientToken}` },
+          signal: legs.signal,
+        }),
+      );
 
       const pool = new Pool({ connectionString: url });
       try {
@@ -883,10 +897,10 @@ describe('tenancy', () => {
       }
 
       assert.equal(await closes(doomedIngest, 3000), true, 'ingest leg outlived its token');
-      assert.equal(await closes(drain(doomedClient), 3000), true, 'client leg outlived its token');
+      assert.equal(await closes(doomedClient, 3000), true, 'client leg outlived its token');
       // Same endpoint, different token, still serving: a revocation that took
       // the siblings with it would be an outage dressed as a security fix.
-      assert.equal(await closes(drain(survivor), 400), false, 'sibling token dropped too');
+      assert.equal(await closes(survivor, 400), false, 'sibling token dropped too');
     } finally {
       legs.abort();
     }
