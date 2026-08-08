@@ -406,9 +406,8 @@ describe('dm message', () => {
   });
 
   it('states the scope and the session once, not on every turn', async () => {
-    // A follow-up the gateway found the same machine, agent and directory for:
-    // the project and mode are what the root already said, the picker under the
-    // answer carries the mode, and the session is the one it is resuming.
+    // The resume is what makes this a follow-up in the same place, and the
+    // session it names is the one that answers.
     const { deps, posts } = harness({
       existing: CONVERSATION,
       endpoint: {
@@ -431,8 +430,6 @@ describe('dm message', () => {
   });
 
   it('takes the narration back off once the answer is there to read', async () => {
-    // A step is worth seeing while the turn runs and in the way afterwards, in a
-    // client that cannot fold it away.
     const { deps, posts, updates } = harness({
       existing: CONVERSATION,
       narrates: 'Reading dm.ts',
@@ -839,8 +836,8 @@ describe('dm message', () => {
     // agent refuses would otherwise arrive with nothing.
     assert.match(runs[0]!.context!, /why is the deploy failing/);
     assert.match(posts[0]!.text, /Picking up where it left off/);
-    // And the offer being refused is exactly when the new id has to be said: the
-    // run came back on `acp-1`, so `acp-0` is what nothing can pick up now.
+    // The run came back on `acp-1`, so the offered `acp-0` is what nothing can
+    // pick up now — a refused offer is exactly when the new id has to be said.
     assert.deepEqual(posts[1]!.notices, ['`codex resume acp-1`']);
     // Against what it ran under, since an id means nothing on another machine.
     assert.deepEqual(finished, [

@@ -359,13 +359,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // §4 wants the scope in the DM root rather than guessed at, so the turn that
   // decides it names the project and the mode — an absent mode included, since
   // read-only is the floor's truth for a workspace turn that never picked one.
-  //
-  // Only that turn, though. A resume means the gateway found this thread's
-  // machine, agent and directory unchanged, so the scope is what the root
-  // already said and the picker under every answer carries the mode. A turn with
-  // no workspace at all keeps saying so: nothing else tells a member their
-  // question has to stand on its own, and it is the one thing they would
-  // otherwise assume wrong.
+  // Only that turn: a resume is offered only where this thread's machine, agent
+  // and directory are all still the ones it was minted under, so a follow-up
+  // would be repeating the root, and the picker under every answer carries the
+  // mode. Having no workspace is the exception that repeats — nothing else tells
+  // a member their question has to stand on its own.
   //
   // Through `plainly` like every other name in this message: a backtick closes
   // the span it sits in, and a `<` opens an entity that renders as a mention
@@ -508,13 +506,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
         // The command is a closed set at the parse boundary; the session id is
         // the agent's own string and is not.
-        //
-        // Said once per session rather than once per turn: a resumed session is
-        // one this thread already carries the line for, and one the agent could
-        // not resume was minted fresh and needs the new id — which is why this
-        // compares what ran against what was offered, the same test the driver
-        // uses to decide the transcript travels. A copy pinned anywhere would
-        // eventually name a session that is no longer answering.
+        // A mismatch is the agent having minted a fresh session rather than taking
+        // the one offered, which is the only time this thread has an id it was
+        // not already given. Same test the driver sends the transcript on.
         ...(answer.resumeWith && answer.session !== decision.resume
           ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``]
           : []),
@@ -536,12 +530,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     await deps.finish(conversation.id, turn, 'completed', ran);
     throw error;
   }
-  // The narration was a hint for a turn in flight. Once the answer is here it is
-  // in the way — Slack cannot fold it up the way a terminal does — so the
-  // acknowledgement goes back to what it said before. Only when something was
-  // narrated, or a short turn spends an update saying nothing changed, and
-  // fail-open for the same reason `narrate` is: this is presentation, and the
-  // answer is already delivered.
+  // Slack cannot fold the narration away the way a terminal does, so once the
+  // answer is here the last step is only in the way. Guarded so a turn that never
+  // narrated spends no update, and fail-open like `narrate`.
   if (lastShown) await deps.working(acked.channel, acked.ts, ack).catch(() => undefined);
   await deps.mark(message.channel, message.ts, 'done');
   await deps.finish(conversation.id, turn, 'completed', ran);
