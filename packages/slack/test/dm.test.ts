@@ -80,8 +80,9 @@ function harness(
   const sheds: string[] = [];
   const updates: { channel: string; ts: string; text: string }[] = [];
   /** Acknowledgement updates in the order Slack finished applying them — not the
-   * order they were sent — interleaved with the marks, so what the turn waits on
-   * and what it has already closed can be told apart. */
+   * order they were sent — interleaved with the marks and the turn's close, so
+   * what the turn waits on and what it has already finished with can be told
+   * apart. */
   const timeline: string[] = [];
   let fetches = 0;
   let asked = 0;
@@ -131,6 +132,7 @@ function harness(
     destination: () => Promise.resolve(over.destination),
     finish: (conversation, turn, status, ran) => {
       finished.push({ conversation, turn, status, ...ran });
+      timeline.push(`finish:${status}`);
       return Promise.resolve();
     },
     fetchFile: () => {
@@ -451,6 +453,18 @@ describe('dm message', () => {
     assert.equal(posts[1]!.notices, undefined);
   });
 
+  it('spends no update on a turn that never said anything', async () => {
+    // The `chat.update` budget is per channel, and most turns answer without
+    // narrating: tidying an acknowledgement that was never written on would spend
+    // that budget on every answer instead.
+    const { deps, updates } = harness({ existing: CONVERSATION });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(updates, []);
+  });
+
   it('keeps the queue alive when an update throws where it stands', async () => {
     // A throw rather than a rejection is what tells whether the queue's `catch`
     // sits on the chain or only on the call: on the call, this leaves the chain
@@ -481,12 +495,12 @@ describe('dm message', () => {
       deps,
     );
     assert.deepEqual(
-      timeline.filter((entry) => !entry.startsWith('mark:')),
+      timeline.filter((entry) => !/^(mark|finish):/.test(entry)),
       [`${posts[0]!.text}\n\n_Reading dm.ts_`, posts[0]!.text],
     );
-    // Last of everything, marks included: the turn is closed before this update
-    // is waited on, or one Slack sits on would hold the thread against the
-    // member's next message.
+    // Last of everything, the mark and the turn's close included: both happen
+    // before this update is waited on, or one Slack sits on would hold the thread
+    // against the member's next message.
     assert.equal(timeline.at(-1), posts[0]!.text);
   });
 

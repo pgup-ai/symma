@@ -106,6 +106,14 @@ export interface RunSpec {
  * read would spend that budget on frames nobody reads. */
 const PROGRESS_MIN_MS = 4_000;
 
+/** How long the answer's own handler will wait on the update that tidies the
+ * acknowledgement. The Slack client is built on the SDK's defaults — `timeout: 0`
+ * and ten retries across about half an hour — so a `chat.update` Slack sits on
+ * pins this handler for that long, on every narrated turn, for a line the member
+ * is not waiting for. Landing late is harmless: nothing else writes that message
+ * after the turn that posted it. */
+const TIDY_MS = 10_000;
+
 /** A tool-call title on its way into a mrkdwn *italic* span, so an underscore
  * closes it as surely as a backtick does. Clamped, since a title is a label. */
 const asStep = (title: string): string =>
@@ -557,7 +565,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // is slow to take would otherwise hold the turn open, and a member's next
   // message would be refused for a line nobody is waiting on. Guarded so a turn
   // that never narrated spends no update, and fail-open like `narrate`.
+  // Waited on to a deadline, not indefinitely — see `TIDY_MS`.
   if (lastShown)
-    await updating.then(() => deps.working(acked.channel, acked.ts, ack)).catch(() => undefined);
+    await Promise.race([
+      updating.then(() => deps.working(acked.channel, acked.ts, ack)).catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, TIDY_MS).unref()),
+    ]);
   return existing ? 'resumed' : 'opened';
 }
