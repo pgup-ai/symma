@@ -582,10 +582,13 @@ export async function driveAcpSession(
     },
     (method, params) => {
       if (method === 'session/request_permission') {
+        if (options.floorUpstream) {
+          log(`acp:${agent} ${label}: upstream floor leaked a permission request; cancelled`);
+          return { outcome: { outcome: 'cancelled' } };
+        }
         // The driver's own floor follows the caller's mode the same way the
         // companion's does — a local caller that asked for a write-capable
         // mode must not have this layer silently deny what the mode promises.
-        // Remote turns use the companion floor and the notification above.
         const policy: PermissionPolicy =
           options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only';
         const { response, decided } = answerPermission(params as PermissionRequestParams, policy);

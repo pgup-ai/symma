@@ -350,6 +350,31 @@ describe('acp', () => {
     assert.equal(await reported(false), undefined);
   });
 
+  it('fails closed when an upstream floor leaks a permission request', async () => {
+    const permissionAnswers: unknown[] = [];
+    const fake = fakeAgentIo({
+      onPrompt: (agent) =>
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'execute', title: 'Run git status' },
+          options: [{ optionId: 'ao', kind: 'allow_once' }],
+        }),
+      onClientResponse: (_id, result, agent) => {
+        permissionAnswers.push(result);
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'fake',
+      label: 't',
+      log: noLog,
+      floorUpstream: true,
+    });
+    assert.deepEqual(permissionAnswers, [{ outcome: { outcome: 'cancelled' } }]);
+    assert.equal(result.approvals, undefined);
+  });
+
   it('carries a refusal back too, since the floor made that call as well', async () => {
     const fake = fakeAgentIo({
       onPrompt: (agent) =>
