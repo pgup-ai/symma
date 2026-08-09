@@ -132,6 +132,12 @@ describe('thread snapshot', () => {
       { budgetBytes: 10_000 },
     );
     assert.equal(ends.text, '> *J:* done\n> files: x.log');
+
+    // Breaks only: a tab at the end of a line can be part of what was pasted.
+    const tabbed = threadSnapshot([{ ts: '100.0', author: 'J', text: 'if (x) {\t' }], {
+      budgetBytes: 10_000,
+    });
+    assert.equal(tabbed.text, '> *J:* if (x) {\t');
   });
 
   it('does not let a display name close the bold it is shown in', () => {
@@ -142,10 +148,16 @@ describe('thread snapshot', () => {
       [
         { ts: '100.0', author: 'C*3PO', text: 'hello there' },
         { ts: '101.0', author: 'john_doe', text: 'fixed the _thing_' },
+        // Nothing left after the pairs come out, which is the same unknown as a
+        // message Slack sent with no author at all.
+        { ts: '102.0', author: '*~_*', text: 'still me' },
       ],
       { budgetBytes: 10_000 },
     );
-    assert.equal(snapshot.text, '> *C 3PO:* hello there\n> *john doe:* fixed the _thing_');
+    assert.equal(
+      snapshot.text,
+      '> *C 3PO:* hello there\n> *john doe:* fixed the _thing_\n> *someone:* still me',
+    );
   });
 
   it('names attached files without fetching them', () => {

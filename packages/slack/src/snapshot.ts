@@ -31,15 +31,22 @@ export interface Snapshot {
  * `my_file.log` inside italics closes them early. */
 const render = (message: ThreadMessage): string => {
   const files = message.files?.map((f) => f.name).join(', ');
-  // Trimmed first, or a trailing break quotes an empty line before the files. One
-  // inside the text keeps its blank line, which is what Slack shows for it too.
-  const quoted = message.text.trimEnd().replaceAll('\n', '\n> ');
+  // Breaks only, and only trailing ones: a final tab can be part of pasted code,
+  // where a final break quotes the empty line after it. One inside the text keeps
+  // its blank line, which is what Slack shows for it too.
+  const quoted = message.text.replace(/\n+$/, '').replaceAll('\n', '\n> ');
   // The bold is opened here, so the pairs are this line's to take out: `*Jane*`
   // closes it, and `john_doe` opens an italic that runs to the message's next
   // underscore. Spaced, not dropped — `john doe` is the name, `johndoe` is not.
-  const who = message.author.replaceAll(/[*_~]/g, ' ').replace(/\s+/g, ' ').trim();
+  // A name made of nothing else is the same unknown as a message with no author.
+  const who =
+    message.author.replaceAll(/[*_~]/g, ' ').replace(/\s+/g, ' ').trim() || UNKNOWN_AUTHOR;
   return `> *${who}:* ${quoted}${files ? `\n> files: ${files}` : ''}`;
 };
+
+/** What Slack's own messages are attributed to — a join, a bot post — and so
+ * what a name that renders to nothing falls back to. */
+export const UNKNOWN_AUTHOR = 'someone';
 
 const bytes = (value: string): number => Buffer.byteLength(value, 'utf8');
 

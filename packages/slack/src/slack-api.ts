@@ -10,7 +10,7 @@ import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } fro
 import { isSafeId, isSafeModelId, type SessionModels, type SessionModes } from '@symma/protocol';
 
 import type { FetchedFile } from './attachments.js';
-import type { ThreadMessage } from './snapshot.js';
+import { UNKNOWN_AUTHOR, type ThreadMessage } from './snapshot.js';
 
 export interface SlackApi {
   /** Oldest first. Undefined when the bot cannot see the channel at all, which
@@ -312,7 +312,7 @@ const read = (raw: RawMessage[], names: Map<string, string>): ThreadMessage[] =>
       // Slack's own messages — a join, a bot post — carry no `user`, and so are
       // never asked about. The rest are always in the map: `threadReplies` builds
       // it from these same messages by this same test.
-      author: typeof m.user === 'string' ? names.get(m.user)! : 'someone',
+      author: typeof m.user === 'string' ? names.get(m.user)! : UNKNOWN_AUTHOR,
       text: typeof m.text === 'string' ? m.text : '',
       // Named, never fetched: downloading widens both the scope request and the
       // data-lifecycle surface (§10).
