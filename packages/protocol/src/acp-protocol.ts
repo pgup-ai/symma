@@ -435,10 +435,11 @@ function readUsage(raw: unknown): TurnUsage | undefined {
   const count = (...names: string[]): number | undefined => {
     for (const name of names) {
       const value = source[name];
-      // Below zero is not a count. Dropped here rather than passed on, since a
-      // caller cannot tell a real figure from a nonsense one and every one of
-      // them would have to know to check.
-      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
+      // A count is a whole number, and not one below zero. Dropped here rather
+      // than passed on, since a caller cannot tell a real figure from a nonsense
+      // one and every one of them would have to know to check. `isInteger` covers
+      // the infinities and `NaN` on its own.
+      if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value;
     }
     return undefined;
   };

@@ -574,10 +574,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       updating.then(() => deps.working(acked.channel, acked.ts, ack)).catch(() => undefined),
       new Promise<void>((resolve) => {
         deadline = setTimeout(resolve, TIDY_MS);
+        // Two different jobs on the same handle: `unref` so waiting on a line
+        // nobody reads cannot be the last thing holding a process open, and the
+        // clear below so a deadline that lost its race is not left pending — one
+        // handle per narrated turn adds up under traffic.
+        deadline.unref();
       }),
     ]);
-    // Cleared rather than left to fire: a live handle per narrated turn adds up
-    // under traffic, and a deadline that lost its race has nothing left to do.
     clearTimeout(deadline);
   }
   return existing ? 'resumed' : 'opened';

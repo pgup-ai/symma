@@ -319,6 +319,8 @@ describe('acp', () => {
       totalTokens: 900,
     });
     assert.equal(await drive({ totalTokens: -5, cachedReadTokens: -1 }), undefined);
+    // Nor a fraction of a token, which is not a thing either.
+    assert.equal(await drive({ totalTokens: 1.5, cachedReadTokens: 0.5 }), undefined);
   });
 
   it('introduces itself as the library, not as a consumer', async () => {
