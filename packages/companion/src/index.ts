@@ -818,6 +818,15 @@ async function openSession(control: OpenControl): Promise<void> {
       if (decided) forward({ jsonrpc: '2.0', method: PERMISSION_ANSWERED, params: decided });
       return;
     }
+    // Reserved for the line above. An agent sending it is claiming a decision this
+    // floor makes, and a caller has no way to tell the claim from the record — it
+    // would read to a member as "your machine agreed to this" about something
+    // nobody agreed to. Dropped rather than passed on, and said out loud: an agent
+    // reaching for this is worth knowing about.
+    if (frame.method === PERMISSION_ANSWERED) {
+      log(`${control.sessionId}: agent tried to report a permission decision; dropped`);
+      return;
+    }
     forward(frame);
   });
   child.stdout?.setEncoding('utf8');

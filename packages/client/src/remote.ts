@@ -297,6 +297,9 @@ export async function runRemotePrompt(
             model,
             ...(ack.modelCandidates ? { configOptionModelIds: ack.modelCandidates } : {}),
             ...(ack.requirePlanMode ? { requirePlanMode: true } : {}),
+            // The companion answers this session's permission requests and never
+            // forwards them, so what it decided arrives as a notification.
+            floorUpstream: true,
             ...(config.mode !== undefined ? { mode: config.mode } : {}),
             ...(config.onProgress ? { onProgress: config.onProgress } : {}),
             ...(config.attachments?.length ? { attachments: config.attachments } : {}),

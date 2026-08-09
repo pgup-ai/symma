@@ -360,6 +360,12 @@ export interface AcpSessionOptions {
   /** Fail closed when plan mode is missing or cannot be set (agents with no
    * agent-side sandbox — plan mode is their behavioral read-only layer). */
   requirePlanMode?: boolean;
+  /** The permission floor for this session runs somewhere else — the companion,
+   * on the machine the agent is on — so what it decided arrives as a notification
+   * rather than as this driver's own answer. Without it the only thing that could
+   * send one is the agent, and an agent naming its own approvals is not a record
+   * of anything, so they are ignored. */
+  floorUpstream?: boolean;
   /** Session mode to run under, one of the agent's `availableModes`. Fails the
    * turn when not offered — no silent downgrade in either direction. Absent
    * keeps the review path's behavior: plan mode forced when offered. */
@@ -558,8 +564,10 @@ export async function driveAcpSession(
     (method, params) => {
       // A floor that answered elsewhere, saying what it decided: the companion
       // never forwards the request, so this is the only way a remote turn learns
-      // what was allowed on its behalf.
-      if (method === PERMISSION_ANSWERED) {
+      // what was allowed on its behalf. Only where there is such a floor — with
+      // none, the only sender left is the agent, and an agent naming its own
+      // approvals is not a record of anything.
+      if (method === PERMISSION_ANSWERED && options.floorUpstream) {
         const { title, allowed } = params as { title?: unknown; allowed?: unknown };
         if (typeof title === 'string' && typeof allowed === 'boolean')
           approvals.push({ title, allowed });

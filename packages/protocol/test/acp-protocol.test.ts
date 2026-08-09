@@ -329,28 +329,37 @@ describe('acp', () => {
     assert.equal(result.approvals, undefined);
   });
 
-  it('takes the decision from whoever answered it elsewhere', async () => {
+  it('takes the decision from an upstream floor, and from nobody else', async () => {
     // A remote turn's floor is the companion's: it answers on its own machine and
     // never forwards the request, so without this the driver sees nothing and a
     // turn where nobody was asked reports as one where nothing was decided.
-    const fake = fakeAgentIo({
-      onPrompt: (agent) => {
-        agent.update({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'ok' },
-        });
-        agent.notify(PERMISSION_ANSWERED, { title: 'Run git push', allowed: true });
-        agent.finish();
-      },
-    });
-    const result = await driveAcpSession(fake, {
-      cwd: '/tmp',
-      prompt: 'p',
-      agent: 'fake',
-      label: 't',
-      log: noLog,
-    });
-    assert.deepEqual(result.approvals, [{ title: 'Run git push', allowed: true }]);
+    //
+    // With no floor upstream the only thing left that could send one is the agent,
+    // and an agent naming its own approvals is a claim, not a record — a member
+    // would read it as their own machine having agreed to something.
+    const reported = async (floorUpstream: boolean): Promise<unknown> => {
+      const fake = fakeAgentIo({
+        onPrompt: (agent) => {
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ok' },
+          });
+          agent.notify(PERMISSION_ANSWERED, { title: 'Run git push', allowed: true });
+          agent.finish();
+        },
+      });
+      const result = await driveAcpSession(fake, {
+        cwd: '/tmp',
+        prompt: 'p',
+        agent: 'fake',
+        label: 't',
+        log: noLog,
+        ...(floorUpstream ? { floorUpstream: true } : {}),
+      });
+      return result.approvals;
+    };
+    assert.deepEqual(await reported(true), [{ title: 'Run git push', allowed: true }]);
+    assert.equal(await reported(false), undefined);
   });
 
   it('carries a refusal back too, since the floor made that call as well', async () => {
