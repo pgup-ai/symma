@@ -274,40 +274,53 @@ describe('workspace allowlist', () => {
     ).find((entry) => entry.endpoint === 'ws')!;
     const ws = presence.workspaces![0]!.id;
 
-    const stream = await fetch(`${base}/api/sessions/sid-perm-forge/stream?token=client-tok`);
-    const reader = stream.body!.getReader();
-    const said: { title?: unknown; allowed?: unknown }[] = [];
-    void (async () => {
-      const decoder = new TextDecoder();
-      let buffer = '';
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) return;
-        buffer += decoder.decode(value, { stream: true });
-        let nl = buffer.indexOf('\n');
-        while (nl !== -1) {
-          const line = buffer.slice(0, nl);
-          buffer = buffer.slice(nl + 1);
-          nl = buffer.indexOf('\n');
-          if (!line.startsWith('data: ')) continue;
-          const frame = (JSON.parse(line.slice(6)) as { frame?: Record<string, unknown> }).frame;
-          if (frame?.method === 'symma/permission_answered')
-            said.push(frame.params as { title?: unknown });
+    /** What reached the client on one session's own leg. Read from the leg this
+     * opens rather than through `controlFor`, which would open a second one for
+     * the same session and leave the frames on whichever won. */
+    const reported = async (
+      sessionId: string,
+      body: Record<string, unknown>,
+    ): Promise<unknown[]> => {
+      const stream = await fetch(`${base}/api/sessions/${sessionId}/stream?token=client-tok`);
+      const reader = stream.body!.getReader();
+      const said: unknown[] = [];
+      void (async () => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          let nl = buffer.indexOf('\n');
+          while (nl !== -1) {
+            const line = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            nl = buffer.indexOf('\n');
+            if (!line.startsWith('data: ')) continue;
+            const frame = (JSON.parse(line.slice(6)) as { frame?: Record<string, unknown> }).frame;
+            if (frame?.method === 'symma/permission_answered') said.push(frame.params);
+          }
         }
+      })().catch(() => undefined);
+      try {
+        await open({ sessionId, agent: 'perm', workspace: ws, ...body });
+        await waitFor(async () => (said.length ? true : undefined), `the floor to report`);
+        // A beat for the forged frame to arrive if it were going to.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return said;
+      } finally {
+        await open({ kind: 'close', sessionId });
       }
-    })().catch(() => undefined);
+    };
 
-    try {
-      // Opened on this leg rather than through `controlFor`, which would open a
-      // second one for the same session and leave the frames on whichever won.
-      await open({ sessionId: 'sid-perm-forge', agent: 'perm', workspace: ws, mode: 'agent' });
-      await waitFor(async () => (said.length ? true : undefined), 'the floor to report');
-      // A beat for the forged frame to arrive if it were going to.
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      assert.deepEqual(said, [{ title: 'Write source.txt', allowed: true }]);
-    } finally {
-      await open({ kind: 'close', sessionId: 'sid-perm-forge' });
-    }
+    // Both halves travel: an approval the member never gave, and a refusal the
+    // agent will otherwise answer around without naming.
+    assert.deepEqual(await reported('sid-perm-allowed', { mode: 'agent' }), [
+      { title: 'Write source.txt', allowed: true },
+    ]);
+    assert.deepEqual(await reported('sid-perm-refused', {}), [
+      { title: 'Write source.txt', allowed: false },
+    ]);
   });
 
   // Last, because proving the shutdown path means ending the companion.
