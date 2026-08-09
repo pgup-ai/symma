@@ -8,6 +8,10 @@ import type { ThreadMessage } from '../src/snapshot.js';
 import type { ConversationRef } from '../src/mention.js';
 import type { MarkState } from '../src/slack-api.js';
 
+/** Narration is queued rather than sent where it is reported, so a step is a tick
+ * away from the update that shows it. */
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 const CONVERSATION: ConversationRef = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
 const READY: TurnTarget = {
   endpoint: 'ep-1',
@@ -37,6 +41,12 @@ function harness(
     usage?: TurnUsage;
     /** Files the agent had no block for, as the driver reports them. */
     unsupported?: { name: string; kind: string }[];
+    /** A step the run reports while it is still in flight. */
+    narrates?: string;
+    /** How long each acknowledgement update takes, by call order. */
+    updateDelays?: number[];
+    /** The first update throws where it stands rather than rejecting. */
+    updateThrows?: boolean;
     /** What a file download hands back; absent is a download that fails. */
     fileBytes?: string;
     fails?: Error;
@@ -69,6 +79,11 @@ function harness(
   const finished: Record<string, string>[] = [];
   const sheds: string[] = [];
   const updates: { channel: string; ts: string; text: string }[] = [];
+  /** Acknowledgement updates in the order Slack finished applying them — not the
+   * order they were sent — interleaved with the marks and the turn's close, so
+   * what the turn waits on and what it has already finished with can be told
+   * apart. */
+  const timeline: string[] = [];
   let fetches = 0;
   let asked = 0;
   const askedFor: string[] = [];
@@ -84,6 +99,7 @@ function harness(
     log: () => {},
     run: (spec) => {
       runs.push(spec);
+      if (over.narrates) spec.onProgress?.(over.narrates);
       return over.fails
         ? Promise.reject(over.fails)
         : Promise.resolve({
@@ -116,6 +132,7 @@ function harness(
     destination: () => Promise.resolve(over.destination),
     finish: (conversation, turn, status, ran) => {
       finished.push({ conversation, turn, status, ...ran });
+      timeline.push(`finish:${status}`);
       return Promise.resolve();
     },
     fetchFile: () => {
@@ -128,7 +145,13 @@ function harness(
     },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
-      return Promise.resolve();
+      if (over.updateThrows && updates.length === 1) throw new Error('sync');
+      // Settles out of call order when asked to, which is the only way a restore
+      // that races the narration rather than queueing behind it is visible.
+      const delay = over.updateDelays?.[updates.length - 1] ?? 0;
+      return new Promise<void>((resolve) => setTimeout(resolve, delay)).then(() => {
+        timeline.push(text);
+      });
     },
     shedModel: (conversation) => {
       sheds.push(`model:${conversation}`);
@@ -140,6 +163,7 @@ function harness(
     },
     mark: (channel, ts, state) => {
       marks.push({ channel, ts, state });
+      timeline.push(`mark:${state}`);
       return Promise.resolve();
     },
     turn: (spec) => {
@@ -170,6 +194,7 @@ function harness(
     finished,
     sheds,
     updates,
+    timeline,
     askedFor,
     asked: () => asked,
     fetches: () => fetches,
@@ -392,14 +417,91 @@ describe('dm message', () => {
     // that same message rather than a second post.
     assert.match(posts[0]!.text, /mode…$/);
     runs[0]!.onProgress!('Reading dm.ts');
+    await flush();
     assert.deepEqual(updates, [
       { channel: 'D-nel', ts: '300.0', text: `${posts[0]!.text}\n\n_Reading dm.ts_` },
     ]);
     // Throttled: a turn narrating every file read would spend the rate limit on
     // frames nobody reads.
     runs[0]!.onProgress!('Running git log');
+    await flush();
     assert.equal(updates.length, 1);
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
+  });
+
+  it('states the scope and the session once, not on every turn', async () => {
+    // The resume is what makes this a follow-up in the same place, and the
+    // session it names is the one that answers.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      endpoint: {
+        ...READY,
+        workspace: 'ws-1',
+        workspaceLabel: 'symma',
+        mode: 'agent-full-access',
+        resume: 'acp-1',
+      },
+      resumeWith: 'codex resume',
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      deps,
+    );
+    assert.equal(posts[0]!.text, 'On it. Picking up where it left off, if it still can…');
+    // The harness records an aside list only when there is one, so an answer with
+    // nothing to add carries no key at all.
+    assert.equal(posts[1]!.notices, undefined);
+  });
+
+  it('spends no update on a turn that never said anything', async () => {
+    // The `chat.update` budget is per channel, and most turns answer without
+    // narrating: tidying an acknowledgement that was never written on would spend
+    // that budget on every answer instead.
+    const { deps, updates } = harness({ existing: CONVERSATION });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(updates, []);
+  });
+
+  it('keeps the queue alive when an update throws where it stands', async () => {
+    // A throw rather than a rejection is what tells whether the queue's `catch`
+    // sits on the chain or only on the call: on the call, this leaves the chain
+    // rejected, and the cleanup queued behind it never runs at all.
+    const { deps, posts, timeline } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      updateThrows: true,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.equal(timeline.at(-1), posts[0]!.text);
+  });
+
+  it('takes the narration back off once the answer is there to read', async () => {
+    // Asserted on what Slack finished applying, with the step deliberately the
+    // slower of the two: concurrent updates on one message can land either way
+    // round, and a restore that lost that race would put the step back.
+    const { deps, posts, timeline } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      updateDelays: [20, 0],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(
+      timeline.filter((entry) => !/^(mark|finish):/.test(entry)),
+      [`${posts[0]!.text}\n\n_Reading dm.ts_`, posts[0]!.text],
+    );
+    // Last of everything, the mark and the turn's close included: both happen
+    // before this update is waited on, or one Slack sits on would hold the thread
+    // against the member's next message.
+    assert.equal(timeline.at(-1), posts[0]!.text);
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {
@@ -499,7 +601,8 @@ describe('dm message', () => {
         currentModelId: 'gpt-5.6-sol[high]',
         availableModels: [{ modelId: 'gpt-5.6-sol[high]' }],
       },
-      usage: { totalTokens: 24237, cachedTokens: 11008 },
+      // Expensive by what the model had not seen: 108k of this was new to it.
+      usage: { totalTokens: 168_237, cachedTokens: 60_008 },
       notices: ['Warning: skills were shortened.'],
       resumeWith: 'codex resume',
     });
@@ -512,7 +615,7 @@ describe('dm message', () => {
     // token count is notice a turn that cost ten times the last one.
     assert.deepEqual(posts[1]!.notices, [
       'Warning: skills were shortened.',
-      '`gpt-5.6-sol[high]` · 24.2k tokens · 11k cached',
+      '`gpt-5.6-sol[high]` · 168.2k tokens · 60k cached',
       '`codex resume acp-1`',
     ]);
   });
@@ -568,15 +671,29 @@ describe('dm message', () => {
     assert.match(posts[1]!.text, /no longer offers `gpt-5\.6-sol\[high\]`.*retry with its default/);
   });
 
-  it('says nothing about cost when the agent reported no total', async () => {
-    // An invented number is worse than none, and agents other than codex
-    // report nothing here at all.
+  it('says nothing about cost with no total to report, or nothing to report it for', async () => {
+    // An invented number is worse than none, and agents other than codex report
+    // nothing here at all.
     const { deps, posts } = harness({ existing: CONVERSATION, usage: { cachedTokens: 12 } });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,
     );
     assert.equal(posts[1]!.notices, undefined);
+
+    // And a question answered out of context that was already there. 120k of
+    // repo and instructions, all but 2k of it cached: a bar on the total would
+    // call this expensive on the strength of a big `AGENTS.md`, which every turn
+    // in that workspace carries whether it did any work or not.
+    const cheap = harness({
+      existing: CONVERSATION,
+      usage: { totalTokens: 120_000, cachedTokens: 118_000 },
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-2', text: 'hello' },
+      cheap.deps,
+    );
+    assert.equal(cheap.posts[1]!.notices, undefined);
   });
 
   it('names read-only for a workspace turn that picked nothing, picker included', async () => {
@@ -783,6 +900,7 @@ describe('dm message', () => {
       existing: CONVERSATION,
       endpoint: { ...READY, workspace: 'ws-1', resume: 'acp-0' },
       history: [{ ts: '210.0', author: 'U-nel', text: 'why is the deploy failing?' }],
+      resumeWith: 'codex resume',
     });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
@@ -793,6 +911,9 @@ describe('dm message', () => {
     // agent refuses would otherwise arrive with nothing.
     assert.match(runs[0]!.context!, /why is the deploy failing/);
     assert.match(posts[0]!.text, /Picking up where it left off/);
+    // The run came back on `acp-1`, so the offered `acp-0` is what nothing can
+    // pick up now — a refused offer is exactly when the new id has to be said.
+    assert.deepEqual(posts[1]!.notices, ['`codex resume acp-1`']);
     // Against what it ran under, since an id means nothing on another machine.
     assert.deepEqual(finished, [
       {

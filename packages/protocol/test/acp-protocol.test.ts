@@ -43,7 +43,7 @@ const noLog = (): void => undefined;
 interface FakeAgentApi {
   update: (update: Record<string, unknown>) => void;
   request: (id: number, method: string, params: Record<string, unknown>) => void;
-  finish: (stopReason?: string) => void;
+  finish: (stopReason?: string, usage?: Record<string, unknown>) => void;
 }
 
 interface FakeAgentScript {
@@ -94,8 +94,8 @@ function fakeAgentIo(script: FakeAgentScript): {
         params: { sessionId: 's1', update },
       }),
     request: (id, method, params) => send({ jsonrpc: '2.0', id, method, params }),
-    finish: (stopReason = 'end_turn') =>
-      send({ jsonrpc: '2.0', id: promptId, result: { stopReason } }),
+    finish: (stopReason = 'end_turn', usage?: Record<string, unknown>) =>
+      send({ jsonrpc: '2.0', id: promptId, result: { stopReason, ...(usage ? { usage } : {}) } }),
   };
   const read = createNdjsonReader((message) => {
     const { id, method } = message as { id?: number; method?: string };
@@ -294,6 +294,33 @@ describe('acp', () => {
       { input: quiet.input, output: quiet.output },
       { cwd: '/x', prompt: 'p', agent: 'fake', label: 'review', log: noLog },
     );
+  });
+
+  it('takes a token count only where it could be one', async () => {
+    // The wire is an agent's word for what a turn cost, and a caller cannot tell
+    // a real figure from a nonsense one — so the ones that cannot be true are
+    // dropped here rather than passed on for every consumer to re-check.
+    const drive = async (usage: Record<string, unknown>): Promise<unknown> => {
+      const fake = fakeAgentIo({ onPrompt: (agent) => agent.finish('end_turn', usage) });
+      return (
+        await driveAcpSession(
+          { input: fake.input, output: fake.output },
+          { cwd: '/x', prompt: 'p', agent: 'fake', label: 'review', log: noLog },
+        )
+      ).usage;
+    };
+    assert.deepEqual(await drive({ totalTokens: 900, cachedReadTokens: 400 }), {
+      totalTokens: 900,
+      cachedTokens: 400,
+    });
+    // More cached than the total it is part of: the total stands, the cache
+    // figure goes, and nothing downstream discounts a turn by it.
+    assert.deepEqual(await drive({ totalTokens: 900, cachedReadTokens: 1200 }), {
+      totalTokens: 900,
+    });
+    assert.equal(await drive({ totalTokens: -5, cachedReadTokens: -1 }), undefined);
+    // Nor a fraction of a token, which is not a thing either.
+    assert.equal(await drive({ totalTokens: 1.5, cachedReadTokens: 0.5 }), undefined);
   });
 
   it('introduces itself as the library, not as a consumer', async () => {

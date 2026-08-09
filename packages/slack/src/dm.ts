@@ -106,6 +106,16 @@ export interface RunSpec {
  * read would spend that budget on frames nobody reads. */
 const PROGRESS_MIN_MS = 4_000;
 
+/** How long the answer's own handler will wait on the update that tidies the
+ * acknowledgement, for a line the member is not waiting for. Landing late is
+ * harmless: nothing else writes that message after the turn that posted it.
+ *
+ * The Slack implementation bounds the call itself as well, and this stays because
+ * `working` is a seam: what is behind it decides how long a `chat.update` may
+ * take, and how long this handler is willing to be held is not that layer's
+ * decision to make. */
+const TIDY_MS = 10_000;
+
 /** A tool-call title on its way into a mrkdwn *italic* span, so an underscore
  * closes it as surely as a backtick does. Clamped, since a title is a label. */
 const asStep = (title: string): string =>
@@ -116,11 +126,21 @@ const asStep = (title: string): string =>
 const thousands = (tokens: number): string =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}k`;
 
+/** Measured on what was not cached, not on the total: the context a workspace
+ * turn carries is re-sent every turn whether it did any work or not, so a total
+ * crosses any bar the moment `AGENTS.md` is big, which is every turn. What is
+ * new to the model is what the turn actually chewed through — a few thousand for
+ * a question answered from context, an order more for one that read the repo. */
+const EXPENSIVE_TOKENS = 25_000;
+
 /** The cost beside the model that charged it — the two only mean something
  * together, now that the model is the member's own choice. Absent when the
- * agent reported no total: an invented number is worse than none. */
+ * agent reported no total: an invented number is worse than none. Absent for a
+ * cheap turn too, since a count on every answer is a number nobody reads and
+ * the point of it is noticing the turn that cost ten times the last one. */
 function spent(model: string | undefined, usage: TurnUsage | undefined): string[] | undefined {
   if (usage?.totalTokens === undefined) return undefined;
+  if (usage.totalTokens - (usage.cachedTokens ?? 0) < EXPENSIVE_TOKENS) return undefined;
   const parts = [
     ...(model ? [`\`${plainly(model)}\``] : []),
     `${thousands(usage.totalTokens)} tokens`,
@@ -356,20 +376,24 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const attachments = attached.flatMap((entry) => (entry.ok ? [entry.file] : []));
 
   // A run has twenty minutes to answer, so silence that long reads as broken.
-  // §4 wants the scope in the DM root rather than guessed at, so the answer
-  // says which project it is about — or that it can see no files at all, which
-  // is the one thing a member would otherwise assume wrong.
+  // §4 wants the scope in the DM root rather than guessed at, so the turn that
+  // decides it names the project and the mode — an absent mode included, since
+  // read-only is the floor's truth for a workspace turn that never picked one.
+  // Only that turn: a resume is offered only where this thread's machine, agent
+  // and directory are all still the ones it was minted under, so a follow-up
+  // would be repeating the root, and the picker under every answer carries the
+  // mode. Having no workspace is the exception that repeats — nothing else tells
+  // a member their question has to stand on its own.
+  //
   // Through `plainly` like every other name in this message: a backtick closes
   // the span it sits in, and a `<` opens an entity that renders as a mention
   // once the answer is shared into a channel. Their own machine and their own
   // DM, so this is rendering and not a trust boundary.
-  // The mode is part of the scope: a member who enabled writes should read it
-  // back on every turn, not have to remember what they picked last week. An
-  // absent mode is named too — read-only is the floor's truth for every
-  // workspace turn that never picked one, old companions included.
-  const scope = decision.label
-    ? `On it, in \`${plainly(decision.label)}\` — \`${decision.mode ?? 'read-only'}\` mode.`
-    : 'On it. It has no access to your files, so keep the question self-contained.';
+  const scope = !decision.label
+    ? 'On it. It has no access to your files, so keep the question self-contained.'
+    : decision.resume
+      ? 'On it.'
+      : `On it, in \`${plainly(decision.label)}\` — \`${decision.mode ?? 'read-only'}\` mode.`;
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
   const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
@@ -391,13 +415,22 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // place a long turn can show it is still moving. Throttled because
   // `chat.update` is rate-limited and a busy turn narrates far faster than
   // anyone reads; fails open, since this is a hint and not the answer.
+  //
+  // Queued rather than concurrent: two updates in flight on one message can land
+  // in either order, and the cleanup below losing that race would leave a step
+  // sitting above the answer — the thing it is there to take away.
   let lastShown = 0;
+  let updating = Promise.resolve();
   const narrate = (title: string): void => {
     const now = Date.now();
     if (now - lastShown < PROGRESS_MIN_MS) return;
     lastShown = now;
-    void deps
-      .working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`)
+    // Caught on the chain and not on the call, so a `working` that throws where
+    // it stands rather than rejecting cannot leave `updating` rejected — every
+    // link after it, the cleanup included, would be skipped and the step would
+    // stay exactly where this is meant to take it from.
+    updating = updating
+      .then(() => deps.working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`))
       .catch(() => undefined);
   };
 
@@ -502,7 +535,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
         // The command is a closed set at the parse boundary; the session id is
         // the agent's own string and is not.
-        ...(answer.resumeWith ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``] : []),
+        // A mismatch is the agent having minted a fresh session rather than taking
+        // the one offered, which is the only time this thread has an id it was
+        // not already given. Same test the driver sends the transcript on.
+        ...(answer.resumeWith && answer.session !== decision.resume
+          ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``]
+          : []),
       ],
       // The picker renders the agent's own roster, so it exists exactly where
       // the agent serves one — and only inside a named workspace, the one
@@ -523,5 +561,27 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   }
   await deps.mark(message.channel, message.ts, 'done');
   await deps.finish(conversation.id, turn, 'completed', ran);
+  // Slack cannot fold the narration away the way a terminal does, so once the
+  // answer is here the last step is only in the way. Queued behind the narration
+  // it is undoing, and left until after the turn is closed: a `chat.update` Slack
+  // is slow to take would otherwise hold the turn open, and a member's next
+  // message would be refused for a line nobody is waiting on. Guarded so a turn
+  // that never narrated spends no update, and fail-open like `narrate`.
+  // Waited on to a deadline, not indefinitely — see `TIDY_MS`.
+  if (lastShown) {
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      updating.then(() => deps.working(acked.channel, acked.ts, ack)).catch(() => undefined),
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(resolve, TIDY_MS);
+        // Two different jobs on the same handle: `unref` so waiting on a line
+        // nobody reads cannot be the last thing holding a process open, and the
+        // clear below so a deadline that lost its race is not left pending — one
+        // handle per narrated turn adds up under traffic.
+        deadline.unref();
+      }),
+    ]);
+    clearTimeout(deadline);
+  }
   return existing ? 'resumed' : 'opened';
 }
