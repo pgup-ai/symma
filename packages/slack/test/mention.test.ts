@@ -4,7 +4,15 @@ import { describe, it } from 'node:test';
 import { handleMention, type ConversationRef, type MentionDeps } from '../src/mention.js';
 import type { ThreadMessage } from '../src/snapshot.js';
 
-const MENTION = { user: 'U-nel', channel: 'C-incidents', threadTs: '100.0', eventId: 'Ev-1' };
+/** A reply in an existing thread: the mention's own ts is what a link back
+ * should point at, and it is not the thread's first message. */
+const MENTION = {
+  user: 'U-nel',
+  channel: 'C-incidents',
+  ts: '101.0',
+  threadTs: '100.0',
+  eventId: 'Ev-1',
+};
 /** Names, not ids: `threadReplies` resolves them before a snapshot sees them. */
 const THREAD: ThreadMessage[] = [
   { ts: '100.0', author: 'Nel', text: 'the deploy is failing' },
@@ -78,9 +86,11 @@ describe('app_mention', () => {
     // A way back: a private conversation about a thread nobody can find is one a
     // member cannot place a week later.
     assert.match(posts[0]!.text, /<#C-incidents>/);
+    // Pointed at the message that summoned the bot, not the thread's first: Slack
+    // previews whatever the link names, and the ask is what a member wants back.
     assert.match(
       posts[0]!.text,
-      /<https:\/\/slack\.test\/archives\/C-incidents\/p100\.0\|open the thread>/,
+      /<https:\/\/slack\.test\/archives\/C-incidents\/p101\.0\|open the thread>/,
     );
 
     // The cursor recorded is what the snapshot actually read, and it moves only

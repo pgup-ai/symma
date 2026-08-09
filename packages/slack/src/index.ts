@@ -326,6 +326,7 @@ const connection = socketMode({
       const mention = {
         user: event.user,
         channel: event.channel,
+        ts: event.ts,
         // A mention that starts a thread is its own thread.
         threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
         eventId,

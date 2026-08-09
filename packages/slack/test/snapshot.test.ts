@@ -115,6 +115,24 @@ describe('thread snapshot', () => {
       },
     );
     assert.equal(snapshot.text, '> *Nel:* it threw:\n> line one\n> line two');
+
+    // Including where it is cut: the truncation marker used to open a line of its
+    // own, which is a line outside the quote.
+    const cut = threadSnapshot([{ ts: '100.0', author: 'J', text: 'aaa\naaa\naaa' }], {
+      budgetBytes: 27,
+    });
+    assert.ok(
+      cut.text.split('\n').every((line) => line.startsWith('> ')),
+      cut.text,
+    );
+
+    // And where it ends: a trailing break would quote an empty line before the
+    // files.
+    const ends = threadSnapshot(
+      [{ ts: '100.0', author: 'J', text: 'done\n', files: [{ name: 'x.log' }] }],
+      { budgetBytes: 10_000 },
+    );
+    assert.equal(ends.text, '> *J:* done\n> files: x.log');
   });
 
   it('does not let a display name close the bold it is shown in', () => {

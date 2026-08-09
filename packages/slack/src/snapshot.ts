@@ -31,7 +31,10 @@ export interface Snapshot {
  * `my_file.log` inside italics closes them early. */
 const render = (message: ThreadMessage): string => {
   const files = message.files?.map((f) => f.name).join(', ');
-  const quoted = message.text.replaceAll('\n', '\n> ');
+  // Trailing break trimmed first, or it becomes a quoted empty line between the
+  // message and its files. A break inside the text keeps its blank line, which is
+  // what Slack shows for one too.
+  const quoted = message.text.trimEnd().replaceAll('\n', '\n> ');
   // The bold is opened here, so the asterisk is this line's to take out: a member
   // called `*Jane*` would otherwise close it and bold the rest of the quote. The
   // rest of a name's mrkdwn is escaped where the name is resolved.
@@ -61,7 +64,10 @@ const fit = (line: string, budget: number): string | undefined => {
   if (room < 1) return undefined;
   let cut = line;
   while (bytes(cut) > room) cut = cut.slice(0, -Math.max(1, Math.ceil((bytes(cut) - room) / 4)));
-  return cut + MARKER;
+  // Never ending on a line break: the marker would open a line of its own, and a
+  // line without the `>` is a line outside the quote the rest of the message is
+  // in. Trimming only shrinks what already fit.
+  return cut.replace(/\n(> ?)?$/, '') + MARKER;
 };
 
 /**

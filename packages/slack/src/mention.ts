@@ -45,6 +45,10 @@ export type MentionOutcome =
 export interface Mention {
   user: string;
   channel: string;
+  /** The message that summoned the bot. Linked rather than the thread's first
+   * message: Slack's preview quotes whatever the link points at, and what the
+   * member wants back is the ask, not whatever the thread opened with. */
+  ts: string;
   /** The thread the mention sits in; a top-level mention is its own thread. */
   threadTs: string;
   eventId: string;
@@ -102,7 +106,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   };
 
   // Once, not per post: the three openings below are one thread's.
-  const link = await deps.permalink(mention.channel, mention.threadTs);
+  const link = await deps.permalink(mention.channel, mention.ts);
   const source = { channel: mention.channel, ...(link ? { link } : {}) };
 
   if (existing) {
