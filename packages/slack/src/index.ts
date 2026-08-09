@@ -295,6 +295,7 @@ const connection = socketMode({
             },
             {
               find: deps.findDm,
+              seen: deps.seen,
               turn: deps.turn,
               post: deps.post,
               endpoint: deps.endpoint,
