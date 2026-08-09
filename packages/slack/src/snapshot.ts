@@ -23,10 +23,16 @@ export interface Snapshot {
 
 /** A quote, because a member reads this in Slack beside the thread it was taken
  * from, where a log of ids and epochs is the one part that does not look like
- * Slack. No `ts`: the cursor travels as `seenThroughTs`. */
+ * Slack. No `ts`: the cursor travels as `seenThroughTs`.
+ *
+ * Every line carries the `>`, since Slack quotes by the line and not by the
+ * message — a pasted stack trace would otherwise fall out of the transcript
+ * halfway through. The file names are unformatted for the same kind of reason:
+ * `my_file.log` inside italics closes them early. */
 const render = (message: ThreadMessage): string => {
   const files = message.files?.map((f) => f.name).join(', ');
-  return `> *${message.author}:* ${message.text}${files ? `\n> _${files}_` : ''}`;
+  const quoted = message.text.replaceAll('\n', '\n> ');
+  return `> *${message.author}:* ${quoted}${files ? `\n> files: ${files}` : ''}`;
 };
 
 const bytes = (value: string): number => Buffer.byteLength(value, 'utf8');

@@ -105,6 +105,18 @@ describe('thread snapshot', () => {
     }
   });
 
+  it('keeps a multi-line message inside the quote', () => {
+    // Slack quotes by the line, not by the message, so a pasted stack trace would
+    // otherwise leave the transcript halfway through and read as the bot talking.
+    const snapshot = threadSnapshot(
+      [{ ts: '100.0', author: 'Nel', text: 'it threw:\nline one\nline two' }],
+      {
+        budgetBytes: 10_000,
+      },
+    );
+    assert.equal(snapshot.text, '> *Nel:* it threw:\n> line one\n> line two');
+  });
+
   it('names attached files without fetching them', () => {
     // v1 passes metadata only: downloading widens the scope request and the
     // data-lifecycle surface both (§10).
@@ -112,6 +124,6 @@ describe('thread snapshot', () => {
       [{ ts: '100.0', author: 'Nel', text: 'logs attached', files: [{ name: 'trace.log' }] }],
       { budgetBytes: 10_000 },
     );
-    assert.match(snapshot.text, /> _trace\.log_/);
+    assert.match(snapshot.text, /> files: trace\.log/);
   });
 });

@@ -112,15 +112,17 @@ const FALLBACK_TEXT_LIMIT = 40_000;
  * a stalled one would otherwise hold the whole turn. */
 const FILE_FETCH_TIMEOUT_MS = 20_000;
 
-/** The progress line is the one call worth abandoning. The SDK's defaults —
- * `timeout: 0` and ten retries across half an hour — are right for an answer and
- * wrong for a hint nobody is waiting for, which would otherwise still be trying
- * long after the turn that wanted it.
+/** For the calls that are not the answer: a progress line, a link back, a name.
+ * The SDK's defaults — `timeout: 0` and ten retries across half an hour — are
+ * right for an answer and wrong for these, which would otherwise still be trying
+ * long after the turn that wanted them, or hold a handoff the member is waiting
+ * for behind a lookup that is decoration.
  *
- * Bounded here and nowhere else because `chat.update` is the only call it is safe
- * for: writing the same text twice has the same effect, while a `chat.postMessage`
- * that timed out after Slack accepted it would be retried into a second message. */
-const PROGRESS_TIMEOUT_MS = 5_000;
+ * Safe for exactly these because each is idempotent: two `chat.update`s with the
+ * same text have the effect of one, and a read has no effect at all. A
+ * `chat.postMessage` that timed out after Slack accepted it would be retried into
+ * a second message, so the answer keeps the defaults. */
+const ASIDE_TIMEOUT_MS = 5_000;
 
 /** A name or a title the member or their agent chose, on its way into mrkdwn:
  * a backtick would open a code span that swallows the rest of the sentence, and
@@ -304,12 +306,15 @@ interface RawMessage {
   files?: { name?: unknown; size?: unknown }[];
 }
 
-const read = (raw: RawMessage[]): ThreadMessage[] =>
+const read = (raw: RawMessage[], names: Map<string, string>): ThreadMessage[] =>
   raw
     .filter((m): m is RawMessage & { ts: string } => typeof m.ts === 'string')
     .map((m) => ({
       ts: m.ts,
-      author: typeof m.user === 'string' ? m.user : 'someone',
+      // A message with no `user` is Slack's own — a join, a bot post. It never
+      // reaches `users.info`, which is why the id lives here and not in the
+      // author field a lookup would then be handed.
+      author: typeof m.user === 'string' ? (names.get(m.user) ?? m.user) : 'someone',
       text: typeof m.text === 'string' ? m.text : '',
       // Named, never fetched: downloading widens both the scope request and the
       // data-lifecycle surface (§10).
@@ -330,33 +335,40 @@ export function slackApi(
   options: { fetch?: typeof fetch; log?: (message: string) => void } = {},
 ): SlackApi {
   const client = new WebClient(token, options.fetch ? { fetch: options.fetch } : {});
+  const quick = new WebClient(token, {
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    timeout: ASIDE_TIMEOUT_MS,
+    retryConfig: { retries: 1 },
+  });
+
   /** Looked up rather than left as `<@U…>`, which Slack would render for free:
    * the agent reads this text back as its only record of a channel it cannot see,
    * so an id there is unreadable to it as well as to the member. Cached for the
    * process — a thread is a few people saying many things, and a display name
    * changes about as often as a bot restarts. */
-  const names = new Map<string, string>();
+  const cache = new Map<string, string>();
   const nameOf = async (id: string): Promise<string> => {
-    const known = names.get(id);
+    const known = cache.get(id);
     if (known) return known;
-    const name = await client.users
+    const name = await quick.users
       .info({ user: id })
       .then((got) => {
         const profile = got.user?.profile;
         return profile?.display_name || profile?.real_name || got.user?.name;
       })
       .catch(() => undefined);
-    // Slack renders a mention as a name, so a failed lookup still reads as one.
-    const resolved = name || `<@${id}>`;
-    names.set(id, resolved);
+    // Only what resolved is kept. A missing scope or a rate limit would otherwise
+    // pin every name in the process to its fallback until a restart — including
+    // across the reinstall that granted the scope.
+    if (!name) return `<@${id}>`;
+    // Escaped like every other name this bot renders — a display name is whatever
+    // its owner typed, and it lands inside `*bold*` in a quote — and back to the
+    // mention if escaping leaves nothing of it.
+    const resolved = plainly(name) || `<@${id}>`;
+    cache.set(id, resolved);
     return resolved;
   };
 
-  const progress = new WebClient(token, {
-    ...(options.fetch ? { fetch: options.fetch } : {}),
-    timeout: PROGRESS_TIMEOUT_MS,
-    retryConfig: { retries: 1 },
-  });
   return {
     async threadReplies(channel, thread) {
       try {
@@ -375,15 +387,13 @@ export function slackApi(
           if (++pages > MAX_PAGES) throw new Error('thread too long to read');
           raw.push(...((page as { messages?: RawMessage[] }).messages ?? []));
         }
-        const messages = read(raw);
-        const resolved = new Map(
+        const ids = new Set(raw.flatMap((m) => (typeof m.user === 'string' ? [m.user] : [])));
+        const names = new Map(
           await Promise.all(
-            [...new Set(messages.map((m) => m.author))].map(
-              async (id): Promise<[string, string]> => [id, await nameOf(id)],
-            ),
+            [...ids].map(async (id): Promise<[string, string]> => [id, await nameOf(id)]),
           ),
         );
-        return messages.map((m) => ({ ...m, author: resolved.get(m.author) ?? m.author }));
+        return read(raw, names);
       } catch (error) {
         const code = slackCode(error);
         if (code && UNREADABLE.has(code)) return undefined;
@@ -391,7 +401,7 @@ export function slackApi(
       }
     },
     permalink(channel, ts) {
-      return client.chat
+      return quick.chat
         .getPermalink({ channel, message_ts: ts })
         .then((got) => (typeof got.permalink === 'string' ? got.permalink : undefined))
         .catch(() => undefined);
@@ -475,7 +485,7 @@ export function slackApi(
     },
     async working(channel, ts, text) {
       try {
-        await progress.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
+        await quick.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
       } catch (error) {
         // Said once rather than swallowed: a scope or rate-limit problem here
         // is invisible otherwise, and the answer still arrives either way. The
