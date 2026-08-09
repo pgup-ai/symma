@@ -107,11 +107,13 @@ export interface RunSpec {
 const PROGRESS_MIN_MS = 4_000;
 
 /** How long the answer's own handler will wait on the update that tidies the
- * acknowledgement. The Slack client is built on the SDK's defaults — `timeout: 0`
- * and ten retries across about half an hour — so a `chat.update` Slack sits on
- * pins this handler for that long, on every narrated turn, for a line the member
- * is not waiting for. Landing late is harmless: nothing else writes that message
- * after the turn that posted it. */
+ * acknowledgement, for a line the member is not waiting for. Landing late is
+ * harmless: nothing else writes that message after the turn that posted it.
+ *
+ * The Slack implementation bounds the call itself as well, and this stays because
+ * `working` is a seam: what is behind it decides how long a `chat.update` may
+ * take, and how long this handler is willing to be held is not that layer's
+ * decision to make. */
 const TIDY_MS = 10_000;
 
 /** A tool-call title on its way into a mrkdwn *italic* span, so an underscore
@@ -566,10 +568,17 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // message would be refused for a line nobody is waiting on. Guarded so a turn
   // that never narrated spends no update, and fail-open like `narrate`.
   // Waited on to a deadline, not indefinitely — see `TIDY_MS`.
-  if (lastShown)
+  if (lastShown) {
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       updating.then(() => deps.working(acked.channel, acked.ts, ack)).catch(() => undefined),
-      new Promise<void>((resolve) => setTimeout(resolve, TIDY_MS).unref()),
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(resolve, TIDY_MS);
+      }),
     ]);
+    // Cleared rather than left to fire: a live handle per narrated turn adds up
+    // under traffic, and a deadline that lost its race has nothing left to do.
+    clearTimeout(deadline);
+  }
   return existing ? 'resumed' : 'opened';
 }

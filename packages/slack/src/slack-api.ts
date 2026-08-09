@@ -108,6 +108,16 @@ const FALLBACK_TEXT_LIMIT = 40_000;
  * a stalled one would otherwise hold the whole turn. */
 const FILE_FETCH_TIMEOUT_MS = 20_000;
 
+/** The progress line is the one call worth abandoning. The SDK's defaults —
+ * `timeout: 0` and ten retries across half an hour — are right for an answer and
+ * wrong for a hint nobody is waiting for, which would otherwise still be trying
+ * long after the turn that wanted it.
+ *
+ * Bounded here and nowhere else because `chat.update` is the only call it is safe
+ * for: writing the same text twice has the same effect, while a `chat.postMessage`
+ * that timed out after Slack accepted it would be retried into a second message. */
+const PROGRESS_TIMEOUT_MS = 5_000;
+
 /** A name or a title the member or their agent chose, on its way into mrkdwn:
  * a backtick would open a code span that swallows the rest of the sentence, and
  * a newline would break the block it sits in. */
@@ -316,6 +326,11 @@ export function slackApi(
   options: { fetch?: typeof fetch; log?: (message: string) => void } = {},
 ): SlackApi {
   const client = new WebClient(token, options.fetch ? { fetch: options.fetch } : {});
+  const progress = new WebClient(token, {
+    ...(options.fetch ? { fetch: options.fetch } : {}),
+    timeout: PROGRESS_TIMEOUT_MS,
+    retryConfig: { retries: 1 },
+  });
   return {
     async threadReplies(channel, thread) {
       try {
@@ -420,7 +435,7 @@ export function slackApi(
     },
     async working(channel, ts, text) {
       try {
-        await client.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
+        await progress.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
       } catch (error) {
         // Said once rather than swallowed: a scope or rate-limit problem here
         // is invisible otherwise, and the answer still arrives either way. The
