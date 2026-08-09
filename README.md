@@ -14,13 +14,19 @@ subscription, their keys. The hosted service never holds a provider credential.
 
 ## Status
 
-Being extracted from
+Extracted from
 [pgup-ai/jbot-review](https://github.com/pgup-ai/jbot-review), where the relay,
 companion, signed envelopes and viewer have been running and dogfooded since
-2026-07. All five packages are in: owner-scoped tenancy and pairing ship, the
-companion detects its agents and survives a reboot, and the Slack bot pairs a
-machine with `/connect`. Asking your agent something from Slack is next — that
-flow is not built yet.
+2026-07. All five packages are in. The companion detects its agents, survives a
+reboot and pairs to one Slack member with `/connect`. Private DM-thread
+conversations run on that member's machine, resume the agent session when
+possible and recover it from the thread transcript when not. Turns support
+bounded text and image attachments, progress narration, workspace and access-mode
+controls, model selection when the agent advertises models, and explicit
+share-back to the source thread.
+
+The Slack app is an operator-installed internal Socket Mode app, not a public
+Slack Marketplace product.
 
 ## Packages
 
@@ -30,7 +36,7 @@ flow is not built yet.
 | `@symma/client`   | drive a prompt against a local agent, or a remote one through a gateway                        | [on npm](https://www.npmjs.com/package/@symma/client)   |
 | `@symma/gateway`  | relay, journal store, viewer, tenancy                                                          | private — ships as an image                             |
 | `symma`           | the companion CLI: attach loop, agent detection, pairing, local spawn/lifecycle                | [on npm](https://www.npmjs.com/package/symma)           |
-| `@symma/slack`    | the Slack bot: Socket Mode, `/connect` to pair a machine                                       | private — runs beside the gateway                       |
+| `@symma/slack`    | the Slack bot: pairing, private DM turns, progress, controls, attachments and share-back       | private — runs beside the gateway                       |
 
 ```bash
 npm i -g symma && symma pair BPB1-9W92-HTZJ-RA19
