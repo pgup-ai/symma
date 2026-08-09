@@ -16,9 +16,8 @@ describe('thread snapshot', () => {
     const snapshot = threadSnapshot(thread, { budgetBytes: 10_000 });
     assert.equal(snapshot.omitted, 0);
     assert.equal(snapshot.seenThroughTs, '103.0');
-    // A quote of names, not a log of ids and epochs: the member reads this in
-    // Slack, beside the thread it was taken from. The `ts` still travels, as
-    // `seenThroughTs` above.
+    // A quote of names, not a log of ids and epochs. The `ts` still travels —
+    // as `seenThroughTs`, asserted above.
     assert.match(snapshot.text, /^> \*Nel:\* the deploy is failing/);
     assert.match(snapshot.text, /third reply$/);
     assert.doesNotMatch(snapshot.text, /100\.0/);

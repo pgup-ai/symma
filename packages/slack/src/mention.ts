@@ -27,8 +27,7 @@ export interface MentionDeps {
   seen: (conversation: string, seenThroughTs: string) => Promise<void>;
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
   openDm: (user: string) => Promise<string>;
-  /** A link back to the source thread. Undefined is a link the member does not
-   * get, not a handoff that does not happen. */
+  /** A link back to the source thread; undefined is one Slack would not give. */
   permalink: (channel: string, ts: string) => Promise<string | undefined>;
   post: (
     channel: string,
@@ -52,10 +51,10 @@ export interface Mention {
 }
 
 /** The DM the member reads first. It states the privacy default up front, since
- * that is the promise §5 makes and the one they have to trust — and says which
- * thread it is about, because a conversation lifted out of a channel is otherwise
- * a quote with no way back to where it came from. `<#C…>` is Slack's own channel
- * link, so the name is whatever the channel is called now. */
+ * that is the promise §5 makes and the one they have to trust — and which thread
+ * it is about, since a conversation lifted out of a channel is otherwise a quote
+ * with no way back. `<#C…>` is Slack's own channel link, so it reads as whatever
+ * the channel is called now rather than what it was called today. */
 const opening = (
   snapshot: string,
   omitted: number,
@@ -102,9 +101,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (snapshot.seenThroughTs) await deps.seen(conversation, snapshot.seenThroughTs);
   };
 
-  // Asked for once and carried, rather than fetched per post: the three openings
-  // below are the same message about the same thread, and one of them is a
-  // correction posted seconds after another.
+  // Once, not per post: the three openings below are one thread's.
   const link = await deps.permalink(mention.channel, mention.threadTs);
   const source = { channel: mention.channel, ...(link ? { link } : {}) };
 

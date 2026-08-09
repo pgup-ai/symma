@@ -330,16 +330,15 @@ export function slackApi(
   options: { fetch?: typeof fetch; log?: (message: string) => void } = {},
 ): SlackApi {
   const client = new WebClient(token, options.fetch ? { fetch: options.fetch } : {});
-  /** Ids come off the wire; names are what a member reads. Cached because a
-   * thread is a handful of people saying many things, and looked up rather than
-   * rendered as `<@U…>` so the agent reading this back sees who spoke too. Names
-   * change about as often as a bot restarts. */
+  /** Looked up rather than left as `<@U…>`, which Slack would render for free:
+   * the agent reads this text back as its only record of a channel it cannot see,
+   * so an id there is unreadable to it as well as to the member. Cached for the
+   * process — a thread is a few people saying many things, and a display name
+   * changes about as often as a bot restarts. */
   const names = new Map<string, string>();
   const nameOf = async (id: string): Promise<string> => {
     const known = names.get(id);
     if (known) return known;
-    // Falls back to the mention Slack renders for itself: a lookup that failed
-    // costs a name, not the handoff.
     const name = await client.users
       .info({ user: id })
       .then((got) => {
@@ -347,6 +346,7 @@ export function slackApi(
         return profile?.display_name || profile?.real_name || got.user?.name;
       })
       .catch(() => undefined);
+    // Slack renders a mention as a name, so a failed lookup still reads as one.
     const resolved = name || `<@${id}>`;
     names.set(id, resolved);
     return resolved;
@@ -390,8 +390,8 @@ export function slackApi(
         throw error;
       }
     },
-    async permalink(channel, ts) {
-      return await client.chat
+    permalink(channel, ts) {
+      return client.chat
         .getPermalink({ channel, message_ts: ts })
         .then((got) => (typeof got.permalink === 'string' ? got.permalink : undefined))
         .catch(() => undefined);

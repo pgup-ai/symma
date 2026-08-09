@@ -21,11 +21,9 @@ export interface Snapshot {
   omitted: number;
 }
 
-/** As a quote, because a member reads this in Slack beside the thread it came
- * from — a log of ids and epochs is the one part of the handoff that does not
- * look like Slack. The `ts` is not in it: the cursor travels as `seenThroughTs`,
- * and a member reading a quote of their own thread has Slack's own timestamps
- * two clicks away. */
+/** A quote, because a member reads this in Slack beside the thread it was taken
+ * from, where a log of ids and epochs is the one part that does not look like
+ * Slack. No `ts`: the cursor travels as `seenThroughTs`. */
 const render = (message: ThreadMessage): string => {
   const files = message.files?.map((f) => f.name).join(', ');
   return `> *${message.author}:* ${message.text}${files ? `\n> _${files}_` : ''}`;
