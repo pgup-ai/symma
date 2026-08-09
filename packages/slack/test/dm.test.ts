@@ -56,6 +56,11 @@ function harness(
     /** A thread read that throws rather than coming back empty — a page cap, a
      * transient Slack error. */
     historyFails?: Error;
+    /** The source channel thread a mention came out of, for a conversation whose
+     * `source` says where to read it. `null` is one the bot cannot read. */
+    channel?: ThreadMessage[] | null;
+    /** The gateway refuses to move the cursor. */
+    seenFails?: boolean;
     budgetBytes?: number;
     /** Fails the answer post, which lands after the run is already over. */
     answerPostFails?: Error;
@@ -84,6 +89,9 @@ function harness(
    * what the turn waits on and what it has already finished with can be told
    * apart. */
   const timeline: string[] = [];
+  /** `conversation:ts` for every cursor move, so a turn that moved it over an
+   * answer nobody got is visible. */
+  const moved: string[] = [];
   let fetches = 0;
   let asked = 0;
   const askedFor: string[] = [];
@@ -92,10 +100,20 @@ function harness(
   const selected = over.endpoint === undefined ? READY : over.endpoint;
   const deps: DmDeps = {
     budgetBytes: over.budgetBytes ?? 24_000,
-    threadReplies: () =>
-      over.historyFails
+    // Two threads now: the DM the conversation lives in, and the channel a
+    // mention came out of — which is where a turn reads what it is about.
+    threadReplies: (channel) => {
+      if (channel !== 'D-nel')
+        return Promise.resolve(over.channel === null ? undefined : (over.channel ?? []));
+      return over.historyFails
         ? Promise.reject(over.historyFails)
-        : Promise.resolve(over.history === null ? undefined : (over.history ?? [])),
+        : Promise.resolve(over.history === null ? undefined : (over.history ?? []));
+    },
+    seen: (conversation, ts) => {
+      moved.push(`${conversation}:${ts}`);
+      timeline.push(`seen:${ts}`);
+      return over.seenFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
+    },
     log: () => {},
     run: (spec) => {
       runs.push(spec);
@@ -195,6 +213,7 @@ function harness(
     sheds,
     updates,
     timeline,
+    moved,
     askedFor,
     asked: () => asked,
     fetches: () => fetches,
@@ -808,6 +827,90 @@ describe('dm message', () => {
     assert.equal(posts[0]!.text.split('`').length - 1, 4, 'both spans opened and closed');
   });
 
+  it('reads the channel a mention came out of, and only what is unseen', async () => {
+    // The thread the question is about lives in the channel, not in a copy of it
+    // quoted into the DM — so a turn reads it from Slack, from the cursor.
+    const { deps, runs, moved, timeline } = harness({
+      existing: {
+        ...CONVERSATION,
+        source: { channel: 'C-incidents', thread: '100.0' },
+        seenThroughTs: '100.0',
+      },
+      channel: [
+        { ts: '100.0', author: 'Nel', text: 'the deploy is failing' },
+        { ts: '101.0', author: 'Ola', text: 'here is the trace' },
+      ],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      deps,
+    );
+    assert.match(runs[0]!.context!, /here is the trace/);
+    assert.doesNotMatch(runs[0]!.context!, /the deploy is failing/, 'already shown');
+    // Moved once the answer is delivered — a cursor past an answer nobody got
+    // would filter out exactly what they never saw — and before the turn closes,
+    // since closing it is what lets the next one read by that cursor.
+    assert.deepEqual(moved, ['conv-1:101.0']);
+    assert.deepEqual(
+      timeline.filter((entry) => /^(mark|seen|finish):/.test(entry)),
+      ['mark:working', 'mark:done', 'seen:101.0', 'finish:completed'],
+    );
+  });
+
+  it('says so when it cannot read the channel it was asked about', async () => {
+    // Nothing copies that thread into the DM any more, so losing access to it
+    // loses the question's context — and an answer given without it reads like an
+    // answer about it.
+    const { deps, posts, runs } = harness({
+      existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
+      channel: null,
+      // So the prompt has something in it: without this the context is absent
+      // entirely and asserting what it does not claim would assert nothing.
+      history: [{ ts: '201.0', author: 'U-nel', text: 'still waiting' }],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      deps,
+    );
+    assert.match(posts[0]!.text, /I cannot read <#C-incidents> just now/);
+    assert.match(runs[0]!.context!, /still waiting/, 'the DM still travels');
+    assert.doesNotMatch(runs[0]!.context!, /asked in/, 'and nothing claims that thread');
+  });
+
+  it('leaves the cursor where it was when the answer never landed', async () => {
+    const { deps, moved } = harness({
+      existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
+      channel: [{ ts: '101.0', author: 'Ola', text: 'here is the trace' }],
+      answerPostFails: new Error('slack is down'),
+    });
+    await assert.rejects(
+      handleDm(
+        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+        deps,
+      ),
+      /slack is down/,
+    );
+    assert.deepEqual(moved, []);
+  });
+
+  it('answers anyway when the cursor will not move', async () => {
+    // Fail-open, per the auxiliary rule: a cursor that stuck costs a re-read on
+    // the next turn, where failing the turn costs the answer.
+    const { deps, posts } = harness({
+      existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
+      channel: [{ ts: '101.0', author: 'Ola', text: 'here is the trace' }],
+      seenFails: true,
+    });
+    assert.equal(
+      await handleDm(
+        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+        deps,
+      ),
+      'resumed',
+    );
+    assert.equal(posts[1]!.text, 'the answer');
+  });
+
   it('catches a follow-up up from the thread, and says what that is worth', async () => {
     // Slack returns the whole thread, so the message being handled is in it too
     // — the same ts the handler was called with.
@@ -822,7 +925,7 @@ describe('dm message', () => {
       deps,
     );
 
-    assert.match(posts[0]!.text, /Catching it up from this thread/);
+    assert.match(posts[0]!.text, /Catching it up from the thread/);
     // Apart from the question, because whether the agent still holds the
     // session is not known until it has been asked — the driver drops one or
     // the other once it does.
@@ -842,7 +945,9 @@ describe('dm message', () => {
       author: 'U-nel',
       text: `message number ${i}`,
     }));
-    const { deps, posts } = harness({ existing: CONVERSATION, history, budgetBytes: 90 });
+    // Above the replay label, which is charged against the same ceiling: a budget
+    // under it carries no thread at all rather than a trimmed one.
+    const { deps, posts } = harness({ existing: CONVERSATION, history, budgetBytes: 280 });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
       deps,

@@ -41,9 +41,7 @@ function harness(over: {
   const posts: Posted[] = [];
   const links: string[] = [];
   const turns: Record<string, unknown>[] = [];
-  const seen: string[] = [];
   const deps: MentionDeps = {
-    budgetBytes: 10_000,
     log: () => {},
     find: () => Promise.resolve(over.existing),
     threadReplies: () => Promise.resolve('replies' in over ? over.replies : THREAD),
@@ -55,10 +53,6 @@ function harness(over: {
     post: (channel, text, threadTs) => {
       posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
       return Promise.resolve({ channel: 'D-nel', ts: '200.0' });
-    },
-    seen: (_conversation, ts) => {
-      seen.push(ts);
-      return Promise.resolve();
     },
     turn: (spec) => {
       turns.push(spec);
@@ -72,12 +66,12 @@ function harness(over: {
       });
     },
   };
-  return { deps, posts, turns, seen, links };
+  return { deps, posts, turns, links };
 }
 
 describe('app_mention', () => {
   it('opens a private conversation and never answers the channel', async () => {
-    const { deps, posts, turns, seen } = harness({});
+    const { deps, posts, turns } = harness({});
     assert.equal(await handleMention(MENTION, deps), 'opened');
 
     // The channel supplied context, not consent (§5). Everything goes to the
@@ -85,8 +79,11 @@ describe('app_mention', () => {
     assert.equal(posts.length, 1);
     assert.equal(posts[0]!.channel, 'D-nel', 'the resolved DM, not a user id');
     assert.doesNotMatch(posts[0]!.channel, /^[CU]-/, 'never a channel, never a raw user id');
-    assert.match(posts[0]!.text, /the deploy is failing/, 'the thread came with it');
     assert.match(posts[0]!.text, /nothing goes back to the channel unless you say so/);
+    // And no copy of the thread: Slack previews the link, and the agent reads the
+    // channel itself when a turn asks it to.
+    assert.doesNotMatch(posts[0]!.text, /the deploy is failing/);
+    assert.doesNotMatch(posts[0]!.text, /^>/m);
     // A way back: a private conversation about a thread nobody can find is one a
     // member cannot place a week later.
     assert.match(posts[0]!.text, /<#C-incidents>/);
@@ -97,11 +94,8 @@ describe('app_mention', () => {
       posts[0]!.text,
     );
 
-    // The cursor recorded is what the snapshot actually read, and it moves only
-    // once the member has it.
-    assert.deepEqual(seen, ['101.0']);
-    // The turn names the thread it came from, which is what a later share-back
-    // has to post into.
+    // The turn names the thread it came from — what a later share-back posts into,
+    // and now also what a turn reads its context from.
     assert.equal(turns[0]!.sourceThread, '100.0');
     assert.equal(turns[0]!.slackEventId, 'Ev-1');
   });
@@ -121,23 +115,22 @@ describe('app_mention', () => {
       rootThread: '200.0',
       seenThroughTs: '100.0',
     };
-    const { deps, posts, seen } = harness({ existing });
+    const { deps, posts } = harness({ existing });
     assert.equal(await handleMention(MENTION, deps), 'continued');
 
-    // In the DM root the member is already looking at (§4, amended).
+    // In the DM root the member is already looking at (§4, amended), confirming
+    // the mention registered. What was added to the channel reaches the agent on
+    // the next turn, so there is nothing to relay.
     assert.equal(posts[0]!.channel, 'D-nel');
     assert.equal(posts[0]!.threadTs, '200.0');
-    // And carrying only the delta: the root was already shown.
-    assert.doesNotMatch(posts[0]!.text, /the deploy is failing/);
-    assert.match(posts[0]!.text, /here is the trace/);
-    assert.deepEqual(seen, ['101.0'], 'the cursor moves once the member has it');
+    assert.equal(posts[0]!.text, 'Picked that up too — carry on here.');
   });
 
   it('says nothing twice when Slack redelivers a mention', async () => {
     // The turn is recorded before anything is posted, so a redelivery that the
     // gateway has already seen produces silence rather than a second message.
     const existing = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
-    const { deps, posts, turns, seen, links } = harness({ existing });
+    const { deps, posts, turns, links } = harness({ existing });
     // The gateway answers with no turn, which is a Slack event it has recorded
     // before.
     deps.turn = (spec) => {
@@ -146,20 +139,8 @@ describe('app_mention', () => {
     };
     assert.equal(await handleMention(MENTION, deps), 'already handled');
     assert.deepEqual(posts, []);
-    assert.deepEqual(seen, [], 'and the cursor stays where it was');
     assert.equal(turns.length, 1, 'it still asked, which is how it found out');
     assert.deepEqual(links, [], 'and paid Slack for nothing it was going to post');
-  });
-
-  it('leaves the cursor where it was when the post fails', async () => {
-    // The turn is recorded before the post, for redelivery. If the cursor moved
-    // with it, a post that failed would mark the thread read and the retry the
-    // member is invited to make would filter out exactly what they never saw.
-    const existing = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
-    const { deps, seen } = harness({ existing });
-    deps.post = () => Promise.reject(new Error('slack is down'));
-    await assert.rejects(handleMention(MENTION, deps), /slack is down/);
-    assert.deepEqual(seen, []);
   });
 
   it('asks to be invited rather than answering from a channel it cannot read', async () => {
@@ -189,7 +170,7 @@ describe('app_mention', () => {
     // The gateway declined to overwrite a root another delivery posted, so the
     // one just posted is stray. The member is told which thread is live by the
     // reply landing there.
-    const { deps, posts, seen } = harness({ rootThread: '999.0' });
+    const { deps, posts } = harness({ rootThread: '999.0' });
     assert.equal(await handleMention(MENTION, deps), 'adopted');
 
     // Three messages: the stray root already posted, the correction telling the
@@ -198,7 +179,6 @@ describe('app_mention', () => {
     assert.equal(posts.length, 3);
     assert.equal(posts[1]!.threadTs, '200.0', 'the correction lands in the stray');
     assert.match(posts[1]!.text, /carry on in the other thread/);
-    assert.equal(posts[2]!.threadTs, '999.0', 'and the snapshot in the winner');
-    assert.deepEqual(seen, ['101.0']);
+    assert.equal(posts[2]!.threadTs, '999.0', 'and the work in the winner');
   });
 });

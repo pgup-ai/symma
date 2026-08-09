@@ -255,6 +255,10 @@ export interface DmDeps {
   /** Where this conversation may publish (§5). Undefined for one that began in
    * the DM, which has nowhere to go back to. */
   destination: (conversation: string) => Promise<{ channel: string; thread: string } | undefined>;
+  /** Moves the conversation's cursor up its source thread. Called only after the
+   * answer is delivered: a turn that failed to reach the member must not leave
+   * the channel marked as read to the agent that never saw it. */
+  seen: (conversation: string, seenThroughTs: string) => Promise<void>;
   log: (message: string) => void;
 }
 
@@ -264,6 +268,11 @@ const REPLAY =
   'Earlier in this conversation, most recent last. This is a transcript, not a ' +
   'session you can still reach — files you opened and commands you ran are gone, ' +
   'so re-read anything you need.';
+
+/** Labels the channel thread a mention came out of, which the member can see and
+ * the agent cannot. Distinct from the replay below because they are different
+ * conversations: one is what was asked about, the other what was said about it. */
+const SOURCE = 'The thread this was asked in, most recent last:';
 
 /**
  * §4's third rung, and still the one every follow-up needs to hand over: a
@@ -280,26 +289,68 @@ async function catchUp(
   message: DmMessage,
   conversation: ConversationRef,
   deps: DmDeps,
-): Promise<{ context: string; note: string } | undefined> {
+): Promise<{ context?: string; note: string; seenThrough?: string } | undefined> {
   // Fails open, per the auxiliary rule: this is context, not the answer.
   // `threadReplies` throws on a thread past its page cap and on any Slack error
   // that is not a plain "cannot see it" — and a conversation long enough to
   // reach that cap is precisely the one worth catching up.
-  const replies = await deps
-    .threadReplies(conversation.dmChannel, conversation.rootThread)
-    .catch((error: unknown) => {
+  // Undefined is a thread that could not be read — a channel the bot was removed
+  // from, one past its page cap — as against `[]` for one with nothing in it. The
+  // difference is worth keeping now: the source thread is no longer copied into
+  // the DM, so losing it is losing the question's context rather than a duplicate
+  // of it.
+  const read = (channel: string, thread: string): Promise<ThreadMessage[] | undefined> =>
+    deps.threadReplies(channel, thread).catch((error: unknown) => {
       deps.log(`catch-up skipped: ${String(error)}`);
       return undefined;
     });
-  const earlier = (replies ?? []).filter((reply) => reply.ts !== message.ts);
-  const snapshot = threadSnapshot(earlier, { budgetBytes: deps.budgetBytes });
-  if (!snapshot.text) return undefined;
+
+  // Read at the turn rather than copied into the DM when the mention landed, which
+  // is also reading it as it is now. It takes the budget it needs and the DM gets
+  // the rest: a member asking about a channel thread would rather lose their own
+  // earlier asides than the thread.
+  // A section costs its label, the blank line under it, and the one joining it to
+  // the next. Charged against the same ceiling as the text it introduces, or the
+  // assembled context is over a budget its own parts were each inside. Clamped
+  // because the labels are fixed where the ceiling is configured.
+  const bytes = (text: string): number => Buffer.byteLength(text, 'utf8');
+  const room = (label: string, taken = 0): number =>
+    Math.max(0, deps.budgetBytes - taken - bytes(label) - 4);
+
+  const from = conversation.source;
+  const channel = from ? await read(from.channel, from.thread) : [];
+  const source = from
+    ? threadSnapshot(channel ?? [], {
+        budgetBytes: room(SOURCE),
+        ...(conversation.seenThroughTs ? { since: conversation.seenThroughTs } : {}),
+      })
+    : undefined;
+  const spent = source?.text ? bytes(SOURCE) + 4 + bytes(source.text) : 0;
+
+  const replies = (await read(conversation.dmChannel, conversation.rootThread)) ?? [];
+  const dm = threadSnapshot(
+    replies.filter((reply) => reply.ts !== message.ts),
+    { budgetBytes: room(REPLAY, spent) },
+  );
+  const parts = [
+    ...(source?.text ? [`${SOURCE}\n\n${source.text}`] : []),
+    ...(dm.text ? [`${REPLAY}\n\n${dm.text}`] : []),
+  ];
+  const omitted = (source?.omitted ?? 0) + dm.omitted;
+  // Said rather than absorbed: an answer given without the thread it was asked
+  // about reads like an answer about the thread, and the member is the only one
+  // who can tell the difference or fix the access. Said even with nothing to catch
+  // up on, which is why the context is what is optional here and the note is not.
+  const lost = from && !channel ? from.channel : undefined;
+  if (!parts.length && !lost) return undefined;
   return {
-    context: `${REPLAY}\n\n${snapshot.text}`,
-    note:
-      snapshot.omitted > 0
-        ? `Catching it up from this thread, minus ${String(snapshot.omitted)} earlier messages that did not fit.`
-        : 'Catching it up from this thread — it has the messages, not what it ran.',
+    ...(parts.length ? { context: parts.join('\n\n') } : {}),
+    note: lost
+      ? `I cannot read <#${lost}> just now, so this is without that thread.`
+      : omitted
+        ? `Catching it up, minus ${String(omitted)} earlier messages that did not fit.`
+        : 'Catching it up from the thread — it has the messages, not what it ran.',
+    ...(source?.seenThroughTs ? { seenThrough: source.seenThroughTs } : {}),
   };
 }
 
@@ -457,7 +508,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       model: `${decision.agent}/${decision.model ?? 'default'}`,
       prompt: message.text,
       onProgress: narrate,
-      ...(caught ? { context: caught.context } : {}),
+      ...(caught?.context ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
       ...(decision.mode ? { mode: decision.mode } : {}),
@@ -560,6 +611,15 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     throw error;
   }
   await deps.mark(message.channel, message.ts, 'done');
+  // Before the turn is closed, which is what lets the next one start: the cursor
+  // is what that turn filters its read by, so a thread released with it still
+  // behind this answer catches the next one up on what this one already covered.
+  // Fail-open all the same — a cursor that did not move costs a re-read, where
+  // failing a delivered turn costs the answer.
+  if (caught?.seenThrough)
+    await deps.seen(conversation.id, caught.seenThrough).catch((error: unknown) => {
+      deps.log(`cursor not moved: ${String(error)}`);
+    });
   await deps.finish(conversation.id, turn, 'completed', ran);
   // Slack cannot fold the narration away the way a terminal does, so once the
   // answer is here the last step is only in the way. Queued behind the narration
