@@ -289,48 +289,60 @@ async function catchUp(
   message: DmMessage,
   conversation: ConversationRef,
   deps: DmDeps,
-): Promise<{ context: string; note: string; seenThrough?: string } | undefined> {
+): Promise<{ context?: string; note: string; seenThrough?: string } | undefined> {
   // Fails open, per the auxiliary rule: this is context, not the answer.
   // `threadReplies` throws on a thread past its page cap and on any Slack error
   // that is not a plain "cannot see it" — and a conversation long enough to
   // reach that cap is precisely the one worth catching up.
-  const read = (channel: string, thread: string): Promise<ThreadMessage[]> =>
-    deps.threadReplies(channel, thread).then(
-      (replies) => replies ?? [],
-      (error: unknown) => {
-        deps.log(`catch-up skipped: ${String(error)}`);
-        return [];
-      },
-    );
+  // Undefined is a thread that could not be read — a channel the bot was removed
+  // from, one past its page cap — as against `[]` for one with nothing in it. The
+  // difference is worth keeping now: the source thread is no longer copied into
+  // the DM, so losing it is losing the question's context rather than a duplicate
+  // of it.
+  const read = (channel: string, thread: string): Promise<ThreadMessage[] | undefined> =>
+    deps.threadReplies(channel, thread).catch((error: unknown) => {
+      deps.log(`catch-up skipped: ${String(error)}`);
+      return undefined;
+    });
 
   // Read at the turn rather than copied into the DM when the mention landed, which
   // is also reading it as it is now. It takes the budget it needs and the DM gets
   // the rest: a member asking about a channel thread would rather lose their own
   // earlier asides than the thread.
-  const source = conversation.source
-    ? threadSnapshot(await read(conversation.source.channel, conversation.source.thread), {
+  const from = conversation.source;
+  const channel = from ? await read(from.channel, from.thread) : [];
+  const source = from
+    ? threadSnapshot(channel ?? [], {
         budgetBytes: deps.budgetBytes,
         ...(conversation.seenThroughTs ? { since: conversation.seenThroughTs } : {}),
       })
     : undefined;
   const spent = Buffer.byteLength(source?.text ?? '', 'utf8');
 
-  const replies = await read(conversation.dmChannel, conversation.rootThread);
+  const replies = (await read(conversation.dmChannel, conversation.rootThread)) ?? [];
   const dm = threadSnapshot(
     replies.filter((reply) => reply.ts !== message.ts),
-    { budgetBytes: Math.max(0, deps.budgetBytes - spent) },
+    // Never negative: a snapshot never exceeds the budget it was handed.
+    { budgetBytes: deps.budgetBytes - spent },
   );
   const parts = [
     ...(source?.text ? [`${SOURCE}\n\n${source.text}`] : []),
     ...(dm.text ? [`${REPLAY}\n\n${dm.text}`] : []),
   ];
-  if (!parts.length) return undefined;
   const omitted = (source?.omitted ?? 0) + dm.omitted;
+  // Said rather than absorbed: an answer given without the thread it was asked
+  // about reads like an answer about the thread, and the member is the only one
+  // who can tell the difference or fix the access. Said even with nothing to catch
+  // up on, which is why the context is what is optional here and the note is not.
+  const lost = from && !channel ? from.channel : undefined;
+  if (!parts.length && !lost) return undefined;
   return {
-    context: parts.join('\n\n'),
-    note: omitted
-      ? `Catching it up, minus ${String(omitted)} earlier messages that did not fit.`
-      : 'Catching it up from the thread — it has the messages, not what it ran.',
+    ...(parts.length ? { context: parts.join('\n\n') } : {}),
+    note: lost
+      ? `I cannot read <#${lost}> just now, so this is without that thread.`
+      : omitted
+        ? `Catching it up, minus ${String(omitted)} earlier messages that did not fit.`
+        : 'Catching it up from the thread — it has the messages, not what it ran.',
     ...(source?.seenThroughTs ? { seenThrough: source.seenThroughTs } : {}),
   };
 }
@@ -489,7 +501,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       model: `${decision.agent}/${decision.model ?? 'default'}`,
       prompt: message.text,
       onProgress: narrate,
-      ...(caught ? { context: caught.context } : {}),
+      ...(caught?.context ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
       ...(decision.mode ? { mode: decision.mode } : {}),

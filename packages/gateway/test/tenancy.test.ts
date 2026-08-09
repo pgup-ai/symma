@@ -2053,6 +2053,11 @@ describe('tenancy', () => {
         source: { channel: 'C-incidents', thread: '100.0' },
       });
 
+      // And the DM lookup carries it too, which is the one a follow-up takes: the
+      // turn reads the channel thread from `source`, so a lookup that dropped it
+      // would answer a question about a thread without the thread.
+      assert.deepEqual(await store.conversationForDm(wynn.owner, 'D-wynn', '200.0'), found);
+
       // And a second open loses rather than overwriting: the winner's DM root is
       // the thread already on screen.
       assert.equal(

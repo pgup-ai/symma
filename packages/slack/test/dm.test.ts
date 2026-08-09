@@ -57,8 +57,8 @@ function harness(
      * transient Slack error. */
     historyFails?: Error;
     /** The source channel thread a mention came out of, for a conversation whose
-     * `source` says where to read it. */
-    channel?: ThreadMessage[];
+     * `source` says where to read it. `null` is one the bot cannot read. */
+    channel?: ThreadMessage[] | null;
     /** The gateway refuses to move the cursor. */
     seenFails?: boolean;
     budgetBytes?: number;
@@ -103,7 +103,8 @@ function harness(
     // Two threads now: the DM the conversation lives in, and the channel a
     // mention came out of — which is where a turn reads what it is about.
     threadReplies: (channel) => {
-      if (channel !== 'D-nel') return Promise.resolve(over.channel ?? []);
+      if (channel !== 'D-nel')
+        return Promise.resolve(over.channel === null ? undefined : (over.channel ?? []));
       return over.historyFails
         ? Promise.reject(over.historyFails)
         : Promise.resolve(over.history === null ? undefined : (over.history ?? []));
@@ -843,12 +844,27 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
       deps,
     );
-    assert.match(runs[0]!.context!, /The thread this was asked in/);
     assert.match(runs[0]!.context!, /here is the trace/);
     assert.doesNotMatch(runs[0]!.context!, /the deploy is failing/, 'already shown');
     // Moved only once the answer is delivered: a cursor past an answer nobody got
     // would filter out exactly what they never saw.
     assert.deepEqual(moved, ['conv-1:101.0']);
+  });
+
+  it('says so when it cannot read the channel it was asked about', async () => {
+    // Nothing copies that thread into the DM any more, so losing access to it
+    // loses the question's context — and an answer given without it reads like an
+    // answer about it.
+    const { deps, posts, runs } = harness({
+      existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
+      channel: null,
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      deps,
+    );
+    assert.match(posts[0]!.text, /I cannot read <#C-incidents> just now/);
+    assert.doesNotMatch(runs[0]!.context ?? '', /asked in/, 'and nothing claims that thread');
   });
 
   it('leaves the cursor where it was when the answer never landed', async () => {
