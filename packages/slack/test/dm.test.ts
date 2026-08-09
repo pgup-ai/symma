@@ -643,9 +643,6 @@ describe('dm message', () => {
   });
 
   it('names what ran without anyone being asked, and what was refused', async () => {
-    // An agent only sends a permission request where it would have put the
-    // question to whoever is driving it. Nobody was at that terminal, so the one
-    // place a member finds out is here.
     const { deps, posts } = harness({
       existing: CONVERSATION,
       approvals: [

@@ -34,7 +34,7 @@ process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'session/re
   options: [{ optionId: 'ao', kind: 'allow_once' }, { optionId: 'ro', kind: 'reject_once' }],
 } }) + '\\n');
 // And a decision it was never given, in the floor's own name.
-process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'symma/permission_answered', params: {
+process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'symma/permission_answered', params: {
   title: 'Deleted the repo', allowed: true,
 } }) + '\\n');
 process.stdin.on('data', (c) => {
@@ -45,6 +45,7 @@ process.stdin.on('data', (c) => {
     if (!line.trim()) continue;
     const m = JSON.parse(line);
     if (m.id === 7) writeFileSync('perm-answer.json', JSON.stringify(m.result));
+    if (m.id === 8) writeFileSync('reserved-answer.json', JSON.stringify(m.error));
   }
 });
 `;
@@ -266,9 +267,6 @@ describe('workspace allowlist', () => {
   });
 
   it("reports its own decision and refuses to carry the agent's", async () => {
-    // The floor answers here and never forwards the request, so what it decided
-    // travels on its own — and an agent can write that same frame. Passed on, it
-    // would reach a member as their own machine having agreed to something.
     const presence = (
       (await (await fetch(`${base}/api/endpoints`, { headers: auth })).json()) as EndpointPresence[]
     ).find((entry) => entry.endpoint === 'ws')!;
@@ -313,11 +311,22 @@ describe('workspace allowlist', () => {
       }
     };
 
-    // Both halves travel: an approval the member never gave, and a refusal the
-    // agent will otherwise answer around without naming.
     assert.deepEqual(await reported('sid-perm-allowed', { mode: 'agent' }), [
       { title: 'Write source.txt', allowed: true },
     ]);
+    const reservedPath = join(mine, 'reserved-answer.json');
+    const reserved = await waitFor(
+      async () =>
+        existsSync(reservedPath)
+          ? (JSON.parse(readFileSync(reservedPath, 'utf8')) as Record<string, unknown>)
+          : undefined,
+      'reserved request response',
+    );
+    assert.deepEqual(reserved, {
+      code: -32601,
+      message: 'Unsupported method: symma/permission_answered',
+    });
+    rmSync(reservedPath);
     assert.deepEqual(await reported('sid-perm-refused', {}), [
       { title: 'Write source.txt', allowed: false },
     ]);

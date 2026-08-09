@@ -65,9 +65,7 @@ export interface RemoteAcpConfig {
   /** Attachments the agent advertised no block for; the caller told its member
    * they were being read, so it is the one that has to correct the record. */
   onUnsupported?: (files: { name: string; kind: string }[]) => void;
-  /** What the agent stopped to ask about and the floor answered for the caller.
-   * A member driving this from Slack was not at the terminal it would have
-   * prompted at, so this is how they hear it happened. */
+  /** Permission decisions made by the remote floor without the caller present. */
   onApprovals?: (approvals: { title: string; allowed: boolean }[]) => void;
   /** What the agent is doing right now, unthrottled — a caller rendering this
    * anywhere rate-limited does its own throttling. */
@@ -297,8 +295,7 @@ export async function runRemotePrompt(
             model,
             ...(ack.modelCandidates ? { configOptionModelIds: ack.modelCandidates } : {}),
             ...(ack.requirePlanMode ? { requirePlanMode: true } : {}),
-            // The companion answers this session's permission requests and never
-            // forwards them, so what it decided arrives as a notification.
+            // The companion owns this session's floor and reports its decisions.
             floorUpstream: true,
             ...(config.mode !== undefined ? { mode: config.mode } : {}),
             ...(config.onProgress ? { onProgress: config.onProgress } : {}),

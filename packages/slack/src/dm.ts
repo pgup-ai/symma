@@ -149,10 +149,6 @@ function spent(model: string | undefined, usage: TurnUsage | undefined): string[
   return [parts.join(' · ')];
 }
 
-/** What a member at their own terminal would have been prompted about, named —
- * "it ran some commands" is not something anyone can check. Refusals are worth as
- * much as approvals: an agent told no by the floor tends to answer around it
- * rather than say which door was shut. */
 function approvalNote(approvals?: { title: string; allowed: boolean }[]): string[] {
   const said = (titles: string[]): string => titles.map((t) => `\`${plainly(t)}\``).join(', ');
   const titles = (allowed: boolean): string[] => [
@@ -225,8 +221,7 @@ export interface DmDeps {
     usage?: TurnUsage;
     /** Files the agent advertised no block for, for this layer to word. */
     unsupported?: { name: string; kind: string }[];
-    /** What the agent stopped to ask about, and what the floor answered for the
-     * member who was not there to. */
+    /** Permission decisions made without the member present. */
     approvals?: { title: string; allowed: boolean }[];
   }>;
   /** Clears the conversation's stored mode. Called when a turn failed because

@@ -112,21 +112,9 @@ const FALLBACK_TEXT_LIMIT = 40_000;
  * a stalled one would otherwise hold the whole turn. */
 const FILE_FETCH_TIMEOUT_MS = 20_000;
 
-/** For the calls that are not the answer: a progress line, a link back, a name, a
- * reaction, the rewrite that retires a spent button. The SDK defaults to
- * `timeout: 0` and ten retries across half an hour, which is right for an answer
- * and wrong for a decoration still trying long after the turn that wanted it.
- *
- * Bounded for exactly these because each is idempotent *and* losing one costs
- * only a hint. `settle` is the near miss: its `chat.update` is idempotent too, but
- * what it writes is the retirement of a share button, and a button left live is a
- * second press that posts the same answer into the channel again — so it keeps the
- * durable client, where retrying for half an hour is the point.
- *
- * `postMessage` keeps the defaults for the opposite reason: one retried after
- * Slack accepted it is a second message in the member's thread, and how long a
- * thread may be held by one is the gateway's to decide, which it does by retiring
- * a turn left running. */
+/** Five-second client for idempotent, non-answer hints. `postMessage` keeps the
+ * SDK defaults to avoid duplicating an accepted answer; `settle` keeps them
+ * because losing that update leaves the share button active. */
 const ASIDE_TIMEOUT_MS = 5_000;
 
 /** A name or a title the member or their agent chose, on its way into mrkdwn:

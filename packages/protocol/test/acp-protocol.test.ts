@@ -45,8 +45,6 @@ interface FakeAgentApi {
   update: (update: Record<string, unknown>) => void;
   request: (id: number, method: string, params: Record<string, unknown>) => void;
   finish: (stopReason?: string, usage?: Record<string, unknown>) => void;
-  /** A frame with no id, which is what a notification is — the shape the
-   * companion forwards its own permission decisions in. */
   notify: (method: string, params: Record<string, unknown>) => void;
 }
 
@@ -302,9 +300,6 @@ describe('acp', () => {
   });
 
   it('records nothing where the floor had no option it could pick', async () => {
-    // Cancelled is not a refusal: the floor took no stance, it just found nothing
-    // to answer with. Reported as one, a member reads "would not run" about a
-    // call this layer never objected to.
     const fake = fakeAgentIo({
       onPrompt: (agent) =>
         agent.request(9, 'session/request_permission', {
@@ -330,13 +325,6 @@ describe('acp', () => {
   });
 
   it('takes the decision from an upstream floor, and from nobody else', async () => {
-    // A remote turn's floor is the companion's: it answers on its own machine and
-    // never forwards the request, so without this the driver sees nothing and a
-    // turn where nobody was asked reports as one where nothing was decided.
-    //
-    // With no floor upstream the only thing left that could send one is the agent,
-    // and an agent naming its own approvals is a claim, not a record — a member
-    // would read it as their own machine having agreed to something.
     const reported = async (floorUpstream: boolean): Promise<unknown> => {
       const fake = fakeAgentIo({
         onPrompt: (agent) => {
@@ -363,8 +351,6 @@ describe('acp', () => {
   });
 
   it('carries a refusal back too, since the floor made that call as well', async () => {
-    // Read-only denies a write, and an agent told no often answers around it
-    // rather than saying which door was shut — so the caller is told which.
     const fake = fakeAgentIo({
       onPrompt: (agent) =>
         agent.request(9, 'session/request_permission', {
@@ -590,8 +576,6 @@ describe('acp', () => {
     });
     assert.deepEqual(fake.setModeIds, ['agent']);
     assert.deepEqual(permissionAnswers, [{ outcome: { outcome: 'selected', optionId: 'ao' } }]);
-    // Carried back named: the agent only asks where it would have asked a member
-    // at their own terminal, and this one was answered without them.
     assert.deepEqual(result.approvals, [{ title: 'Write src/index.ts', allowed: true }]);
     assert.deepEqual(result.modes, {
       currentModeId: 'agent',

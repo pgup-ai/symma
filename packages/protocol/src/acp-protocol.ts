@@ -177,13 +177,7 @@ export function respondToPermissionRequest(
     : { outcome: { outcome: 'cancelled' } };
 }
 
-/** What the floor decided, alongside the answer it will send. One call, because a
- * report that recomputed the rule would be a second copy of the rule that decides
- * what runs — and a `cancelled` outcome records nothing, since the floor took no
- * stance there: it simply had no option it could pick.
- *
- * An agent that sends neither title nor kind leaves nothing to name, and
- * something unnamed is still worth saying happened. */
+/** Returns the selected decision with its response so enforcement and reporting cannot diverge. */
 export function answerPermission(
   params: PermissionRequestParams,
   policy: PermissionPolicy = 'read-only',
@@ -199,15 +193,9 @@ export function answerPermission(
   };
 }
 
-/** Emitted by whoever answered a permission request for a caller that was not
- * there to. The companion answers on its own machine and never forwards the
- * request, so this is the only way a remote turn hears what was decided for it.
- * Namespaced away from the agent's methods: symma's notification on symma's own
- * transport, not part of ACP. */
+/** Symma-only notification carrying a companion floor's decision to a remote driver. */
 export const PERMISSION_ANSWERED = 'symma/permission_answered';
 
-/** The floor's rule on its own, so a caller reporting what it decided reads the
- * same one it answered with rather than a second copy of it. */
 function deniedByFloor(params: PermissionRequestParams, policy: PermissionPolicy): boolean {
   const kind = normalizeKind(params.toolCall?.kind);
   // MCP servers are the agent's own subprocesses, outside its OS sandbox and
@@ -360,11 +348,7 @@ export interface AcpSessionOptions {
   /** Fail closed when plan mode is missing or cannot be set (agents with no
    * agent-side sandbox — plan mode is their behavioral read-only layer). */
   requirePlanMode?: boolean;
-  /** The permission floor for this session runs somewhere else — the companion,
-   * on the machine the agent is on — so what it decided arrives as a notification
-   * rather than as this driver's own answer. Without it the only thing that could
-   * send one is the agent, and an agent naming its own approvals is not a record
-   * of anything, so they are ignored. */
+  /** Accept permission decisions only when a trusted upstream companion owns the floor. */
   floorUpstream?: boolean;
   /** Session mode to run under, one of the agent's `availableModes`. Fails the
    * turn when not offered — no silent downgrade in either direction. Absent
@@ -521,11 +505,7 @@ export interface AcpSessionResult {
   /** Attachments this agent advertised no block for, so the caller can say so
    * in its own words — it is the one that promised its member they were read. */
   unsupported?: { name: string; kind: PromptAttachment['kind'] }[];
-  /** What the agent stopped to ask about, and what this floor answered. An agent
-   * only sends `session/request_permission` where its own policy would have put
-   * the question to whoever is driving it — so in a write-capable mode this is
-   * the list of things a member sitting at their own terminal would have been
-   * asked, and was not. */
+  /** Permission requests selected or refused by this session's floor. */
   approvals?: { title: string; allowed: boolean }[];
 }
 
@@ -562,11 +542,7 @@ export async function driveAcpSession(
   const conn = new AcpConnection(
     io,
     (method, params) => {
-      // A floor that answered elsewhere, saying what it decided: the companion
-      // never forwards the request, so this is the only way a remote turn learns
-      // what was allowed on its behalf. Only where there is such a floor — with
-      // none, the only sender left is the agent, and an agent naming its own
-      // approvals is not a record of anything.
+      // Without an upstream floor, only the agent could have sent this reserved method.
       if (method === PERMISSION_ANSWERED && options.floorUpstream) {
         const { title, allowed } = params as { title?: unknown; allowed?: unknown };
         if (typeof title === 'string' && typeof allowed === 'boolean')
@@ -609,8 +585,7 @@ export async function driveAcpSession(
         // The driver's own floor follows the caller's mode the same way the
         // companion's does — a local caller that asked for a write-capable
         // mode must not have this layer silently deny what the mode promises.
-        // This arm is the local path only — a remote turn's floor is the
-        // companion's, which reports through `PERMISSION_ANSWERED` above.
+        // Remote turns use the companion floor and the notification above.
         const policy: PermissionPolicy =
           options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only';
         const { response, decided } = answerPermission(params as PermissionRequestParams, policy);

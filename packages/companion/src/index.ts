@@ -783,8 +783,7 @@ async function openSession(control: OpenControl): Promise<void> {
   };
   sessions.set(control.sessionId, session);
 
-  /** Every frame the client is shown takes this path: signed, sequenced and
-   * journaled the same way, whether the agent sent it or this process did. */
+  /** Signs, sequences and journals every frame shown to the client. */
   const forward = (frame: Record<string, unknown>): void => {
     const envelope: ObserverEnvelope = {
       v: 1,
@@ -812,19 +811,22 @@ async function openSession(control: OpenControl): Promise<void> {
         session.allowWrites ? 'writes' : 'read-only',
       );
       child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: response })}\n`);
-      // What was decided travels even though the request never does: a caller
-      // told nothing cannot tell its member that this machine agreed to
-      // something on their behalf.
+      // The request stays local; only the floor's decision travels.
       if (decided) forward({ jsonrpc: '2.0', method: PERMISSION_ANSWERED, params: decided });
       return;
     }
-    // Reserved for the line above. An agent sending it is claiming a decision this
-    // floor makes, and a caller has no way to tell the claim from the record — it
-    // would read to a member as "your machine agreed to this" about something
-    // nobody agreed to. Dropped rather than passed on, and said out loud: an agent
-    // reaching for this is worth knowing about.
+    // Only the companion may report its floor's decision; an agent frame would
+    // spoof the member-facing record.
     if (frame.method === PERMISSION_ANSWERED) {
       log(`${control.sessionId}: agent tried to report a permission decision; dropped`);
+      if (frame.id !== undefined)
+        child.stdin?.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: frame.id,
+            error: { code: -32601, message: `Unsupported method: ${frame.method}` },
+          })}\n`,
+        );
       return;
     }
     forward(frame);
