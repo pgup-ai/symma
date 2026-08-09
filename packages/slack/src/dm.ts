@@ -133,6 +133,10 @@ const thousands = (tokens: number): string =>
  * a question answered from context, an order more for one that read the repo. */
 const EXPENSIVE_TOKENS = 25_000;
 
+/** Enough to see what kind of thing was agreed to; past that a count says more
+ * than another name would. */
+const NAMED_APPROVALS = 5;
+
 /** The cost beside the model that charged it — the two only mean something
  * together, now that the model is the member's own choice. Absent when the
  * agent reported no total: an invented number is worse than none. Absent for a
@@ -149,19 +153,31 @@ function spent(model: string | undefined, usage: TurnUsage | undefined): string[
   return [parts.join(' · ')];
 }
 
+/** What a member at their own terminal would have been prompted about, named —
+ * "it ran some commands" is not something anyone can check. Refusals are worth as
+ * much as approvals: an agent told no by the floor tends to answer around it
+ * rather than say which door was shut. */
 function approvalNote(approvals?: { title: string; allowed: boolean }[]): string[] {
-  const said = (titles: string[]): string => titles.map((t) => `\`${t}\``).join(', ');
   const titles = (allowed: boolean): string[] => [
     // One entry each, counted on what the member will read: an agent retrying the
     // same call asked about the same thing, and may well have quoted it
     // differently — two titles that render alike are one line either way.
     ...new Set((approvals ?? []).filter((a) => a.allowed === allowed).map((a) => plainly(a.title))),
   ];
-  const allowed = titles(true);
-  const refused = titles(false);
+  const line = (lead: string, named: string[]): string[] => {
+    if (!named.length) return [];
+    // Named up to a point and counted after it. A turn that asked forty times is
+    // not a list anyone reads, and the aside carrying it would be cut to fit by a
+    // slice that lands wherever it lands — inside a code span as readily as
+    // between two names, taking the rest of the line into the span with it.
+    const shown = named.slice(0, NAMED_APPROVALS);
+    const rest = named.length - shown.length;
+    const more = rest ? ` and ${String(rest)} more` : '';
+    return [`${lead}: ${shown.map((title) => `\`${title}\``).join(', ')}${more}.`];
+  };
   return [
-    ...(allowed.length ? [`Went ahead without asking: ${said(allowed)}.`] : []),
-    ...(refused.length ? [`Would not run: ${said(refused)}.`] : []),
+    ...line('Went ahead without asking', titles(true)),
+    ...line('Would not run', titles(false)),
   ];
 }
 

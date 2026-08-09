@@ -662,6 +662,26 @@ describe('dm message', () => {
     ]);
   });
 
+  it('counts the rest rather than listing every one of them', async () => {
+    // A turn that asked forty times is not a list anyone reads, and one long
+    // enough to be clipped is clipped wherever the slice lands — inside a code
+    // span as readily as between two names.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      approvals: Array.from({ length: 8 }, (_, i) => ({
+        title: `Run cmd${String(i)}`,
+        allowed: true,
+      })),
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(posts[1]!.notices, [
+      'Went ahead without asking: `Run cmd0`, `Run cmd1`, `Run cmd2`, `Run cmd3`, `Run cmd4` and 3 more.',
+    ]);
+  });
+
   it('corrects the record when the agent could not take a file it was sent', async () => {
     // The acknowledgement promised the member it was reading them, and only this
     // layer knows how a filename renders here — so the driver names them and
