@@ -858,13 +858,17 @@ describe('dm message', () => {
     const { deps, posts, runs } = harness({
       existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
       channel: null,
+      // So the prompt has something in it: without this the context is absent
+      // entirely and asserting what it does not claim would assert nothing.
+      history: [{ ts: '201.0', author: 'U-nel', text: 'still waiting' }],
     });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
       deps,
     );
     assert.match(posts[0]!.text, /I cannot read <#C-incidents> just now/);
-    assert.doesNotMatch(runs[0]!.context ?? '', /asked in/, 'and nothing claims that thread');
+    assert.match(runs[0]!.context!, /still waiting/, 'the DM still travels');
+    assert.doesNotMatch(runs[0]!.context!, /asked in/, 'and nothing claims that thread');
   });
 
   it('leaves the cursor where it was when the answer never landed', async () => {
@@ -935,7 +939,9 @@ describe('dm message', () => {
       author: 'U-nel',
       text: `message number ${i}`,
     }));
-    const { deps, posts } = harness({ existing: CONVERSATION, history, budgetBytes: 90 });
+    // Above the replay label, which is charged against the same ceiling: a budget
+    // under it carries no thread at all rather than a trimmed one.
+    const { deps, posts } = harness({ existing: CONVERSATION, history, budgetBytes: 280 });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
       deps,

@@ -134,12 +134,20 @@ const depsFor = (user: string) => {
     path: string,
     by: Record<string, string>,
   ): Promise<ConversationRef | undefined> => {
-    const { id, dmChannel, rootThread, seenThroughTs } = await ask<Partial<ConversationRef>>(path, {
-      user,
-      ...by,
-    });
+    const { id, dmChannel, rootThread, seenThroughTs, source } = await ask<
+      Partial<ConversationRef>
+    >(path, { user, ...by });
     if (!id || !dmChannel || !rootThread) return undefined;
-    return { id, dmChannel, rootThread, ...(seenThroughTs ? { seenThroughTs } : {}) };
+    return {
+      id,
+      dmChannel,
+      rootThread,
+      ...(seenThroughTs ? { seenThroughTs } : {}),
+      // Carried, not dropped: a turn reads its channel thread from this, and a
+      // lookup that answers with less than it says it does is a context that
+      // disappears without anything failing.
+      ...(source ? { source } : {}),
+    };
   };
   return {
     budgetBytes,

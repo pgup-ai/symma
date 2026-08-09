@@ -309,21 +309,28 @@ async function catchUp(
   // is also reading it as it is now. It takes the budget it needs and the DM gets
   // the rest: a member asking about a channel thread would rather lose their own
   // earlier asides than the thread.
+  // A section costs its label, the blank line under it, and the one joining it to
+  // the next. Charged against the same ceiling as the text it introduces, or the
+  // assembled context is over a budget its own parts were each inside. Clamped
+  // because the labels are fixed where the ceiling is configured.
+  const bytes = (text: string): number => Buffer.byteLength(text, 'utf8');
+  const room = (label: string, taken = 0): number =>
+    Math.max(0, deps.budgetBytes - taken - bytes(label) - 4);
+
   const from = conversation.source;
   const channel = from ? await read(from.channel, from.thread) : [];
   const source = from
     ? threadSnapshot(channel ?? [], {
-        budgetBytes: deps.budgetBytes,
+        budgetBytes: room(SOURCE),
         ...(conversation.seenThroughTs ? { since: conversation.seenThroughTs } : {}),
       })
     : undefined;
-  const spent = Buffer.byteLength(source?.text ?? '', 'utf8');
+  const spent = source?.text ? bytes(SOURCE) + 4 + bytes(source.text) : 0;
 
   const replies = (await read(conversation.dmChannel, conversation.rootThread)) ?? [];
   const dm = threadSnapshot(
     replies.filter((reply) => reply.ts !== message.ts),
-    // Never negative: a snapshot never exceeds the budget it was handed.
-    { budgetBytes: deps.budgetBytes - spent },
+    { budgetBytes: room(REPLAY, spent) },
   );
   const parts = [
     ...(source?.text ? [`${SOURCE}\n\n${source.text}`] : []),
