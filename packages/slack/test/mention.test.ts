@@ -19,6 +19,11 @@ const THREAD: ThreadMessage[] = [
   { ts: '101.0', author: 'Ola', text: 'here is the trace' },
 ];
 
+/** Slack's shape, but this test's string: what an assertion on it pins is which
+ * message the link names, not how Slack spells one. */
+const linkTo = (channel: string, ts: string): string =>
+  `https://slack.test/archives/${channel}/p${ts}`;
+
 interface Posted {
   channel: string;
   text: string;
@@ -43,11 +48,7 @@ function harness(over: {
     threadReplies: () => Promise.resolve('replies' in over ? over.replies : THREAD),
     openDm: () => Promise.resolve('D-nel'),
     permalink: (channel, ts) =>
-      Promise.resolve(
-        over.link === null
-          ? undefined
-          : (over.link ?? `https://slack.test/archives/${channel}/p${ts}`),
-      ),
+      Promise.resolve(over.link === null ? undefined : (over.link ?? linkTo(channel, ts))),
     post: (channel, text, threadTs) => {
       posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
       return Promise.resolve({ channel: 'D-nel', ts: '200.0' });
@@ -86,11 +87,11 @@ describe('app_mention', () => {
     // A way back: a private conversation about a thread nobody can find is one a
     // member cannot place a week later.
     assert.match(posts[0]!.text, /<#C-incidents>/);
-    // Pointed at the message that summoned the bot, not the thread's first: Slack
+    // Built from the mention's own ts, not the thread's first message: Slack
     // previews whatever the link names, and the ask is what a member wants back.
-    assert.match(
+    assert.ok(
+      posts[0]!.text.includes(`<${linkTo(MENTION.channel, MENTION.ts)}|open the thread>`),
       posts[0]!.text,
-      /<https:\/\/slack\.test\/archives\/C-incidents\/p101\.0\|open the thread>/,
     );
 
     // The cursor recorded is what the snapshot actually read, and it moves only

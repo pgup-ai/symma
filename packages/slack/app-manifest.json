@@ -1,11 +1,11 @@
 {
   "display_information": {
-    "name": "symma",
+    "name": "Symma",
     "description": "Reach your own coding agent, on your own machine, from Slack"
   },
   "features": {
     "bot_user": {
-      "display_name": "symma",
+      "display_name": "Symma",
       "always_online": false
     },
     "app_home": {
@@ -16,7 +16,7 @@
     "slash_commands": [
       {
         "command": "/connect",
-        "description": "Pair a machine with symma",
+        "description": "Pair a machine with Symma",
         "should_escape": false
       }
     ]
