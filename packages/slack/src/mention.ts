@@ -105,9 +105,17 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (snapshot.seenThroughTs) await deps.seen(conversation, snapshot.seenThroughTs);
   };
 
-  // Once, not per post: the three openings below are one thread's.
-  const link = await deps.permalink(mention.channel, mention.ts);
-  const source = { channel: mention.channel, ...(link ? { link } : {}) };
+  // Asked for where it is first wanted and then kept: the three openings below are
+  // one thread's, and a redelivery the gateway has already seen posts nothing and
+  // should pay for nothing.
+  let source: { channel: string; link?: string } | undefined;
+  const sourceOf = async (): Promise<{ channel: string; link?: string }> => {
+    if (!source) {
+      const link = await deps.permalink(mention.channel, mention.ts);
+      source = { channel: mention.channel, ...(link ? { link } : {}) };
+    }
+    return source;
+  };
 
   if (existing) {
     const { turn } = await deps.turn({
@@ -120,7 +128,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (!turn) return 'already handled';
     await deps.post(
       existing.dmChannel,
-      opening(snapshot.text, snapshot.omitted, source),
+      opening(snapshot.text, snapshot.omitted, await sourceOf()),
       existing.rootThread,
     );
     await shown(existing.id);
@@ -128,7 +136,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   }
 
   const dm = await deps.openDm(mention.user);
-  const root = await deps.post(dm, opening(snapshot.text, snapshot.omitted, source));
+  const root = await deps.post(dm, opening(snapshot.text, snapshot.omitted, await sourceOf()));
   const { conversation, turn } = await deps.turn({
     sourceChannel: mention.channel,
     sourceThread: mention.threadTs,
@@ -149,7 +157,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (!turn) return 'already handled';
     await deps.post(
       conversation.dmChannel,
-      opening(snapshot.text, snapshot.omitted, source),
+      opening(snapshot.text, snapshot.omitted, await sourceOf()),
       conversation.rootThread,
     );
     await shown(conversation.id);

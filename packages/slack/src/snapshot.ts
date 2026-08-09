@@ -31,14 +31,13 @@ export interface Snapshot {
  * `my_file.log` inside italics closes them early. */
 const render = (message: ThreadMessage): string => {
   const files = message.files?.map((f) => f.name).join(', ');
-  // Trailing break trimmed first, or it becomes a quoted empty line between the
-  // message and its files. A break inside the text keeps its blank line, which is
-  // what Slack shows for one too.
+  // Trimmed first, or a trailing break quotes an empty line before the files. One
+  // inside the text keeps its blank line, which is what Slack shows for it too.
   const quoted = message.text.trimEnd().replaceAll('\n', '\n> ');
-  // The bold is opened here, so the asterisk is this line's to take out: a member
-  // called `*Jane*` would otherwise close it and bold the rest of the quote. The
-  // rest of a name's mrkdwn is escaped where the name is resolved.
-  const who = message.author.replaceAll('*', '');
+  // The bold is opened here, so the pairs are this line's to take out: `*Jane*`
+  // closes it, and `john_doe` opens an italic that runs to the message's next
+  // underscore. Spaced, not dropped — `john doe` is the name, `johndoe` is not.
+  const who = message.author.replaceAll(/[*_~]/g, ' ').replace(/\s+/g, ' ').trim();
   return `> *${who}:* ${quoted}${files ? `\n> files: ${files}` : ''}`;
 };
 

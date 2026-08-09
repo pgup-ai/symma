@@ -116,15 +116,14 @@ describe('thread snapshot', () => {
     );
     assert.equal(snapshot.text, '> *Nel:* it threw:\n> line one\n> line two');
 
-    // Including where it is cut: the truncation marker used to open a line of its
-    // own, which is a line outside the quote.
-    const cut = threadSnapshot([{ ts: '100.0', author: 'J', text: 'aaa\naaa\naaa' }], {
+    // Including where it is cut. This shape and budget is the one that used to put
+    // the marker on a line of its own — the cut lands exactly on a break — so it
+    // is asserted whole rather than by a predicate that a shape which never
+    // truncates would also satisfy.
+    const cut = threadSnapshot([{ ts: '100.0', author: 'J', text: 'aaa\naaa\naaa\naaa' }], {
       budgetBytes: 27,
     });
-    assert.ok(
-      cut.text.split('\n').every((line) => line.startsWith('> ')),
-      cut.text,
-    );
+    assert.equal(cut.text, '> *J:* aaa … [truncated]');
 
     // And where it ends: a trailing break would quote an empty line before the
     // files.
@@ -136,12 +135,17 @@ describe('thread snapshot', () => {
   });
 
   it('does not let a display name close the bold it is shown in', () => {
-    // Names are escaped where they are resolved, but the `*` is this renderer's
-    // own markup — a member called `*Jane*` would close it and bold the rest.
-    const snapshot = threadSnapshot([{ ts: '100.0', author: 'C*3PO', text: 'hello there' }], {
-      budgetBytes: 10_000,
-    });
-    assert.equal(snapshot.text, '> *C3PO:* hello there');
+    // Names are escaped where they are resolved, but the pairs are this renderer's
+    // own markup: `*` closes the bold, and the `_` in a name like `john_doe` opens
+    // an italic that runs to whatever underscore comes next in the message.
+    const snapshot = threadSnapshot(
+      [
+        { ts: '100.0', author: 'C*3PO', text: 'hello there' },
+        { ts: '101.0', author: 'john_doe', text: 'fixed the _thing_' },
+      ],
+      { budgetBytes: 10_000 },
+    );
+    assert.equal(snapshot.text, '> *C 3PO:* hello there\n> *john doe:* fixed the _thing_');
   });
 
   it('names attached files without fetching them', () => {

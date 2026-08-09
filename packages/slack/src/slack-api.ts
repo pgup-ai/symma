@@ -113,15 +113,13 @@ const FALLBACK_TEXT_LIMIT = 40_000;
 const FILE_FETCH_TIMEOUT_MS = 20_000;
 
 /** For the calls that are not the answer: a progress line, a link back, a name.
- * The SDK's defaults — `timeout: 0` and ten retries across half an hour — are
- * right for an answer and wrong for these, which would otherwise still be trying
- * long after the turn that wanted them, or hold a handoff the member is waiting
- * for behind a lookup that is decoration.
+ * The SDK defaults to `timeout: 0` and ten retries across half an hour, which is
+ * right for an answer and wrong for a decoration still trying long after the turn
+ * that wanted it.
  *
- * Safe for exactly these because each is idempotent: two `chat.update`s with the
- * same text have the effect of one, and a read has no effect at all. A
- * `chat.postMessage` that timed out after Slack accepted it would be retried into
- * a second message, so the answer keeps the defaults. */
+ * Bounded for exactly these because each is idempotent — a repeated `chat.update`
+ * writes the same text and a read has no effect at all — where a `postMessage`
+ * retried after Slack accepted it is a second message. */
 const ASIDE_TIMEOUT_MS = 5_000;
 
 /** A name or a title the member or their agent chose, on its way into mrkdwn:
@@ -311,11 +309,9 @@ const read = (raw: RawMessage[], names: Map<string, string>): ThreadMessage[] =>
     .filter((m): m is RawMessage & { ts: string } => typeof m.ts === 'string')
     .map((m) => ({
       ts: m.ts,
-      // A message with no `user` is Slack's own — a join, a bot post. It never
-      // reaches `users.info`, which is why the id lives here and not in the
-      // author field a lookup would then be handed.
-      // Always resolved: `threadReplies` builds `names` from these same messages
-      // by this same test, and `nameOf` answers for every id it is given.
+      // Slack's own messages — a join, a bot post — carry no `user`, and so are
+      // never asked about. The rest are always in the map: `threadReplies` builds
+      // it from these same messages by this same test.
       author: typeof m.user === 'string' ? names.get(m.user)! : 'someone',
       text: typeof m.text === 'string' ? m.text : '',
       // Named, never fetched: downloading widens both the scope request and the

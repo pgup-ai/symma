@@ -39,6 +39,7 @@ function harness(over: {
   link?: string | null;
 }) {
   const posts: Posted[] = [];
+  const links: string[] = [];
   const turns: Record<string, unknown>[] = [];
   const seen: string[] = [];
   const deps: MentionDeps = {
@@ -47,8 +48,10 @@ function harness(over: {
     find: () => Promise.resolve(over.existing),
     threadReplies: () => Promise.resolve('replies' in over ? over.replies : THREAD),
     openDm: () => Promise.resolve('D-nel'),
-    permalink: (channel, ts) =>
-      Promise.resolve(over.link === null ? undefined : (over.link ?? linkTo(channel, ts))),
+    permalink: (channel, ts) => {
+      links.push(ts);
+      return Promise.resolve(over.link === null ? undefined : (over.link ?? linkTo(channel, ts)));
+    },
     post: (channel, text, threadTs) => {
       posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
       return Promise.resolve({ channel: 'D-nel', ts: '200.0' });
@@ -69,7 +72,7 @@ function harness(over: {
       });
     },
   };
-  return { deps, posts, turns, seen };
+  return { deps, posts, turns, seen, links };
 }
 
 describe('app_mention', () => {
@@ -134,7 +137,7 @@ describe('app_mention', () => {
     // The turn is recorded before anything is posted, so a redelivery that the
     // gateway has already seen produces silence rather than a second message.
     const existing = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
-    const { deps, posts, turns, seen } = harness({ existing });
+    const { deps, posts, turns, seen, links } = harness({ existing });
     // The gateway answers with no turn, which is a Slack event it has recorded
     // before.
     deps.turn = (spec) => {
@@ -145,6 +148,7 @@ describe('app_mention', () => {
     assert.deepEqual(posts, []);
     assert.deepEqual(seen, [], 'and the cursor stays where it was');
     assert.equal(turns.length, 1, 'it still asked, which is how it found out');
+    assert.deepEqual(links, [], 'and paid Slack for nothing it was going to post');
   });
 
   it('leaves the cursor where it was when the post fails', async () => {
