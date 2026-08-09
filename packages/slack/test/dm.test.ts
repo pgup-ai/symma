@@ -647,6 +647,8 @@ describe('dm message', () => {
       existing: CONVERSATION,
       approvals: [
         { title: 'Run `git push`', allowed: true },
+        // The same call asked about twice, quoted differently — one line, not two.
+        { title: 'Run git push', allowed: true },
         { title: 'Write src/index.ts', allowed: false },
       ],
     });

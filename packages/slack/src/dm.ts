@@ -150,10 +150,12 @@ function spent(model: string | undefined, usage: TurnUsage | undefined): string[
 }
 
 function approvalNote(approvals?: { title: string; allowed: boolean }[]): string[] {
-  const said = (titles: string[]): string => titles.map((t) => `\`${plainly(t)}\``).join(', ');
+  const said = (titles: string[]): string => titles.map((t) => `\`${t}\``).join(', ');
   const titles = (allowed: boolean): string[] => [
-    // One entry each: an agent retrying the same call asked about the same thing.
-    ...new Set((approvals ?? []).filter((a) => a.allowed === allowed).map((a) => a.title)),
+    // One entry each, counted on what the member will read: an agent retrying the
+    // same call asked about the same thing, and may well have quoted it
+    // differently — two titles that render alike are one line either way.
+    ...new Set((approvals ?? []).filter((a) => a.allowed === allowed).map((a) => plainly(a.title))),
   ];
   const allowed = titles(true);
   const refused = titles(false);
