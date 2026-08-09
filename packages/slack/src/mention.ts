@@ -63,12 +63,12 @@ export interface Mention {
  * the thread — Slack previews the link, and the agent reads the channel itself
  * when a turn asks it to. `<#C…>` is Slack's own channel link, so it reads as
  * whatever the channel is called now rather than what it was called today. */
-const opening = (source: { channel: string; link?: string }): string =>
-  `Picked this up from <#${source.channel}>${source.link ? ` — <${source.link}|open the thread>` : ''}. Working privately — nothing goes back to the channel unless you say so.`;
+const opening = (channel: string, link?: string): string =>
+  `Picked this up from <#${channel}>${link ? ` — <${link}|open the thread>` : ''}. Working privately — nothing goes back to the channel unless you say so.`;
 
-/** A second mention on a thread that already has a conversation. It confirms the
- * mention registered and says where the work is; what was added to the thread
- * reaches the agent on the next turn, so there is nothing to relay here. */
+/** A second mention on a thread that already has a conversation: it confirms the
+ * mention registered, and relays nothing, because what was added to the thread
+ * reaches the agent on the next turn. */
 const ALREADY = 'Picked that up too — carry on here.';
 
 /**
@@ -96,18 +96,6 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     return 'unreadable channel';
   }
 
-  // Asked for where it is first wanted and then kept: the openings below are one
-  // thread's, and a redelivery the gateway has already seen posts nothing and
-  // should pay for nothing.
-  let source: { channel: string; link?: string } | undefined;
-  const sourceOf = async (): Promise<{ channel: string; link?: string }> => {
-    if (!source) {
-      const link = await deps.permalink(mention.channel, mention.ts);
-      source = { channel: mention.channel, ...(link ? { link } : {}) };
-    }
-    return source;
-  };
-
   if (existing) {
     const { turn } = await deps.turn({
       sourceChannel: mention.channel,
@@ -122,7 +110,10 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   }
 
   const dm = await deps.openDm(mention.user);
-  const root = await deps.post(dm, opening(await sourceOf()));
+  // Only the opening carries a link, and only a first mention posts one — so the
+  // redeliveries and repeat mentions that return above never pay for one.
+  const link = await deps.permalink(mention.channel, mention.ts);
+  const root = await deps.post(dm, opening(mention.channel, link));
   const { conversation, turn } = await deps.turn({
     sourceChannel: mention.channel,
     sourceThread: mention.threadTs,

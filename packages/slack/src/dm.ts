@@ -269,10 +269,9 @@ const REPLAY =
   'session you can still reach — files you opened and commands you ran are gone, ' +
   'so re-read anything you need.';
 
-/** The channel thread a mention came out of, which the member can see and the
- * agent cannot. Read from Slack at the turn rather than copied into the DM when
- * the mention landed: a quote of a channel in a private thread is noise to
- * whoever is reading it, and reading it now is also reading it as it is. */
+/** Labels the channel thread a mention came out of, which the member can see and
+ * the agent cannot. Distinct from the replay below because they are different
+ * conversations: one is what was asked about, the other what was said about it. */
 const SOURCE = 'The thread this was asked in, most recent last:';
 
 /**
@@ -304,11 +303,10 @@ async function catchUp(
       },
     );
 
-  // The source thread first, and only the part the agent has not been shown: it
-  // is what the question is about, where the DM is what has been said about it.
-  // It takes the budget it needs and the DM gets the rest, because a member
-  // asking about a channel thread would rather lose their own earlier asides
-  // than the thread.
+  // Read at the turn rather than copied into the DM when the mention landed, which
+  // is also reading it as it is now. It takes the budget it needs and the DM gets
+  // the rest: a member asking about a channel thread would rather lose their own
+  // earlier asides than the thread.
   const source = conversation.source
     ? threadSnapshot(await read(conversation.source.channel, conversation.source.thread), {
         budgetBytes: deps.budgetBytes,
@@ -333,8 +331,6 @@ async function catchUp(
     note: omitted
       ? `Catching it up, minus ${String(omitted)} earlier messages that did not fit.`
       : 'Catching it up from the thread — it has the messages, not what it ran.',
-    // Moved by the caller once the answer lands, not here: nothing has been shown
-    // to anyone until it does.
     ...(source?.seenThroughTs ? { seenThrough: source.seenThroughTs } : {}),
   };
 }
@@ -597,10 +593,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   }
   await deps.mark(message.channel, message.ts, 'done');
   await deps.finish(conversation.id, turn, 'completed', ran);
-  // Only now: the agent has been shown the source thread this far, and the member
-  // has the answer it produced. Fail-open — a cursor that did not move costs a
-  // re-read on the next turn, where one that moved over an undelivered answer
-  // costs the messages it covered.
+  // Fail-open: a cursor that did not move costs a re-read next turn, where failing
+  // a delivered turn costs the answer.
   if (caught?.seenThrough)
     await deps.seen(conversation.id, caught.seenThrough).catch((error: unknown) => {
       deps.log(`cursor not moved: ${String(error)}`);
