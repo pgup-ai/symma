@@ -188,6 +188,7 @@ const depsFor = (user: string) => {
       let models: SessionModels | undefined;
       let usage: TurnUsage | undefined;
       let unsupported: { name: string; kind: string }[] | undefined;
+      let approvals: { title: string; allowed: boolean }[] | undefined;
       const text = await runRemotePrompt(
         // One run per conversation, so the journal and viewer group a member's
         // thread rather than scattering it a session at a time.
@@ -206,6 +207,7 @@ const depsFor = (user: string) => {
           onModels: (roster) => (models = roster),
           onUsage: (spent) => (usage = spent),
           onUnsupported: (files) => (unsupported = files),
+          onApprovals: (asked) => (approvals = asked),
           ...(onProgress ? { onProgress } : {}),
           ...(attachments ? { attachments } : {}),
           ...(resume ? { resume } : {}),
@@ -227,6 +229,7 @@ const depsFor = (user: string) => {
         ...(models ? { models } : {}),
         ...(usage ? { usage } : {}),
         ...(unsupported ? { unsupported } : {}),
+        ...(approvals ? { approvals } : {}),
       };
     },
     finish: async (

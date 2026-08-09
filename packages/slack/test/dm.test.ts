@@ -41,6 +41,8 @@ function harness(
     usage?: TurnUsage;
     /** Files the agent had no block for, as the driver reports them. */
     unsupported?: { name: string; kind: string }[];
+    /** What the agent asked permission for, and what the floor answered. */
+    approvals?: { title: string; allowed: boolean }[];
     /** A step the run reports while it is still in flight. */
     narrates?: string;
     /** How long each acknowledgement update takes, by call order. */
@@ -129,6 +131,7 @@ function harness(
             ...(over.resumeWith ? { resumeWith: over.resumeWith } : {}),
             ...(over.usage ? { usage: over.usage } : {}),
             ...(over.unsupported ? { unsupported: over.unsupported } : {}),
+            ...(over.approvals ? { approvals: over.approvals } : {}),
           });
     },
     find: () => Promise.resolve(over.existing),
@@ -636,6 +639,46 @@ describe('dm message', () => {
       'Warning: skills were shortened.',
       '`gpt-5.6-sol[high]` · 168.2k tokens · 60k cached',
       '`codex resume acp-1`',
+    ]);
+  });
+
+  it('names what ran without anyone being asked, and what was refused', async () => {
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      approvals: [
+        { title: 'Run `git push`', allowed: true },
+        // The same call asked about twice, quoted differently — one line, not two.
+        { title: 'Run git push', allowed: true },
+        { title: 'Write src/index.ts', allowed: false },
+      ],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(posts[1]!.notices, [
+      'Went ahead without asking: `Run git push`.',
+      'Would not run: `Write src/index.ts`.',
+    ]);
+  });
+
+  it('counts the rest rather than listing every one of them', async () => {
+    // A turn that asked forty times is not a list anyone reads, and one long
+    // enough to be clipped is clipped wherever the slice lands — inside a code
+    // span as readily as between two names.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      approvals: Array.from({ length: 8 }, (_, i) => ({
+        title: `Run cmd${String(i)}`,
+        allowed: true,
+      })),
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(posts[1]!.notices, [
+      'Went ahead without asking: `Run cmd0`, `Run cmd1`, `Run cmd2`, `Run cmd3`, `Run cmd4` and 3 more.',
     ]);
   });
 

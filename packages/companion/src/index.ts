@@ -47,7 +47,8 @@ import {
   parseRelayControl,
   PROTOCOL_VERSION,
   publicKeyFrom,
-  respondToPermissionRequest,
+  answerPermission,
+  PERMISSION_ANSWERED,
   signEnvelope,
   terminateProcessTree,
   type AcpAgentSpec,
@@ -782,18 +783,8 @@ async function openSession(control: OpenControl): Promise<void> {
   };
   sessions.set(control.sessionId, session);
 
-  const read = createNdjsonReader((frame) => {
-    // The floor: permission requests are answered HERE and never forwarded —
-    // a remote client cannot grant anything. The policy is the session's, set
-    // once at open from the mode the owner picked.
-    if (frame.method === 'session/request_permission' && frame.id !== undefined) {
-      const response = respondToPermissionRequest(
-        (frame.params ?? {}) as Parameters<typeof respondToPermissionRequest>[0],
-        session.allowWrites ? 'writes' : 'read-only',
-      );
-      child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: response })}\n`);
-      return;
-    }
+  /** Signs, sequences and journals every frame shown to the client. */
+  const forward = (frame: Record<string, unknown>): void => {
     const envelope: ObserverEnvelope = {
       v: 1,
       runId: session.runId,
@@ -808,6 +799,37 @@ async function openSession(control: OpenControl): Promise<void> {
       frame,
     };
     sendLine(JSON.stringify(signEnvelope(envelope, signingKeys().privateKey)));
+  };
+
+  const read = createNdjsonReader((frame) => {
+    // The floor: permission requests are answered HERE and never forwarded —
+    // a remote client cannot grant anything. The policy is the session's, set
+    // once at open from the mode the owner picked.
+    if (frame.method === 'session/request_permission' && frame.id !== undefined) {
+      const { response, decided } = answerPermission(
+        (frame.params ?? {}) as Parameters<typeof answerPermission>[0],
+        session.allowWrites ? 'writes' : 'read-only',
+      );
+      child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: response })}\n`);
+      // The request stays local; only the floor's decision travels.
+      if (decided) forward({ jsonrpc: '2.0', method: PERMISSION_ANSWERED, params: decided });
+      return;
+    }
+    // Only the companion may report its floor's decision; an agent frame would
+    // spoof the member-facing record.
+    if (frame.method === PERMISSION_ANSWERED) {
+      log(`${control.sessionId}: agent tried to report a permission decision; dropped`);
+      if (frame.id !== undefined)
+        child.stdin?.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            id: frame.id,
+            error: { code: -32601, message: `Unsupported method: ${frame.method}` },
+          })}\n`,
+        );
+      return;
+    }
+    forward(frame);
   });
   child.stdout?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {

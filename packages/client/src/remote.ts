@@ -65,6 +65,8 @@ export interface RemoteAcpConfig {
   /** Attachments the agent advertised no block for; the caller told its member
    * they were being read, so it is the one that has to correct the record. */
   onUnsupported?: (files: { name: string; kind: string }[]) => void;
+  /** Permission decisions made by the remote floor without the caller present. */
+  onApprovals?: (approvals: { title: string; allowed: boolean }[]) => void;
   /** What the agent is doing right now, unthrottled — a caller rendering this
    * anywhere rate-limited does its own throttling. */
   onProgress?: (title: string) => void;
@@ -293,6 +295,8 @@ export async function runRemotePrompt(
             model,
             ...(ack.modelCandidates ? { configOptionModelIds: ack.modelCandidates } : {}),
             ...(ack.requirePlanMode ? { requirePlanMode: true } : {}),
+            // The companion owns this session's floor and reports its decisions.
+            floorUpstream: true,
             ...(config.mode !== undefined ? { mode: config.mode } : {}),
             ...(config.onProgress ? { onProgress: config.onProgress } : {}),
             ...(config.attachments?.length ? { attachments: config.attachments } : {}),
@@ -327,6 +331,8 @@ export async function runRemotePrompt(
     if (spent) deliver('usage', () => config.onUsage?.(spent));
     const unsupported = result.unsupported;
     if (unsupported?.length) deliver('unsupported', () => config.onUnsupported?.(unsupported));
+    const approvals = result.approvals;
+    if (approvals?.length) deliver('approvals', () => config.onApprovals?.(approvals));
     for (const notice of result.notices) deliver('notice', () => config.onNotice?.(notice));
     if (!result.text) {
       throw new Error(

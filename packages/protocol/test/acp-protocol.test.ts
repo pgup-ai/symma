@@ -33,6 +33,7 @@ import {
   opencodeAcpSpec,
   opencodeAuthPath,
   isWriteCapableMode,
+  PERMISSION_ANSWERED,
   respondToPermissionRequest,
 } from '../src/acp-protocol.js';
 import { codexAuthPath } from '../src/codex.js';
@@ -44,6 +45,7 @@ interface FakeAgentApi {
   update: (update: Record<string, unknown>) => void;
   request: (id: number, method: string, params: Record<string, unknown>) => void;
   finish: (stopReason?: string, usage?: Record<string, unknown>) => void;
+  notify: (method: string, params: Record<string, unknown>) => void;
 }
 
 interface FakeAgentScript {
@@ -94,6 +96,7 @@ function fakeAgentIo(script: FakeAgentScript): {
         params: { sessionId: 's1', update },
       }),
     request: (id, method, params) => send({ jsonrpc: '2.0', id, method, params }),
+    notify: (method, params) => send({ jsonrpc: '2.0', method, params }),
     finish: (stopReason = 'end_turn', usage?: Record<string, unknown>) =>
       send({ jsonrpc: '2.0', id: promptId, result: { stopReason, ...(usage ? { usage } : {}) } }),
   };
@@ -296,6 +299,110 @@ describe('acp', () => {
     );
   });
 
+  it('records nothing where the floor had no option it could pick', async () => {
+    const fake = fakeAgentIo({
+      onPrompt: (agent) =>
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'read', title: 'Read src/index.ts' },
+          options: [{ optionId: 'x', kind: 'something_else' }],
+        }),
+      onClientResponse: (_id, _result, agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'fake',
+      label: 't',
+      log: noLog,
+    });
+    assert.equal(result.approvals, undefined);
+  });
+
+  it('takes the decision from an upstream floor, and from nobody else', async () => {
+    const reported = async (floorUpstream: boolean): Promise<unknown> => {
+      const fake = fakeAgentIo({
+        onPrompt: (agent) => {
+          agent.update({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ok' },
+          });
+          agent.notify(PERMISSION_ANSWERED, { title: 'Run git push', allowed: true });
+          agent.finish();
+        },
+      });
+      const result = await driveAcpSession(fake, {
+        cwd: '/tmp',
+        prompt: 'p',
+        agent: 'fake',
+        label: 't',
+        log: noLog,
+        ...(floorUpstream ? { floorUpstream: true } : {}),
+      });
+      return result.approvals;
+    };
+    assert.deepEqual(await reported(true), [{ title: 'Run git push', allowed: true }]);
+    assert.equal(await reported(false), undefined);
+  });
+
+  it('fails closed when an upstream floor leaks a permission request', async () => {
+    const permissionAnswers: unknown[] = [];
+    const fake = fakeAgentIo({
+      onPrompt: (agent) =>
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'execute', title: 'Run git status' },
+          options: [{ optionId: 'ao', kind: 'allow_once' }],
+        }),
+      onClientResponse: (_id, result, agent) => {
+        permissionAnswers.push(result);
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'fake',
+      label: 't',
+      log: noLog,
+      floorUpstream: true,
+    });
+    assert.deepEqual(permissionAnswers, [{ outcome: { outcome: 'cancelled' } }]);
+    assert.equal(result.approvals, undefined);
+  });
+
+  it('carries a refusal back too, since the floor made that call as well', async () => {
+    const fake = fakeAgentIo({
+      onPrompt: (agent) =>
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'edit', title: 'Write src/index.ts' },
+          options: [
+            { optionId: 'ao', kind: 'allow_once' },
+            { optionId: 'ro', kind: 'reject_once' },
+          ],
+        }),
+      onClientResponse: (_id, _result, agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'no' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'fake',
+      label: 't',
+      log: noLog,
+    });
+    assert.deepEqual(result.approvals, [{ title: 'Write src/index.ts', allowed: false }]);
+  });
+
   it('takes a token count only where it could be one', async () => {
     // The wire is an agent's word for what a turn cost, and a caller cannot tell
     // a real figure from a nonsense one — so the ones that cannot be true are
@@ -468,7 +575,7 @@ describe('acp', () => {
         // The driver's own floor follows the mode: a local caller that asked
         // for writes must not have this layer deny what the mode promises.
         agent.request(9, 'session/request_permission', {
-          toolCall: { kind: 'edit' },
+          toolCall: { kind: 'edit', title: 'Write src/index.ts' },
           options: [
             { optionId: 'ao', kind: 'allow_once' },
             { optionId: 'ro', kind: 'reject_once' },
@@ -494,6 +601,7 @@ describe('acp', () => {
     });
     assert.deepEqual(fake.setModeIds, ['agent']);
     assert.deepEqual(permissionAnswers, [{ outcome: { outcome: 'selected', optionId: 'ao' } }]);
+    assert.deepEqual(result.approvals, [{ title: 'Write src/index.ts', allowed: true }]);
     assert.deepEqual(result.modes, {
       currentModeId: 'agent',
       availableModes: [

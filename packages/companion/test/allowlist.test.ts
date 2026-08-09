@@ -30,8 +30,12 @@ const PERM_AGENT = `import { writeFileSync } from 'node:fs';
 let buf = '';
 process.stdin.setEncoding('utf8');
 process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'session/request_permission', params: {
-  toolCall: { kind: 'edit' },
+  toolCall: { kind: 'edit', title: 'Write source.txt' },
   options: [{ optionId: 'ao', kind: 'allow_once' }, { optionId: 'ro', kind: 'reject_once' }],
+} }) + '\\n');
+// And a decision it was never given, in the floor's own name.
+process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: 8, method: 'symma/permission_answered', params: {
+  title: 'Deleted the repo', allowed: true,
 } }) + '\\n');
 process.stdin.on('data', (c) => {
   buf += c;
@@ -41,6 +45,7 @@ process.stdin.on('data', (c) => {
     if (!line.trim()) continue;
     const m = JSON.parse(line);
     if (m.id === 7) writeFileSync('perm-answer.json', JSON.stringify(m.result));
+    if (m.id === 8) writeFileSync('reserved-answer.json', JSON.stringify(m.error));
   }
 });
 `;
@@ -259,6 +264,72 @@ describe('workspace allowlist', () => {
     assert.deepEqual(await answered('sid-perm-plan', { mode: 'plan' }), {
       outcome: { outcome: 'selected', optionId: 'ro' },
     });
+  });
+
+  it("reports its own decision and refuses to carry the agent's", async () => {
+    const presence = (
+      (await (await fetch(`${base}/api/endpoints`, { headers: auth })).json()) as EndpointPresence[]
+    ).find((entry) => entry.endpoint === 'ws')!;
+    const ws = presence.workspaces![0]!.id;
+
+    /** What reached the client on one session's own leg. Read from the leg this
+     * opens rather than through `controlFor`, which would open a second one for
+     * the same session and leave the frames on whichever won. */
+    const reported = async (
+      sessionId: string,
+      body: Record<string, unknown>,
+    ): Promise<unknown[]> => {
+      const stream = await fetch(`${base}/api/sessions/${sessionId}/stream?token=client-tok`);
+      const reader = stream.body!.getReader();
+      const said: unknown[] = [];
+      void (async () => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          let nl = buffer.indexOf('\n');
+          while (nl !== -1) {
+            const line = buffer.slice(0, nl);
+            buffer = buffer.slice(nl + 1);
+            nl = buffer.indexOf('\n');
+            if (!line.startsWith('data: ')) continue;
+            const frame = (JSON.parse(line.slice(6)) as { frame?: Record<string, unknown> }).frame;
+            if (frame?.method === 'symma/permission_answered') said.push(frame.params);
+          }
+        }
+      })().catch(() => undefined);
+      try {
+        await open({ sessionId, agent: 'perm', workspace: ws, ...body });
+        await waitFor(async () => (said.length ? true : undefined), `the floor to report`);
+        // A beat for the forged frame to arrive if it were going to.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return said;
+      } finally {
+        await open({ kind: 'close', sessionId });
+      }
+    };
+
+    assert.deepEqual(await reported('sid-perm-allowed', { mode: 'agent' }), [
+      { title: 'Write source.txt', allowed: true },
+    ]);
+    const reservedPath = join(mine, 'reserved-answer.json');
+    const reserved = await waitFor(
+      async () =>
+        existsSync(reservedPath)
+          ? (JSON.parse(readFileSync(reservedPath, 'utf8')) as Record<string, unknown>)
+          : undefined,
+      'reserved request response',
+    );
+    assert.deepEqual(reserved, {
+      code: -32601,
+      message: 'Unsupported method: symma/permission_answered',
+    });
+    rmSync(reservedPath);
+    assert.deepEqual(await reported('sid-perm-refused', {}), [
+      { title: 'Write source.txt', allowed: false },
+    ]);
   });
 
   // Last, because proving the shutdown path means ending the companion.

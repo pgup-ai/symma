@@ -167,12 +167,7 @@ export function respondToPermissionRequest(
   params: PermissionRequestParams,
   policy: PermissionPolicy = 'read-only',
 ): PermissionResponse {
-  const kind = normalizeKind(params.toolCall?.kind);
-  // MCP servers are the agent's own subprocesses, outside its OS sandbox and
-  // this floor's kind vocabulary — read-only must catch them by the meta flag.
-  const mcp = params._meta?.is_mcp_tool_approval === true;
-  const denied = policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
-  const direction = denied ? 'reject' : 'allow';
+  const direction = deniedByFloor(params, policy) ? 'reject' : 'allow';
   const options = params.options ?? [];
   const pick =
     options.find((option) => normalizeKind(option.kind) === `${direction}_once`) ??
@@ -180,6 +175,33 @@ export function respondToPermissionRequest(
   return pick?.optionId
     ? { outcome: { outcome: 'selected', optionId: pick.optionId } }
     : { outcome: { outcome: 'cancelled' } };
+}
+
+/** Returns the selected decision with its response so enforcement and reporting cannot diverge. */
+export function answerPermission(
+  params: PermissionRequestParams,
+  policy: PermissionPolicy = 'read-only',
+): { response: PermissionResponse; decided?: { title: string; allowed: boolean } } {
+  const response = respondToPermissionRequest(params, policy);
+  if (response.outcome.outcome !== 'selected') return { response };
+  return {
+    response,
+    decided: {
+      title: params.toolCall?.title || params.toolCall?.kind || 'something it did not name',
+      allowed: !deniedByFloor(params, policy),
+    },
+  };
+}
+
+/** Symma-only notification carrying a companion floor's decision to a remote driver. */
+export const PERMISSION_ANSWERED = 'symma/permission_answered';
+
+function deniedByFloor(params: PermissionRequestParams, policy: PermissionPolicy): boolean {
+  const kind = normalizeKind(params.toolCall?.kind);
+  // MCP servers are the agent's own subprocesses, outside its OS sandbox and
+  // this floor's kind vocabulary — read-only must catch them by the meta flag.
+  const mcp = params._meta?.is_mcp_tool_approval === true;
+  return policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
 }
 
 function normalizeKind(kind: string | undefined): string {
@@ -326,6 +348,8 @@ export interface AcpSessionOptions {
   /** Fail closed when plan mode is missing or cannot be set (agents with no
    * agent-side sandbox — plan mode is their behavioral read-only layer). */
   requirePlanMode?: boolean;
+  /** Accept permission decisions only when a trusted upstream companion owns the floor. */
+  floorUpstream?: boolean;
   /** Session mode to run under, one of the agent's `availableModes`. Fails the
    * turn when not offered — no silent downgrade in either direction. Absent
    * keeps the review path's behavior: plan mode forced when offered. */
@@ -481,6 +505,8 @@ export interface AcpSessionResult {
   /** Attachments this agent advertised no block for, so the caller can say so
    * in its own words — it is the one that promised its member they were read. */
   unsupported?: { name: string; kind: PromptAttachment['kind'] }[];
+  /** Permission requests selected or refused by this session's floor. */
+  approvals?: { title: string; allowed: boolean }[];
 }
 
 /**
@@ -507,6 +533,7 @@ export async function driveAcpSession(
   /** True from the `session/load` request until this turn's prompt goes out, so
    * the previous turn's replayed tool calls are never narrated as this one's. */
   let replaying = false;
+  const approvals: { title: string; allowed: boolean }[] = [];
   const flush = () => {
     if (current.trim()) segments.push({ id: lastMessageId, text: current });
     current = '';
@@ -515,6 +542,13 @@ export async function driveAcpSession(
   const conn = new AcpConnection(
     io,
     (method, params) => {
+      // Without an upstream floor, only the agent could have sent this reserved method.
+      if (method === PERMISSION_ANSWERED && options.floorUpstream) {
+        const { title, allowed } = params as { title?: unknown; allowed?: unknown };
+        if (typeof title === 'string' && typeof allowed === 'boolean')
+          approvals.push({ title, allowed });
+        return;
+      }
       if (method !== 'session/update') return;
       const update = (params.update ?? {}) as Record<string, unknown>;
       const kind = update.sessionUpdate;
@@ -548,13 +582,17 @@ export async function driveAcpSession(
     },
     (method, params) => {
       if (method === 'session/request_permission') {
+        if (options.floorUpstream) {
+          log(`acp:${agent} ${label}: upstream floor leaked a permission request; cancelled`);
+          return { outcome: { outcome: 'cancelled' } };
+        }
         // The driver's own floor follows the caller's mode the same way the
         // companion's does — a local caller that asked for a write-capable
         // mode must not have this layer silently deny what the mode promises.
-        const response = respondToPermissionRequest(
-          params as PermissionRequestParams,
-          options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only',
-        );
+        const policy: PermissionPolicy =
+          options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only';
+        const { response, decided } = answerPermission(params as PermissionRequestParams, policy);
+        if (decided) approvals.push(decided);
         if (response.outcome.outcome !== 'selected') {
           log(`acp:${agent} ${label}: permission request had no usable option; cancelled`);
         }
@@ -809,6 +847,7 @@ export async function driveAcpSession(
     ...(usage ? { usage } : {}),
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
     ...(unsupported.length ? { unsupported } : {}),
+    ...(approvals.length ? { approvals } : {}),
     ...(roster.length
       ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
       : {}),

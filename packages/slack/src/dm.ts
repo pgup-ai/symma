@@ -133,6 +133,10 @@ const thousands = (tokens: number): string =>
  * a question answered from context, an order more for one that read the repo. */
 const EXPENSIVE_TOKENS = 25_000;
 
+/** Enough to see what kind of thing was agreed to; past that a count says more
+ * than another name would. */
+const NAMED_APPROVALS = 5;
+
 /** The cost beside the model that charged it — the two only mean something
  * together, now that the model is the member's own choice. Absent when the
  * agent reported no total: an invented number is worse than none. Absent for a
@@ -147,6 +151,34 @@ function spent(model: string | undefined, usage: TurnUsage | undefined): string[
     ...(usage.cachedTokens ? [`${thousands(usage.cachedTokens)} cached`] : []),
   ];
   return [parts.join(' · ')];
+}
+
+/** What a member at their own terminal would have been prompted about, named —
+ * "it ran some commands" is not something anyone can check. Refusals are worth as
+ * much as approvals: an agent told no by the floor tends to answer around it
+ * rather than say which door was shut. */
+function approvalNote(approvals?: { title: string; allowed: boolean }[]): string[] {
+  const titles = (allowed: boolean): string[] => [
+    // One entry each, counted on what the member will read: an agent retrying the
+    // same call asked about the same thing, and may well have quoted it
+    // differently — two titles that render alike are one line either way.
+    ...new Set((approvals ?? []).filter((a) => a.allowed === allowed).map((a) => plainly(a.title))),
+  ];
+  const line = (lead: string, named: string[]): string[] => {
+    if (!named.length) return [];
+    // Named up to a point and counted after it. A turn that asked forty times is
+    // not a list anyone reads, and the aside carrying it would be cut to fit by a
+    // slice that lands wherever it lands — inside a code span as readily as
+    // between two names, taking the rest of the line into the span with it.
+    const shown = named.slice(0, NAMED_APPROVALS);
+    const rest = named.length - shown.length;
+    const more = rest ? ` and ${String(rest)} more` : '';
+    return [`${lead}: ${shown.map((title) => `\`${title}\``).join(', ')}${more}.`];
+  };
+  return [
+    ...line('Went ahead without asking', titles(true)),
+    ...line('Would not run', titles(false)),
+  ];
 }
 
 /** Which files the agent had no block for, grouped by kind — one sentence per
@@ -207,6 +239,8 @@ export interface DmDeps {
     usage?: TurnUsage;
     /** Files the agent advertised no block for, for this layer to word. */
     unsupported?: { name: string; kind: string }[];
+    /** Permission decisions made without the member present. */
+    approvals?: { title: string; allowed: boolean }[];
   }>;
   /** Clears the conversation's stored mode. Called when a turn failed because
    * the agent no longer offers it — the picker that could fix it only rides
@@ -494,6 +528,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     models?: SessionModels;
     usage?: TurnUsage;
     unsupported?: { name: string; kind: string }[];
+    approvals?: { title: string; allowed: boolean }[];
   };
   try {
     answer = await deps.run({
@@ -583,6 +618,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         // The agent took the turn but not the file: said here because the
         // acknowledgement already promised the member it was being read.
         ...unsupportedNote(decision.agent, answer.unsupported),
+        ...approvalNote(answer.approvals),
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
         // The command is a closed set at the parse boundary; the session id is
         // the agent's own string and is not.

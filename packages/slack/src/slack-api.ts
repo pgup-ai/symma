@@ -112,14 +112,9 @@ const FALLBACK_TEXT_LIMIT = 40_000;
  * a stalled one would otherwise hold the whole turn. */
 const FILE_FETCH_TIMEOUT_MS = 20_000;
 
-/** For the calls that are not the answer: a progress line, a link back, a name.
- * The SDK defaults to `timeout: 0` and ten retries across half an hour, which is
- * right for an answer and wrong for a decoration still trying long after the turn
- * that wanted it.
- *
- * Bounded for exactly these because each is idempotent — a repeated `chat.update`
- * writes the same text and a read has no effect at all — where a `postMessage`
- * retried after Slack accepted it is a second message. */
+/** Five-second client for idempotent, non-answer hints. `postMessage` keeps the
+ * SDK defaults to avoid duplicating an accepted answer; `settle` keeps them
+ * because losing that update leaves the share button active. */
 const ASIDE_TIMEOUT_MS = 5_000;
 
 /** A name or a title the member or their agent chose, on its way into mrkdwn:
@@ -550,11 +545,11 @@ export function slackApi(
       // mark that is not there is ordinary — its own add may have failed — and
       // must not stop the one that replaces it.
       if (state !== 'working') {
-        await client.reactions
+        await quick.reactions
           .remove({ channel, timestamp: ts, name: MARK.working })
           .catch(swallow('unmarking working'));
       }
-      await client.reactions
+      await quick.reactions
         .add({ channel, timestamp: ts, name: MARK[state] })
         .catch(swallow(`marking ${state}`));
     },
