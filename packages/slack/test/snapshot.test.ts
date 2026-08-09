@@ -117,6 +117,15 @@ describe('thread snapshot', () => {
     assert.equal(snapshot.text, '> *Nel:* it threw:\n> line one\n> line two');
   });
 
+  it('does not let a display name close the bold it is shown in', () => {
+    // Names are escaped where they are resolved, but the `*` is this renderer's
+    // own markup — a member called `*Jane*` would close it and bold the rest.
+    const snapshot = threadSnapshot([{ ts: '100.0', author: 'C*3PO', text: 'hello there' }], {
+      budgetBytes: 10_000,
+    });
+    assert.equal(snapshot.text, '> *C3PO:* hello there');
+  });
+
   it('names attached files without fetching them', () => {
     // v1 passes metadata only: downloading widens the scope request and the
     // data-lifecycle surface both (§10).

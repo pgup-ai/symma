@@ -32,7 +32,11 @@ export interface Snapshot {
 const render = (message: ThreadMessage): string => {
   const files = message.files?.map((f) => f.name).join(', ');
   const quoted = message.text.replaceAll('\n', '\n> ');
-  return `> *${message.author}:* ${quoted}${files ? `\n> files: ${files}` : ''}`;
+  // The bold is opened here, so the asterisk is this line's to take out: a member
+  // called `*Jane*` would otherwise close it and bold the rest of the quote. The
+  // rest of a name's mrkdwn is escaped where the name is resolved.
+  const who = message.author.replaceAll('*', '');
+  return `> *${who}:* ${quoted}${files ? `\n> files: ${files}` : ''}`;
 };
 
 const bytes = (value: string): number => Buffer.byteLength(value, 'utf8');

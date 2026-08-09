@@ -314,7 +314,9 @@ const read = (raw: RawMessage[], names: Map<string, string>): ThreadMessage[] =>
       // A message with no `user` is Slack's own — a join, a bot post. It never
       // reaches `users.info`, which is why the id lives here and not in the
       // author field a lookup would then be handed.
-      author: typeof m.user === 'string' ? (names.get(m.user) ?? m.user) : 'someone',
+      // Always resolved: `threadReplies` builds `names` from these same messages
+      // by this same test, and `nameOf` answers for every id it is given.
+      author: typeof m.user === 'string' ? names.get(m.user)! : 'someone',
       text: typeof m.text === 'string' ? m.text : '',
       // Named, never fetched: downloading widens both the scope request and the
       // data-lifecycle surface (§10).
