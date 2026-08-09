@@ -167,12 +167,7 @@ export function respondToPermissionRequest(
   params: PermissionRequestParams,
   policy: PermissionPolicy = 'read-only',
 ): PermissionResponse {
-  const kind = normalizeKind(params.toolCall?.kind);
-  // MCP servers are the agent's own subprocesses, outside its OS sandbox and
-  // this floor's kind vocabulary — read-only must catch them by the meta flag.
-  const mcp = params._meta?.is_mcp_tool_approval === true;
-  const denied = policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
-  const direction = denied ? 'reject' : 'allow';
+  const direction = deniedByFloor(params, policy) ? 'reject' : 'allow';
   const options = params.options ?? [];
   const pick =
     options.find((option) => normalizeKind(option.kind) === `${direction}_once`) ??
@@ -180,6 +175,16 @@ export function respondToPermissionRequest(
   return pick?.optionId
     ? { outcome: { outcome: 'selected', optionId: pick.optionId } }
     : { outcome: { outcome: 'cancelled' } };
+}
+
+/** The floor's rule on its own, so a caller reporting what it decided reads the
+ * same one it answered with rather than a second copy of it. */
+function deniedByFloor(params: PermissionRequestParams, policy: PermissionPolicy): boolean {
+  const kind = normalizeKind(params.toolCall?.kind);
+  // MCP servers are the agent's own subprocesses, outside its OS sandbox and
+  // this floor's kind vocabulary — read-only must catch them by the meta flag.
+  const mcp = params._meta?.is_mcp_tool_approval === true;
+  return policy === 'writes' ? kind === 'switch_mode' : DENIED_TOOL_KINDS.has(kind) || mcp;
 }
 
 function normalizeKind(kind: string | undefined): string {
@@ -481,6 +486,12 @@ export interface AcpSessionResult {
   /** Attachments this agent advertised no block for, so the caller can say so
    * in its own words — it is the one that promised its member they were read. */
   unsupported?: { name: string; kind: PromptAttachment['kind'] }[];
+  /** What the agent stopped to ask about, and what this floor answered. An agent
+   * only sends `session/request_permission` where its own policy would have put
+   * the question to whoever is driving it — so in a write-capable mode this is
+   * the list of things a member sitting at their own terminal would have been
+   * asked, and was not. */
+  approvals?: { title: string; allowed: boolean }[];
 }
 
 /**
@@ -507,6 +518,7 @@ export async function driveAcpSession(
   /** True from the `session/load` request until this turn's prompt goes out, so
    * the previous turn's replayed tool calls are never narrated as this one's. */
   let replaying = false;
+  const approvals: { title: string; allowed: boolean }[] = [];
   const flush = () => {
     if (current.trim()) segments.push({ id: lastMessageId, text: current });
     current = '';
@@ -551,10 +563,16 @@ export async function driveAcpSession(
         // The driver's own floor follows the caller's mode the same way the
         // companion's does — a local caller that asked for a write-capable
         // mode must not have this layer silently deny what the mode promises.
-        const response = respondToPermissionRequest(
-          params as PermissionRequestParams,
-          options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only',
-        );
+        const ask = params as PermissionRequestParams;
+        const policy: PermissionPolicy =
+          options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only';
+        const response = respondToPermissionRequest(ask, policy);
+        // Recorded, not only answered: this floor decided for someone who was not
+        // asked, and the answer is the only place they hear it happened.
+        approvals.push({
+          title: ask.toolCall?.title || ask.toolCall?.kind || 'a tool call',
+          allowed: !deniedByFloor(ask, policy) && response.outcome.outcome === 'selected',
+        });
         if (response.outcome.outcome !== 'selected') {
           log(`acp:${agent} ${label}: permission request had no usable option; cancelled`);
         }
@@ -809,6 +827,7 @@ export async function driveAcpSession(
     ...(usage ? { usage } : {}),
     notices: answered.length ? segments.filter(aside).map((s) => s.text.trim()) : [],
     ...(unsupported.length ? { unsupported } : {}),
+    ...(approvals.length ? { approvals } : {}),
     ...(roster.length
       ? { modes: { ...(finalMode ? { currentModeId: finalMode } : {}), availableModes: roster } }
       : {}),

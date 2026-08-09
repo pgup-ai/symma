@@ -41,6 +41,8 @@ function harness(
     usage?: TurnUsage;
     /** Files the agent had no block for, as the driver reports them. */
     unsupported?: { name: string; kind: string }[];
+    /** What the agent asked permission for, and what the floor answered. */
+    approvals?: { title: string; allowed: boolean }[];
     /** A step the run reports while it is still in flight. */
     narrates?: string;
     /** How long each acknowledgement update takes, by call order. */
@@ -129,6 +131,7 @@ function harness(
             ...(over.resumeWith ? { resumeWith: over.resumeWith } : {}),
             ...(over.usage ? { usage: over.usage } : {}),
             ...(over.unsupported ? { unsupported: over.unsupported } : {}),
+            ...(over.approvals ? { approvals: over.approvals } : {}),
           });
     },
     find: () => Promise.resolve(over.existing),
@@ -636,6 +639,27 @@ describe('dm message', () => {
       'Warning: skills were shortened.',
       '`gpt-5.6-sol[high]` · 168.2k tokens · 60k cached',
       '`codex resume acp-1`',
+    ]);
+  });
+
+  it('names what ran without anyone being asked, and what was refused', async () => {
+    // An agent only sends a permission request where it would have put the
+    // question to whoever is driving it. Nobody was at that terminal, so the one
+    // place a member finds out is here.
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      approvals: [
+        { title: 'Run `git push`', allowed: true },
+        { title: 'Write src/index.ts', allowed: false },
+      ],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      deps,
+    );
+    assert.deepEqual(posts[1]!.notices, [
+      'Went ahead without asking: `Run git push`.',
+      'Would not run: `Write src/index.ts`.',
     ]);
   });
 

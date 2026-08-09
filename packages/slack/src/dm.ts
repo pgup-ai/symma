@@ -149,6 +149,24 @@ function spent(model: string | undefined, usage: TurnUsage | undefined): string[
   return [parts.join(' · ')];
 }
 
+/** What a member at their own terminal would have been prompted about, named —
+ * "it ran some commands" is not something anyone can check. Refusals are worth as
+ * much as approvals: an agent told no by the floor tends to answer around it
+ * rather than say which door was shut. */
+function approvalNote(approvals?: { title: string; allowed: boolean }[]): string[] {
+  const said = (titles: string[]): string => titles.map((t) => `\`${plainly(t)}\``).join(', ');
+  const titles = (allowed: boolean): string[] => [
+    // One entry each: an agent retrying the same call asked about the same thing.
+    ...new Set((approvals ?? []).filter((a) => a.allowed === allowed).map((a) => a.title)),
+  ];
+  const allowed = titles(true);
+  const refused = titles(false);
+  return [
+    ...(allowed.length ? [`Went ahead without asking: ${said(allowed)}.`] : []),
+    ...(refused.length ? [`Would not run: ${said(refused)}.`] : []),
+  ];
+}
+
 /** Which files the agent had no block for, grouped by kind — one sentence per
  * kind, because a rejected image and a rejected CSV are refused for different
  * reasons and naming them together would misdescribe one of them. */
@@ -207,6 +225,9 @@ export interface DmDeps {
     usage?: TurnUsage;
     /** Files the agent advertised no block for, for this layer to word. */
     unsupported?: { name: string; kind: string }[];
+    /** What the agent stopped to ask about, and what the floor answered for the
+     * member who was not there to. */
+    approvals?: { title: string; allowed: boolean }[];
   }>;
   /** Clears the conversation's stored mode. Called when a turn failed because
    * the agent no longer offers it — the picker that could fix it only rides
@@ -494,6 +515,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     models?: SessionModels;
     usage?: TurnUsage;
     unsupported?: { name: string; kind: string }[];
+    approvals?: { title: string; allowed: boolean }[];
   };
   try {
     answer = await deps.run({
@@ -583,6 +605,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         // The agent took the turn but not the file: said here because the
         // acknowledgement already promised the member it was being read.
         ...unsupportedNote(decision.agent, answer.unsupported),
+        ...approvalNote(answer.approvals),
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
         // The command is a closed set at the parse boundary; the session id is
         // the agent's own string and is not.

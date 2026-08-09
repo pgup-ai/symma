@@ -296,6 +296,36 @@ describe('acp', () => {
     );
   });
 
+  it('carries a refusal back too, since the floor made that call as well', async () => {
+    // Read-only denies a write, and an agent told no often answers around it
+    // rather than saying which door was shut — so the caller is told which.
+    const fake = fakeAgentIo({
+      onPrompt: (agent) =>
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'edit', title: 'Write src/index.ts' },
+          options: [
+            { optionId: 'ao', kind: 'allow_once' },
+            { optionId: 'ro', kind: 'reject_once' },
+          ],
+        }),
+      onClientResponse: (_id, _result, agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'no' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'fake',
+      label: 't',
+      log: noLog,
+    });
+    assert.deepEqual(result.approvals, [{ title: 'Write src/index.ts', allowed: false }]);
+  });
+
   it('takes a token count only where it could be one', async () => {
     // The wire is an agent's word for what a turn cost, and a caller cannot tell
     // a real figure from a nonsense one — so the ones that cannot be true are
@@ -468,7 +498,7 @@ describe('acp', () => {
         // The driver's own floor follows the mode: a local caller that asked
         // for writes must not have this layer deny what the mode promises.
         agent.request(9, 'session/request_permission', {
-          toolCall: { kind: 'edit' },
+          toolCall: { kind: 'edit', title: 'Write src/index.ts' },
           options: [
             { optionId: 'ao', kind: 'allow_once' },
             { optionId: 'ro', kind: 'reject_once' },
@@ -494,6 +524,9 @@ describe('acp', () => {
     });
     assert.deepEqual(fake.setModeIds, ['agent']);
     assert.deepEqual(permissionAnswers, [{ outcome: { outcome: 'selected', optionId: 'ao' } }]);
+    // Carried back named: the agent only asks where it would have asked a member
+    // at their own terminal, and this one was answered without them.
+    assert.deepEqual(result.approvals, [{ title: 'Write src/index.ts', allowed: true }]);
     assert.deepEqual(result.modes, {
       currentModeId: 'agent',
       availableModes: [

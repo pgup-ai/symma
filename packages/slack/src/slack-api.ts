@@ -112,14 +112,17 @@ const FALLBACK_TEXT_LIMIT = 40_000;
  * a stalled one would otherwise hold the whole turn. */
 const FILE_FETCH_TIMEOUT_MS = 20_000;
 
-/** For the calls that are not the answer: a progress line, a link back, a name.
- * The SDK defaults to `timeout: 0` and ten retries across half an hour, which is
- * right for an answer and wrong for a decoration still trying long after the turn
- * that wanted it.
+/** For the calls that are not the answer: a progress line, a link back, a name, a
+ * reaction, the rewrite that retires a spent button. The SDK defaults to
+ * `timeout: 0` and ten retries across half an hour, which is right for an answer
+ * and wrong for a decoration still trying long after the turn that wanted it.
  *
  * Bounded for exactly these because each is idempotent — a repeated `chat.update`
- * writes the same text and a read has no effect at all — where a `postMessage`
- * retried after Slack accepted it is a second message. */
+ * writes the same text, a repeated reaction is already there, and a read has no
+ * effect at all. `postMessage` keeps the defaults on purpose: one retried after
+ * Slack accepted it is a second message in the member's thread, and how long a
+ * thread may be held by one is the gateway's to decide, which it does by retiring
+ * a turn left running. */
 const ASIDE_TIMEOUT_MS = 5_000;
 
 /** A name or a title the member or their agent chose, on its way into mrkdwn:
@@ -525,7 +528,7 @@ export function slackApi(
     },
     async settle(channel, ts, text) {
       try {
-        await client.chat.update({
+        await quick.chat.update({
           channel,
           ts,
           text: clip(text, FALLBACK_TEXT_LIMIT),
@@ -550,11 +553,11 @@ export function slackApi(
       // mark that is not there is ordinary — its own add may have failed — and
       // must not stop the one that replaces it.
       if (state !== 'working') {
-        await client.reactions
+        await quick.reactions
           .remove({ channel, timestamp: ts, name: MARK.working })
           .catch(swallow('unmarking working'));
       }
-      await client.reactions
+      await quick.reactions
         .add({ channel, timestamp: ts, name: MARK[state] })
         .catch(swallow(`marking ${state}`));
     },
