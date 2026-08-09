@@ -5,9 +5,11 @@ import { handleMention, type ConversationRef, type MentionDeps } from '../src/me
 import type { ThreadMessage } from '../src/snapshot.js';
 
 const MENTION = { user: 'U-nel', channel: 'C-incidents', threadTs: '100.0', eventId: 'Ev-1' };
+/** Authors are display names by the time a snapshot sees them — `threadReplies`
+ * resolves the ids, so a member reads a name rather than a `U…`. */
 const THREAD: ThreadMessage[] = [
-  { ts: '100.0', author: 'U-nel', text: 'the deploy is failing' },
-  { ts: '101.0', author: 'U-ola', text: 'here is the trace' },
+  { ts: '100.0', author: 'Nel', text: 'the deploy is failing' },
+  { ts: '101.0', author: 'Ola', text: 'here is the trace' },
 ];
 
 interface Posted {
@@ -21,6 +23,9 @@ function harness(over: {
   existing?: ConversationRef;
   replies?: ThreadMessage[] | undefined;
   rootThread?: string;
+  /** Absent is a workspace that answered with one; `null` is a lookup that did
+   * not, which must cost the link and nothing else. */
+  link?: string | null;
 }) {
   const posts: Posted[] = [];
   const turns: Record<string, unknown>[] = [];
@@ -31,6 +36,12 @@ function harness(over: {
     find: () => Promise.resolve(over.existing),
     threadReplies: () => Promise.resolve('replies' in over ? over.replies : THREAD),
     openDm: () => Promise.resolve('D-nel'),
+    permalink: (channel, ts) =>
+      Promise.resolve(
+        over.link === null
+          ? undefined
+          : (over.link ?? `https://slack.test/archives/${channel}/p${ts}`),
+      ),
     post: (channel, text, threadTs) => {
       posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
       return Promise.resolve({ channel: 'D-nel', ts: '200.0' });
@@ -66,6 +77,14 @@ describe('app_mention', () => {
     assert.doesNotMatch(posts[0]!.channel, /^[CU]-/, 'never a channel, never a raw user id');
     assert.match(posts[0]!.text, /the deploy is failing/, 'the thread came with it');
     assert.match(posts[0]!.text, /nothing goes back to the channel unless you say so/);
+    // And a way back to where it came from: a private conversation about a thread
+    // nobody can find is one a member cannot place a week later. `<#C…>` is
+    // Slack's own channel link, so it reads as the channel's current name.
+    assert.match(posts[0]!.text, /<#C-incidents>/);
+    assert.match(
+      posts[0]!.text,
+      /<https:\/\/slack\.test\/archives\/C-incidents\/p100\.0\|open the thread>/,
+    );
 
     // The cursor recorded is what the snapshot actually read, and it moves only
     // once the member has it.
@@ -74,6 +93,15 @@ describe('app_mention', () => {
     // has to post into.
     assert.equal(turns[0]!.sourceThread, '100.0');
     assert.equal(turns[0]!.slackEventId, 'Ev-1');
+  });
+
+  it('still hands the thread over when Slack will not give it a link', async () => {
+    // A permalink is how a member gets back to the channel, and not the reason
+    // the handoff happens: the sentence loses its link and keeps its point.
+    const { deps, posts } = harness({ link: null });
+    assert.equal(await handleMention(MENTION, deps), 'opened');
+    assert.match(posts[0]!.text, /^Picked this up from <#C-incidents>\. Working privately/);
+    assert.match(posts[0]!.text, /the deploy is failing/);
   });
 
   it('continues the thread it already has rather than opening a second', async () => {

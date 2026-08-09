@@ -18,6 +18,72 @@ const answering = (...bodies: unknown[]) => {
 };
 
 describe('slack api', () => {
+  it('reads a thread as names, and asks once per person', async () => {
+    // Ids are what the wire carries and names are what a member reads — and what
+    // the agent reads back later, since this text is the only record it gets of a
+    // channel it cannot see.
+    const calls: string[] = [];
+    const fetchImpl = ((url: string, init: { body?: unknown }) => {
+      const method = String(url).split('/').pop() ?? '';
+      calls.push(method);
+      if (method === 'conversations.replies')
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              messages: [
+                { ts: '100.0', user: 'U-nel', text: 'one' },
+                { ts: '101.0', user: 'U-ola', text: 'two' },
+                { ts: '102.0', user: 'U-nel', text: 'three' },
+              ],
+            }),
+          ),
+        );
+      const asked = String(init.body).includes('U-nel') ? 'Nel' : 'Ola';
+      return Promise.resolve(
+        new Response(JSON.stringify({ ok: true, user: { profile: { display_name: asked } } })),
+      );
+    }) as unknown as typeof fetch;
+
+    const api = slackApi('xoxb-test', { fetch: fetchImpl });
+    assert.deepEqual(
+      (await api.threadReplies('C-incidents', '100.0'))?.map((m) => m.author),
+      ['Nel', 'Ola', 'Nel'],
+    );
+    // Two people, three messages: the third is the cache, not a third lookup.
+    assert.equal(calls.filter((c) => c === 'users.info').length, 2);
+    await api.threadReplies('C-incidents', '100.0');
+    assert.equal(calls.filter((c) => c === 'users.info').length, 2, 'and it outlives one read');
+  });
+
+  it('falls back to the mention Slack renders when a name will not resolve', async () => {
+    // A lookup that failed costs a name, not the handoff — and `<@U…>` still
+    // reads as a person to whoever is looking at it.
+    const { fetchImpl } = answering(
+      { ok: true, messages: [{ ts: '100.0', user: 'U-nel', text: 'one' }] },
+      { ok: false, error: 'user_not_found' },
+    );
+    const thread = await slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies('C-x', '100.0');
+    assert.equal(thread?.[0]?.author, '<@U-nel>');
+  });
+
+  it('asks Slack for a link back, and does without one rather than failing', async () => {
+    const got = answering({ ok: true, permalink: 'https://x.slack.com/archives/C1/p100' });
+    assert.equal(
+      await slackApi('xoxb-test', { fetch: got.fetchImpl }).permalink('C1', '100.0'),
+      'https://x.slack.com/archives/C1/p100',
+    );
+    assert.deepEqual(got.called, ['chat.getPermalink']);
+
+    // A handoff is worth having without its link, so this is the one refusal that
+    // is not the caller's to handle.
+    const none = answering({ ok: false, error: 'message_not_found' });
+    assert.equal(
+      await slackApi('xoxb-test', { fetch: none.fetchImpl }).permalink('C1', '100.0'),
+      undefined,
+    );
+  });
+
   it('reads a thread, and names files without fetching them', async () => {
     const { fetchImpl } = answering({
       ok: true,

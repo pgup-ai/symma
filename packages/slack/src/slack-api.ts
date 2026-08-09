@@ -19,6 +19,10 @@ export interface SlackApi {
   /** The member's DM channel. Asked for rather than assumed: Slack's docs
    * disagree about whether a user id can stand in as a channel. */
   openDm: (user: string) => Promise<string>;
+  /** A link back to a message, so a conversation lifted out of a channel says
+   * which thread it came from. Undefined rather than throwing: a handoff without
+   * its link is worth having, and one that refused to happen is not. */
+  permalink: (channel: string, ts: string) => Promise<string | undefined>;
   post: (
     channel: string,
     text: string,
@@ -305,7 +309,7 @@ const read = (raw: RawMessage[]): ThreadMessage[] =>
     .filter((m): m is RawMessage & { ts: string } => typeof m.ts === 'string')
     .map((m) => ({
       ts: m.ts,
-      author: typeof m.user === 'string' ? m.user : 'unknown',
+      author: typeof m.user === 'string' ? m.user : 'someone',
       text: typeof m.text === 'string' ? m.text : '',
       // Named, never fetched: downloading widens both the scope request and the
       // data-lifecycle surface (§10).
@@ -326,6 +330,28 @@ export function slackApi(
   options: { fetch?: typeof fetch; log?: (message: string) => void } = {},
 ): SlackApi {
   const client = new WebClient(token, options.fetch ? { fetch: options.fetch } : {});
+  /** Ids come off the wire; names are what a member reads. Cached because a
+   * thread is a handful of people saying many things, and looked up rather than
+   * rendered as `<@U…>` so the agent reading this back sees who spoke too. Names
+   * change about as often as a bot restarts. */
+  const names = new Map<string, string>();
+  const nameOf = async (id: string): Promise<string> => {
+    const known = names.get(id);
+    if (known) return known;
+    // Falls back to the mention Slack renders for itself: a lookup that failed
+    // costs a name, not the handoff.
+    const name = await client.users
+      .info({ user: id })
+      .then((got) => {
+        const profile = got.user?.profile;
+        return profile?.display_name || profile?.real_name || got.user?.name;
+      })
+      .catch(() => undefined);
+    const resolved = name || `<@${id}>`;
+    names.set(id, resolved);
+    return resolved;
+  };
+
   const progress = new WebClient(token, {
     ...(options.fetch ? { fetch: options.fetch } : {}),
     timeout: PROGRESS_TIMEOUT_MS,
@@ -349,12 +375,26 @@ export function slackApi(
           if (++pages > MAX_PAGES) throw new Error('thread too long to read');
           raw.push(...((page as { messages?: RawMessage[] }).messages ?? []));
         }
-        return read(raw);
+        const messages = read(raw);
+        const resolved = new Map(
+          await Promise.all(
+            [...new Set(messages.map((m) => m.author))].map(
+              async (id): Promise<[string, string]> => [id, await nameOf(id)],
+            ),
+          ),
+        );
+        return messages.map((m) => ({ ...m, author: resolved.get(m.author) ?? m.author }));
       } catch (error) {
         const code = slackCode(error);
         if (code && UNREADABLE.has(code)) return undefined;
         throw error;
       }
+    },
+    async permalink(channel, ts) {
+      return await client.chat
+        .getPermalink({ channel, message_ts: ts })
+        .then((got) => (typeof got.permalink === 'string' ? got.permalink : undefined))
+        .catch(() => undefined);
     },
     async openDm(user) {
       const { channel } = await client.conversations.open({ users: user });

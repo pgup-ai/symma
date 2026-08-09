@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { threadSnapshot, type ThreadMessage } from '../src/snapshot.js';
 
-const say = (ts: string, text: string): ThreadMessage => ({ ts, author: 'U-nel', text });
+const say = (ts: string, text: string): ThreadMessage => ({ ts, author: 'Nel', text });
 const thread: ThreadMessage[] = [
   say('100.0', 'the deploy is failing'),
   say('101.0', 'first reply'),
@@ -16,8 +16,12 @@ describe('thread snapshot', () => {
     const snapshot = threadSnapshot(thread, { budgetBytes: 10_000 });
     assert.equal(snapshot.omitted, 0);
     assert.equal(snapshot.seenThroughTs, '103.0');
-    assert.match(snapshot.text, /^\[100\.0\] U-nel: the deploy is failing/);
+    // A quote of names, not a log of ids and epochs: the member reads this in
+    // Slack, beside the thread it was taken from. The `ts` still travels, as
+    // `seenThroughTs` above.
+    assert.match(snapshot.text, /^> \*Nel:\* the deploy is failing/);
     assert.match(snapshot.text, /third reply$/);
+    assert.doesNotMatch(snapshot.text, /100\.0/);
   });
 
   it('keeps the root and the newest, and says how many it dropped', () => {
@@ -106,9 +110,9 @@ describe('thread snapshot', () => {
     // v1 passes metadata only: downloading widens the scope request and the
     // data-lifecycle surface both (§10).
     const snapshot = threadSnapshot(
-      [{ ts: '100.0', author: 'U-nel', text: 'logs attached', files: [{ name: 'trace.log' }] }],
+      [{ ts: '100.0', author: 'Nel', text: 'logs attached', files: [{ name: 'trace.log' }] }],
       { budgetBytes: 10_000 },
     );
-    assert.match(snapshot.text, /files: trace\.log/);
+    assert.match(snapshot.text, /> _trace\.log_/);
   });
 });

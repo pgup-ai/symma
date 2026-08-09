@@ -146,6 +146,7 @@ const depsFor = (user: string) => {
     log,
     threadReplies: api.threadReplies,
     openDm: api.openDm,
+    permalink: api.permalink,
     post: api.post,
     find: (sourceChannel: string, sourceThread: string) =>
       lookup('/api/slack/conversation', { sourceChannel, sourceThread }),

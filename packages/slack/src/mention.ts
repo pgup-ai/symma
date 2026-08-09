@@ -27,6 +27,9 @@ export interface MentionDeps {
   seen: (conversation: string, seenThroughTs: string) => Promise<void>;
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
   openDm: (user: string) => Promise<string>;
+  /** A link back to the source thread. Undefined is a link the member does not
+   * get, not a handoff that does not happen. */
+  permalink: (channel: string, ts: string) => Promise<string | undefined>;
   post: (
     channel: string,
     text: string,
@@ -49,10 +52,17 @@ export interface Mention {
 }
 
 /** The DM the member reads first. It states the privacy default up front, since
- * that is the promise §5 makes and the one they have to trust. */
-const opening = (snapshot: string, omitted: number): string =>
+ * that is the promise §5 makes and the one they have to trust — and says which
+ * thread it is about, because a conversation lifted out of a channel is otherwise
+ * a quote with no way back to where it came from. `<#C…>` is Slack's own channel
+ * link, so the name is whatever the channel is called now. */
+const opening = (
+  snapshot: string,
+  omitted: number,
+  source: { channel: string; link?: string },
+): string =>
   [
-    'Picked this up from the thread. Working privately — nothing goes back to the channel unless you say so.',
+    `Picked this up from <#${source.channel}>${source.link ? ` — <${source.link}|open the thread>` : ''}. Working privately — nothing goes back to the channel unless you say so.`,
     '',
     snapshot || '_Nothing new in the thread since I last read it._',
     ...(omitted ? ['', `_Context was trimmed to fit: ${omitted} message(s) left out._`] : []),
@@ -92,6 +102,12 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (snapshot.seenThroughTs) await deps.seen(conversation, snapshot.seenThroughTs);
   };
 
+  // Asked for once and carried, rather than fetched per post: the three openings
+  // below are the same message about the same thread, and one of them is a
+  // correction posted seconds after another.
+  const link = await deps.permalink(mention.channel, mention.threadTs);
+  const source = { channel: mention.channel, ...(link ? { link } : {}) };
+
   if (existing) {
     const { turn } = await deps.turn({
       sourceChannel: mention.channel,
@@ -103,7 +119,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (!turn) return 'already handled';
     await deps.post(
       existing.dmChannel,
-      opening(snapshot.text, snapshot.omitted),
+      opening(snapshot.text, snapshot.omitted, source),
       existing.rootThread,
     );
     await shown(existing.id);
@@ -111,7 +127,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   }
 
   const dm = await deps.openDm(mention.user);
-  const root = await deps.post(dm, opening(snapshot.text, snapshot.omitted));
+  const root = await deps.post(dm, opening(snapshot.text, snapshot.omitted, source));
   const { conversation, turn } = await deps.turn({
     sourceChannel: mention.channel,
     sourceThread: mention.threadTs,
@@ -132,7 +148,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (!turn) return 'already handled';
     await deps.post(
       conversation.dmChannel,
-      opening(snapshot.text, snapshot.omitted),
+      opening(snapshot.text, snapshot.omitted, source),
       conversation.rootThread,
     );
     await shown(conversation.id);
