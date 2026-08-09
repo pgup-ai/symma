@@ -146,6 +146,7 @@ const depsFor = (user: string) => {
     log,
     threadReplies: api.threadReplies,
     openDm: api.openDm,
+    permalink: api.permalink,
     post: api.post,
     find: (sourceChannel: string, sourceThread: string) =>
       lookup('/api/slack/conversation', { sourceChannel, sourceThread }),
@@ -325,6 +326,7 @@ const connection = socketMode({
       const mention = {
         user: event.user,
         channel: event.channel,
+        ts: event.ts,
         // A mention that starts a thread is its own thread.
         threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts,
         eventId,

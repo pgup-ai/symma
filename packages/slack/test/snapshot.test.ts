@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { threadSnapshot, type ThreadMessage } from '../src/snapshot.js';
 
-const say = (ts: string, text: string): ThreadMessage => ({ ts, author: 'U-nel', text });
+const say = (ts: string, text: string): ThreadMessage => ({ ts, author: 'Nel', text });
 const thread: ThreadMessage[] = [
   say('100.0', 'the deploy is failing'),
   say('101.0', 'first reply'),
@@ -16,8 +16,11 @@ describe('thread snapshot', () => {
     const snapshot = threadSnapshot(thread, { budgetBytes: 10_000 });
     assert.equal(snapshot.omitted, 0);
     assert.equal(snapshot.seenThroughTs, '103.0');
-    assert.match(snapshot.text, /^\[100\.0\] U-nel: the deploy is failing/);
+    // A quote of names, not a log of ids and epochs. The `ts` still travels —
+    // as `seenThroughTs`, asserted above.
+    assert.match(snapshot.text, /^> \*Nel:\* the deploy is failing/);
     assert.match(snapshot.text, /third reply$/);
+    assert.doesNotMatch(snapshot.text, /100\.0/);
   });
 
   it('keeps the root and the newest, and says how many it dropped', () => {
@@ -102,13 +105,68 @@ describe('thread snapshot', () => {
     }
   });
 
+  it('keeps a multi-line message inside the quote', () => {
+    // Slack quotes by the line, not by the message, so a pasted stack trace would
+    // otherwise leave the transcript halfway through and read as the bot talking.
+    const snapshot = threadSnapshot(
+      [{ ts: '100.0', author: 'Nel', text: 'it threw:\nline one\nline two' }],
+      {
+        budgetBytes: 10_000,
+      },
+    );
+    assert.equal(snapshot.text, '> *Nel:* it threw:\n> line one\n> line two');
+
+    // Including where it is cut. This shape and budget is the one that used to put
+    // the marker on a line of its own — the cut lands exactly on a break — so it
+    // is asserted whole rather than by a predicate that a shape which never
+    // truncates would also satisfy.
+    const cut = threadSnapshot([{ ts: '100.0', author: 'J', text: 'aaa\naaa\naaa\naaa' }], {
+      budgetBytes: 27,
+    });
+    assert.equal(cut.text, '> *J:* aaa … [truncated]');
+
+    // And where it ends: a trailing break would quote an empty line before the
+    // files.
+    const ends = threadSnapshot(
+      [{ ts: '100.0', author: 'J', text: 'done\n', files: [{ name: 'x.log' }] }],
+      { budgetBytes: 10_000 },
+    );
+    assert.equal(ends.text, '> *J:* done\n> files: x.log');
+
+    // Breaks only: a tab at the end of a line can be part of what was pasted.
+    const tabbed = threadSnapshot([{ ts: '100.0', author: 'J', text: 'if (x) {\t' }], {
+      budgetBytes: 10_000,
+    });
+    assert.equal(tabbed.text, '> *J:* if (x) {\t');
+  });
+
+  it('does not let a display name close the bold it is shown in', () => {
+    // Names are escaped where they are resolved, but the pairs are this renderer's
+    // own markup: `*` closes the bold, and the `_` in a name like `john_doe` opens
+    // an italic that runs to whatever underscore comes next in the message.
+    const snapshot = threadSnapshot(
+      [
+        { ts: '100.0', author: 'C*3PO', text: 'hello there' },
+        { ts: '101.0', author: 'john_doe', text: 'fixed the _thing_' },
+        // Nothing left after the pairs come out, which is the same unknown as a
+        // message Slack sent with no author at all.
+        { ts: '102.0', author: '*~_*', text: 'still me' },
+      ],
+      { budgetBytes: 10_000 },
+    );
+    assert.equal(
+      snapshot.text,
+      '> *C 3PO:* hello there\n> *john doe:* fixed the _thing_\n> *someone:* still me',
+    );
+  });
+
   it('names attached files without fetching them', () => {
     // v1 passes metadata only: downloading widens the scope request and the
     // data-lifecycle surface both (§10).
     const snapshot = threadSnapshot(
-      [{ ts: '100.0', author: 'U-nel', text: 'logs attached', files: [{ name: 'trace.log' }] }],
+      [{ ts: '100.0', author: 'Nel', text: 'logs attached', files: [{ name: 'trace.log' }] }],
       { budgetBytes: 10_000 },
     );
-    assert.match(snapshot.text, /files: trace\.log/);
+    assert.match(snapshot.text, /> files: trace\.log/);
   });
 });

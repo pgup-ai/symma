@@ -10,7 +10,7 @@ import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } fro
 import { isSafeId, isSafeModelId, type SessionModels, type SessionModes } from '@symma/protocol';
 
 import type { FetchedFile } from './attachments.js';
-import type { ThreadMessage } from './snapshot.js';
+import { UNKNOWN_AUTHOR, type ThreadMessage } from './snapshot.js';
 
 export interface SlackApi {
   /** Oldest first. Undefined when the bot cannot see the channel at all, which
@@ -19,6 +19,10 @@ export interface SlackApi {
   /** The member's DM channel. Asked for rather than assumed: Slack's docs
    * disagree about whether a user id can stand in as a channel. */
   openDm: (user: string) => Promise<string>;
+  /** A link back to a message, so a conversation lifted out of a channel says
+   * which thread it came from. Undefined rather than throwing: a handoff without
+   * its link is worth having, and one that refused to happen is not. */
+  permalink: (channel: string, ts: string) => Promise<string | undefined>;
   post: (
     channel: string,
     text: string,
@@ -108,15 +112,15 @@ const FALLBACK_TEXT_LIMIT = 40_000;
  * a stalled one would otherwise hold the whole turn. */
 const FILE_FETCH_TIMEOUT_MS = 20_000;
 
-/** The progress line is the one call worth abandoning. The SDK's defaults —
- * `timeout: 0` and ten retries across half an hour — are right for an answer and
- * wrong for a hint nobody is waiting for, which would otherwise still be trying
- * long after the turn that wanted it.
+/** For the calls that are not the answer: a progress line, a link back, a name.
+ * The SDK defaults to `timeout: 0` and ten retries across half an hour, which is
+ * right for an answer and wrong for a decoration still trying long after the turn
+ * that wanted it.
  *
- * Bounded here and nowhere else because `chat.update` is the only call it is safe
- * for: writing the same text twice has the same effect, while a `chat.postMessage`
- * that timed out after Slack accepted it would be retried into a second message. */
-const PROGRESS_TIMEOUT_MS = 5_000;
+ * Bounded for exactly these because each is idempotent — a repeated `chat.update`
+ * writes the same text and a read has no effect at all — where a `postMessage`
+ * retried after Slack accepted it is a second message. */
+const ASIDE_TIMEOUT_MS = 5_000;
 
 /** A name or a title the member or their agent chose, on its way into mrkdwn:
  * a backtick would open a code span that swallows the rest of the sentence, and
@@ -300,12 +304,15 @@ interface RawMessage {
   files?: { name?: unknown; size?: unknown }[];
 }
 
-const read = (raw: RawMessage[]): ThreadMessage[] =>
+const read = (raw: RawMessage[], names: Map<string, string>): ThreadMessage[] =>
   raw
     .filter((m): m is RawMessage & { ts: string } => typeof m.ts === 'string')
     .map((m) => ({
       ts: m.ts,
-      author: typeof m.user === 'string' ? m.user : 'unknown',
+      // Slack's own messages — a join, a bot post — carry no `user`, and so are
+      // never asked about. The rest are always in the map: `threadReplies` builds
+      // it from these same messages by this same test.
+      author: typeof m.user === 'string' ? names.get(m.user)! : UNKNOWN_AUTHOR,
       text: typeof m.text === 'string' ? m.text : '',
       // Named, never fetched: downloading widens both the scope request and the
       // data-lifecycle surface (§10).
@@ -326,11 +333,40 @@ export function slackApi(
   options: { fetch?: typeof fetch; log?: (message: string) => void } = {},
 ): SlackApi {
   const client = new WebClient(token, options.fetch ? { fetch: options.fetch } : {});
-  const progress = new WebClient(token, {
+  const quick = new WebClient(token, {
     ...(options.fetch ? { fetch: options.fetch } : {}),
-    timeout: PROGRESS_TIMEOUT_MS,
+    timeout: ASIDE_TIMEOUT_MS,
     retryConfig: { retries: 1 },
   });
+
+  /** Looked up rather than left as `<@U…>`, which Slack would render for free:
+   * the agent reads this text back as its only record of a channel it cannot see,
+   * so an id there is unreadable to it as well as to the member. Cached for the
+   * process — a thread is a few people saying many things, and a display name
+   * changes about as often as a bot restarts. */
+  const cache = new Map<string, string>();
+  const nameOf = async (id: string): Promise<string> => {
+    const known = cache.get(id);
+    if (known) return known;
+    const name = await quick.users
+      .info({ user: id })
+      .then((got) => {
+        const profile = got.user?.profile;
+        return profile?.display_name || profile?.real_name || got.user?.name;
+      })
+      .catch(() => undefined);
+    // Only what resolved is kept. A missing scope or a rate limit would otherwise
+    // pin every name in the process to its fallback until a restart — including
+    // across the reinstall that granted the scope.
+    if (!name) return `<@${id}>`;
+    // Escaped like every other name this bot renders — a display name is whatever
+    // its owner typed, and it lands inside `*bold*` in a quote — and back to the
+    // mention if escaping leaves nothing of it.
+    const resolved = plainly(name) || `<@${id}>`;
+    cache.set(id, resolved);
+    return resolved;
+  };
+
   return {
     async threadReplies(channel, thread) {
       try {
@@ -349,12 +385,24 @@ export function slackApi(
           if (++pages > MAX_PAGES) throw new Error('thread too long to read');
           raw.push(...((page as { messages?: RawMessage[] }).messages ?? []));
         }
-        return read(raw);
+        const ids = new Set(raw.flatMap((m) => (typeof m.user === 'string' ? [m.user] : [])));
+        const names = new Map(
+          await Promise.all(
+            [...ids].map(async (id): Promise<[string, string]> => [id, await nameOf(id)]),
+          ),
+        );
+        return read(raw, names);
       } catch (error) {
         const code = slackCode(error);
         if (code && UNREADABLE.has(code)) return undefined;
         throw error;
       }
+    },
+    permalink(channel, ts) {
+      return quick.chat
+        .getPermalink({ channel, message_ts: ts })
+        .then((got) => (typeof got.permalink === 'string' ? got.permalink : undefined))
+        .catch(() => undefined);
     },
     async openDm(user) {
       const { channel } = await client.conversations.open({ users: user });
@@ -435,7 +483,7 @@ export function slackApi(
     },
     async working(channel, ts, text) {
       try {
-        await progress.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
+        await quick.chat.update({ channel, ts, text: clip(text, FALLBACK_TEXT_LIMIT) });
       } catch (error) {
         // Said once rather than swallowed: a scope or rate-limit problem here
         // is invisible otherwise, and the answer still arrives either way. The

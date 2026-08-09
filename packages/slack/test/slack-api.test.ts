@@ -17,7 +17,105 @@ const answering = (...bodies: unknown[]) => {
   return { fetchImpl, seen, called };
 };
 
+/** Answers by method rather than by call order — a thread read now fans out into
+ * `users.info`, and reading one twice is how the name cache is observed. */
+const byMethod = (answers: Record<string, (body: string) => unknown>) => {
+  const calls: string[] = [];
+  const fetchImpl = ((url: string, init: { body?: unknown }) => {
+    const method = String(url).split('/').pop() ?? '';
+    calls.push(method);
+    return Promise.resolve(new Response(JSON.stringify(answers[method]?.(String(init.body)))));
+  }) as unknown as typeof fetch;
+  return { fetchImpl, asked: (method: string) => calls.filter((c) => c === method).length };
+};
+
+const THREE_FROM_TWO = {
+  ok: true,
+  messages: [
+    { ts: '100.0', user: 'U-nel', text: 'one' },
+    { ts: '101.0', user: 'U-ola', text: 'two' },
+    { ts: '102.0', user: 'U-nel', text: 'three' },
+  ],
+};
+
 describe('slack api', () => {
+  it('reads a thread as names, and asks once per person', async () => {
+    const { fetchImpl, asked } = byMethod({
+      'conversations.replies': () => THREE_FROM_TWO,
+      'users.info': (body) => ({
+        ok: true,
+        user: { profile: { display_name: body.includes('U-nel') ? 'Nel' : 'Ola' } },
+      }),
+    });
+    const api = slackApi('xoxb-test', { fetch: fetchImpl });
+    assert.deepEqual(
+      (await api.threadReplies('C-incidents', '100.0'))?.map((m) => m.author),
+      ['Nel', 'Ola', 'Nel'],
+    );
+    // Two people, three messages: the third is the cache, not a third lookup.
+    assert.equal(asked('users.info'), 2);
+    await api.threadReplies('C-incidents', '100.0');
+    assert.equal(asked('users.info'), 2, 'and it outlives one read');
+  });
+
+  it('falls back to the mention Slack renders when a name will not resolve', async () => {
+    const { fetchImpl, asked } = byMethod({
+      'conversations.replies': () => ({
+        ok: true,
+        messages: [{ ts: '100.0', user: 'U-nel', text: 'one' }],
+      }),
+      'users.info': () => ({ ok: false, error: 'user_not_found' }),
+    });
+    const api = slackApi('xoxb-test', { fetch: fetchImpl });
+    assert.equal((await api.threadReplies('C-x', '100.0'))?.[0]?.author, '<@U-nel>');
+    // Asked again on the next read: a refusal is usually the scope not being
+    // granted yet, and caching it would hold every name at its fallback across
+    // the reinstall that granted it.
+    await api.threadReplies('C-x', '100.0');
+    assert.equal(asked('users.info'), 2);
+  });
+
+  it('asks about nobody for a message Slack itself posted', async () => {
+    // A join or a bot post carries no `user`. Handed to `users.info` it fails by
+    // construction, and the fallback would render `<@someone>` — a mention of a
+    // user id that does not exist.
+    const { fetchImpl, called } = answering({
+      ok: true,
+      messages: [{ ts: '100.0', text: 'has joined the channel', subtype: 'channel_join' }],
+    });
+    const thread = await slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies('C-x', '100.0');
+    assert.equal(thread?.[0]?.author, 'someone');
+    assert.deepEqual(called, ['conversations.replies']);
+  });
+
+  it('escapes a display name, which is whatever its owner typed', async () => {
+    // It lands inside `*bold*` in a quote, so a `<` there opens an entity and a
+    // backtick opens a code span that swallows the message after it.
+    const { fetchImpl } = answering(
+      { ok: true, messages: [{ ts: '100.0', user: 'U-nel', text: 'one' }] },
+      { ok: true, user: { profile: { display_name: '<!channel> `nel`' } } },
+    );
+    const thread = await slackApi('xoxb-test', { fetch: fetchImpl }).threadReplies('C-x', '100.0');
+    assert.equal(thread?.[0]?.author, '&lt;!channel&gt; nel');
+  });
+
+  it('asks Slack for a link back, and does without one rather than failing', async () => {
+    const got = answering({ ok: true, permalink: 'https://x.slack.com/archives/C1/p100' });
+    assert.equal(
+      await slackApi('xoxb-test', { fetch: got.fetchImpl }).permalink('C1', '100.0'),
+      'https://x.slack.com/archives/C1/p100',
+    );
+    // The method name matters more than it looks: everything below swallows a
+    // refusal, so a wrong one would read as a workspace that has no links.
+    assert.deepEqual(got.called, ['chat.getPermalink']);
+
+    const none = answering({ ok: false, error: 'message_not_found' });
+    assert.equal(
+      await slackApi('xoxb-test', { fetch: none.fetchImpl }).permalink('C1', '100.0'),
+      undefined,
+    );
+  });
+
   it('reads a thread, and names files without fetching them', async () => {
     const { fetchImpl } = answering({
       ok: true,

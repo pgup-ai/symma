@@ -21,10 +21,32 @@ export interface Snapshot {
   omitted: number;
 }
 
+/** A quote, because a member reads this in Slack beside the thread it was taken
+ * from, where a log of ids and epochs is the one part that does not look like
+ * Slack. No `ts`: the cursor travels as `seenThroughTs`.
+ *
+ * Every line carries the `>`, since Slack quotes by the line and not by the
+ * message — a pasted stack trace would otherwise fall out of the transcript
+ * halfway through. The file names are unformatted for the same kind of reason:
+ * `my_file.log` inside italics closes them early. */
 const render = (message: ThreadMessage): string => {
   const files = message.files?.map((f) => f.name).join(', ');
-  return `[${message.ts}] ${message.author}: ${message.text}${files ? `\n  files: ${files}` : ''}`;
+  // Breaks only, and only trailing ones: a final tab can be part of pasted code,
+  // where a final break quotes the empty line after it. One inside the text keeps
+  // its blank line, which is what Slack shows for it too.
+  const quoted = message.text.replace(/\n+$/, '').replaceAll('\n', '\n> ');
+  // The bold is opened here, so the pairs are this line's to take out: `*Jane*`
+  // closes it, and `john_doe` opens an italic that runs to the message's next
+  // underscore. Spaced, not dropped — `john doe` is the name, `johndoe` is not.
+  // A name made of nothing else is the same unknown as a message with no author.
+  const who =
+    message.author.replaceAll(/[*_~]/g, ' ').replace(/\s+/g, ' ').trim() || UNKNOWN_AUTHOR;
+  return `> *${who}:* ${quoted}${files ? `\n> files: ${files}` : ''}`;
 };
+
+/** What Slack's own messages are attributed to — a join, a bot post — and so
+ * what a name that renders to nothing falls back to. */
+export const UNKNOWN_AUTHOR = 'someone';
 
 const bytes = (value: string): number => Buffer.byteLength(value, 'utf8');
 
@@ -48,7 +70,10 @@ const fit = (line: string, budget: number): string | undefined => {
   if (room < 1) return undefined;
   let cut = line;
   while (bytes(cut) > room) cut = cut.slice(0, -Math.max(1, Math.ceil((bytes(cut) - room) / 4)));
-  return cut + MARKER;
+  // Never ending on a line break: the marker would open a line of its own, and a
+  // line without the `>` is a line outside the quote the rest of the message is
+  // in. Trimming only shrinks what already fit.
+  return cut.replace(/\n(> ?)?$/, '') + MARKER;
 };
 
 /**

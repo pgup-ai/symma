@@ -27,6 +27,8 @@ export interface MentionDeps {
   seen: (conversation: string, seenThroughTs: string) => Promise<void>;
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
   openDm: (user: string) => Promise<string>;
+  /** A link back to the source thread; undefined is one Slack would not give. */
+  permalink: (channel: string, ts: string) => Promise<string | undefined>;
   post: (
     channel: string,
     text: string,
@@ -43,16 +45,27 @@ export type MentionOutcome =
 export interface Mention {
   user: string;
   channel: string;
+  /** The message that summoned the bot. Linked rather than the thread's first
+   * message: Slack's preview quotes whatever the link points at, and what the
+   * member wants back is the ask, not whatever the thread opened with. */
+  ts: string;
   /** The thread the mention sits in; a top-level mention is its own thread. */
   threadTs: string;
   eventId: string;
 }
 
 /** The DM the member reads first. It states the privacy default up front, since
- * that is the promise §5 makes and the one they have to trust. */
-const opening = (snapshot: string, omitted: number): string =>
+ * that is the promise §5 makes and the one they have to trust — and which thread
+ * it is about, since a conversation lifted out of a channel is otherwise a quote
+ * with no way back. `<#C…>` is Slack's own channel link, so it reads as whatever
+ * the channel is called now rather than what it was called today. */
+const opening = (
+  snapshot: string,
+  omitted: number,
+  source: { channel: string; link?: string },
+): string =>
   [
-    'Picked this up from the thread. Working privately — nothing goes back to the channel unless you say so.',
+    `Picked this up from <#${source.channel}>${source.link ? ` — <${source.link}|open the thread>` : ''}. Working privately — nothing goes back to the channel unless you say so.`,
     '',
     snapshot || '_Nothing new in the thread since I last read it._',
     ...(omitted ? ['', `_Context was trimmed to fit: ${omitted} message(s) left out._`] : []),
@@ -92,6 +105,18 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (snapshot.seenThroughTs) await deps.seen(conversation, snapshot.seenThroughTs);
   };
 
+  // Asked for where it is first wanted and then kept: the three openings below are
+  // one thread's, and a redelivery the gateway has already seen posts nothing and
+  // should pay for nothing.
+  let source: { channel: string; link?: string } | undefined;
+  const sourceOf = async (): Promise<{ channel: string; link?: string }> => {
+    if (!source) {
+      const link = await deps.permalink(mention.channel, mention.ts);
+      source = { channel: mention.channel, ...(link ? { link } : {}) };
+    }
+    return source;
+  };
+
   if (existing) {
     const { turn } = await deps.turn({
       sourceChannel: mention.channel,
@@ -103,7 +128,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (!turn) return 'already handled';
     await deps.post(
       existing.dmChannel,
-      opening(snapshot.text, snapshot.omitted),
+      opening(snapshot.text, snapshot.omitted, await sourceOf()),
       existing.rootThread,
     );
     await shown(existing.id);
@@ -111,7 +136,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   }
 
   const dm = await deps.openDm(mention.user);
-  const root = await deps.post(dm, opening(snapshot.text, snapshot.omitted));
+  const root = await deps.post(dm, opening(snapshot.text, snapshot.omitted, await sourceOf()));
   const { conversation, turn } = await deps.turn({
     sourceChannel: mention.channel,
     sourceThread: mention.threadTs,
@@ -132,7 +157,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     if (!turn) return 'already handled';
     await deps.post(
       conversation.dmChannel,
-      opening(snapshot.text, snapshot.omitted),
+      opening(snapshot.text, snapshot.omitted, await sourceOf()),
       conversation.rootThread,
     );
     await shown(conversation.id);
