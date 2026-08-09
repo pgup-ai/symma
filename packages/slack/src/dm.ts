@@ -611,13 +611,16 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     throw error;
   }
   await deps.mark(message.channel, message.ts, 'done');
-  await deps.finish(conversation.id, turn, 'completed', ran);
-  // Fail-open: a cursor that did not move costs a re-read next turn, where failing
-  // a delivered turn costs the answer.
+  // Before the turn is closed, which is what lets the next one start: the cursor
+  // is what that turn filters its read by, so a thread released with it still
+  // behind this answer catches the next one up on what this one already covered.
+  // Fail-open all the same — a cursor that did not move costs a re-read, where
+  // failing a delivered turn costs the answer.
   if (caught?.seenThrough)
     await deps.seen(conversation.id, caught.seenThrough).catch((error: unknown) => {
       deps.log(`cursor not moved: ${String(error)}`);
     });
+  await deps.finish(conversation.id, turn, 'completed', ran);
   // Slack cannot fold the narration away the way a terminal does, so once the
   // answer is here the last step is only in the way. Queued behind the narration
   // it is undoing, and left until after the turn is closed: a `chat.update` Slack

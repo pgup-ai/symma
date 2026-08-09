@@ -111,6 +111,7 @@ function harness(
     },
     seen: (conversation, ts) => {
       moved.push(`${conversation}:${ts}`);
+      timeline.push(`seen:${ts}`);
       return over.seenFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
     },
     log: () => {},
@@ -829,7 +830,7 @@ describe('dm message', () => {
   it('reads the channel a mention came out of, and only what is unseen', async () => {
     // The thread the question is about lives in the channel, not in a copy of it
     // quoted into the DM — so a turn reads it from Slack, from the cursor.
-    const { deps, runs, moved } = harness({
+    const { deps, runs, moved, timeline } = harness({
       existing: {
         ...CONVERSATION,
         source: { channel: 'C-incidents', thread: '100.0' },
@@ -846,9 +847,14 @@ describe('dm message', () => {
     );
     assert.match(runs[0]!.context!, /here is the trace/);
     assert.doesNotMatch(runs[0]!.context!, /the deploy is failing/, 'already shown');
-    // Moved only once the answer is delivered: a cursor past an answer nobody got
-    // would filter out exactly what they never saw.
+    // Moved once the answer is delivered — a cursor past an answer nobody got
+    // would filter out exactly what they never saw — and before the turn closes,
+    // since closing it is what lets the next one read by that cursor.
     assert.deepEqual(moved, ['conv-1:101.0']);
+    assert.deepEqual(
+      timeline.filter((entry) => /^(mark|seen|finish):/.test(entry)),
+      ['mark:working', 'mark:done', 'seen:101.0', 'finish:completed'],
+    );
   });
 
   it('says so when it cannot read the channel it was asked about', async () => {
