@@ -47,7 +47,8 @@ import {
   parseRelayControl,
   PROTOCOL_VERSION,
   publicKeyFrom,
-  respondToPermissionRequest,
+  answerPermission,
+  PERMISSION_ANSWERED,
   signEnvelope,
   terminateProcessTree,
   type AcpAgentSpec,
@@ -782,18 +783,9 @@ async function openSession(control: OpenControl): Promise<void> {
   };
   sessions.set(control.sessionId, session);
 
-  const read = createNdjsonReader((frame) => {
-    // The floor: permission requests are answered HERE and never forwarded —
-    // a remote client cannot grant anything. The policy is the session's, set
-    // once at open from the mode the owner picked.
-    if (frame.method === 'session/request_permission' && frame.id !== undefined) {
-      const response = respondToPermissionRequest(
-        (frame.params ?? {}) as Parameters<typeof respondToPermissionRequest>[0],
-        session.allowWrites ? 'writes' : 'read-only',
-      );
-      child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: response })}\n`);
-      return;
-    }
+  /** Every frame the client is shown takes this path: signed, sequenced and
+   * journaled the same way, whether the agent sent it or this process did. */
+  const forward = (frame: Record<string, unknown>): void => {
     const envelope: ObserverEnvelope = {
       v: 1,
       runId: session.runId,
@@ -808,6 +800,25 @@ async function openSession(control: OpenControl): Promise<void> {
       frame,
     };
     sendLine(JSON.stringify(signEnvelope(envelope, signingKeys().privateKey)));
+  };
+
+  const read = createNdjsonReader((frame) => {
+    // The floor: permission requests are answered HERE and never forwarded —
+    // a remote client cannot grant anything. The policy is the session's, set
+    // once at open from the mode the owner picked.
+    if (frame.method === 'session/request_permission' && frame.id !== undefined) {
+      const { response, decided } = answerPermission(
+        (frame.params ?? {}) as Parameters<typeof answerPermission>[0],
+        session.allowWrites ? 'writes' : 'read-only',
+      );
+      child.stdin?.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: response })}\n`);
+      // What was decided travels even though the request never does: a caller
+      // told nothing cannot tell its member that this machine agreed to
+      // something on their behalf.
+      if (decided) forward({ jsonrpc: '2.0', method: PERMISSION_ANSWERED, params: decided });
+      return;
+    }
+    forward(frame);
   });
   child.stdout?.setEncoding('utf8');
   child.stdout?.on('data', (chunk: string) => {

@@ -33,6 +33,7 @@ import {
   opencodeAcpSpec,
   opencodeAuthPath,
   isWriteCapableMode,
+  PERMISSION_ANSWERED,
   respondToPermissionRequest,
 } from '../src/acp-protocol.js';
 import { codexAuthPath } from '../src/codex.js';
@@ -44,6 +45,9 @@ interface FakeAgentApi {
   update: (update: Record<string, unknown>) => void;
   request: (id: number, method: string, params: Record<string, unknown>) => void;
   finish: (stopReason?: string, usage?: Record<string, unknown>) => void;
+  /** A frame with no id, which is what a notification is — the shape the
+   * companion forwards its own permission decisions in. */
+  notify: (method: string, params: Record<string, unknown>) => void;
 }
 
 interface FakeAgentScript {
@@ -94,6 +98,7 @@ function fakeAgentIo(script: FakeAgentScript): {
         params: { sessionId: 's1', update },
       }),
     request: (id, method, params) => send({ jsonrpc: '2.0', id, method, params }),
+    notify: (method, params) => send({ jsonrpc: '2.0', method, params }),
     finish: (stopReason = 'end_turn', usage?: Record<string, unknown>) =>
       send({ jsonrpc: '2.0', id: promptId, result: { stopReason, ...(usage ? { usage } : {}) } }),
   };
@@ -294,6 +299,58 @@ describe('acp', () => {
       { input: quiet.input, output: quiet.output },
       { cwd: '/x', prompt: 'p', agent: 'fake', label: 'review', log: noLog },
     );
+  });
+
+  it('records nothing where the floor had no option it could pick', async () => {
+    // Cancelled is not a refusal: the floor took no stance, it just found nothing
+    // to answer with. Reported as one, a member reads "would not run" about a
+    // call this layer never objected to.
+    const fake = fakeAgentIo({
+      onPrompt: (agent) =>
+        agent.request(9, 'session/request_permission', {
+          toolCall: { kind: 'read', title: 'Read src/index.ts' },
+          options: [{ optionId: 'x', kind: 'something_else' }],
+        }),
+      onClientResponse: (_id, _result, agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'fake',
+      label: 't',
+      log: noLog,
+    });
+    assert.equal(result.approvals, undefined);
+  });
+
+  it('takes the decision from whoever answered it elsewhere', async () => {
+    // A remote turn's floor is the companion's: it answers on its own machine and
+    // never forwards the request, so without this the driver sees nothing and a
+    // turn where nobody was asked reports as one where nothing was decided.
+    const fake = fakeAgentIo({
+      onPrompt: (agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.notify(PERMISSION_ANSWERED, { title: 'Run git push', allowed: true });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'fake',
+      label: 't',
+      log: noLog,
+    });
+    assert.deepEqual(result.approvals, [{ title: 'Run git push', allowed: true }]);
   });
 
   it('carries a refusal back too, since the floor made that call as well', async () => {

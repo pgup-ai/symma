@@ -117,9 +117,13 @@ const FILE_FETCH_TIMEOUT_MS = 20_000;
  * `timeout: 0` and ten retries across half an hour, which is right for an answer
  * and wrong for a decoration still trying long after the turn that wanted it.
  *
- * Bounded for exactly these because each is idempotent — a repeated `chat.update`
- * writes the same text, a repeated reaction is already there, and a read has no
- * effect at all. `postMessage` keeps the defaults on purpose: one retried after
+ * Bounded for exactly these because each is idempotent *and* losing one costs
+ * only a hint. `settle` is the near miss: its `chat.update` is idempotent too, but
+ * what it writes is the retirement of a share button, and a button left live is a
+ * second press that posts the same answer into the channel again — so it keeps the
+ * durable client, where retrying for half an hour is the point.
+ *
+ * `postMessage` keeps the defaults for the opposite reason: one retried after
  * Slack accepted it is a second message in the member's thread, and how long a
  * thread may be held by one is the gateway's to decide, which it does by retiring
  * a turn left running. */
@@ -528,7 +532,7 @@ export function slackApi(
     },
     async settle(channel, ts, text) {
       try {
-        await quick.chat.update({
+        await client.chat.update({
           channel,
           ts,
           text: clip(text, FALLBACK_TEXT_LIMIT),

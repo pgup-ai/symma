@@ -17,6 +17,8 @@ export {
   opencodeAuthPath,
   isWriteCapableMode,
   matchModelOptionValue,
+  answerPermission,
+  PERMISSION_ANSWERED,
   respondToPermissionRequest,
   type AcpAgentSpec,
   type AgentOpen,

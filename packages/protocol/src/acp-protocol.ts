@@ -177,6 +177,35 @@ export function respondToPermissionRequest(
     : { outcome: { outcome: 'cancelled' } };
 }
 
+/** What the floor decided, alongside the answer it will send. One call, because a
+ * report that recomputed the rule would be a second copy of the rule that decides
+ * what runs — and a `cancelled` outcome records nothing, since the floor took no
+ * stance there: it simply had no option it could pick.
+ *
+ * An agent that sends neither title nor kind leaves nothing to name, and
+ * something unnamed is still worth saying happened. */
+export function answerPermission(
+  params: PermissionRequestParams,
+  policy: PermissionPolicy = 'read-only',
+): { response: PermissionResponse; decided?: { title: string; allowed: boolean } } {
+  const response = respondToPermissionRequest(params, policy);
+  if (response.outcome.outcome !== 'selected') return { response };
+  return {
+    response,
+    decided: {
+      title: params.toolCall?.title || params.toolCall?.kind || 'something it did not name',
+      allowed: !deniedByFloor(params, policy),
+    },
+  };
+}
+
+/** Emitted by whoever answered a permission request for a caller that was not
+ * there to. The companion answers on its own machine and never forwards the
+ * request, so this is the only way a remote turn hears what was decided for it.
+ * Namespaced away from the agent's methods: symma's notification on symma's own
+ * transport, not part of ACP. */
+export const PERMISSION_ANSWERED = 'symma/permission_answered';
+
 /** The floor's rule on its own, so a caller reporting what it decided reads the
  * same one it answered with rather than a second copy of it. */
 function deniedByFloor(params: PermissionRequestParams, policy: PermissionPolicy): boolean {
@@ -527,6 +556,15 @@ export async function driveAcpSession(
   const conn = new AcpConnection(
     io,
     (method, params) => {
+      // A floor that answered elsewhere, saying what it decided: the companion
+      // never forwards the request, so this is the only way a remote turn learns
+      // what was allowed on its behalf.
+      if (method === PERMISSION_ANSWERED) {
+        const { title, allowed } = params as { title?: unknown; allowed?: unknown };
+        if (typeof title === 'string' && typeof allowed === 'boolean')
+          approvals.push({ title, allowed });
+        return;
+      }
       if (method !== 'session/update') return;
       const update = (params.update ?? {}) as Record<string, unknown>;
       const kind = update.sessionUpdate;
@@ -563,16 +601,12 @@ export async function driveAcpSession(
         // The driver's own floor follows the caller's mode the same way the
         // companion's does — a local caller that asked for a write-capable
         // mode must not have this layer silently deny what the mode promises.
-        const ask = params as PermissionRequestParams;
+        // This arm is the local path only — a remote turn's floor is the
+        // companion's, which reports through `PERMISSION_ANSWERED` above.
         const policy: PermissionPolicy =
           options.mode && isWriteCapableMode(options.mode) ? 'writes' : 'read-only';
-        const response = respondToPermissionRequest(ask, policy);
-        // Recorded, not only answered: this floor decided for someone who was not
-        // asked, and the answer is the only place they hear it happened.
-        approvals.push({
-          title: ask.toolCall?.title || ask.toolCall?.kind || 'a tool call',
-          allowed: !deniedByFloor(ask, policy) && response.outcome.outcome === 'selected',
-        });
+        const { response, decided } = answerPermission(params as PermissionRequestParams, policy);
+        if (decided) approvals.push(decided);
         if (response.outcome.outcome !== 'selected') {
           log(`acp:${agent} ${label}: permission request had no usable option; cancelled`);
         }
