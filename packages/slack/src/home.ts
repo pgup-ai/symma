@@ -61,13 +61,13 @@ export function modelPrompt(target: TurnTarget | undefined): {
   blocks: Record<string, unknown>[];
 } {
   if (!target) return { text: UNPAIRED, blocks: [section(UNPAIRED)] };
-  const lead = '◎ Model for new conversations';
+  const lead = '◎ Your default model';
   return {
     text: lead,
     blocks: [
       section(`*${lead}*`),
       ...modelBlocks(target),
-      context('A conversation already open keeps the model it started on.'),
+      context('Conversations where you picked a model keep it.'),
     ],
   };
 }
@@ -108,9 +108,9 @@ export function homeBlocks(target: TurnTarget | undefined): Record<string, unkno
     ),
     context('◫ Access level is chosen in each conversation'),
     { type: 'divider' },
-    section('*◎ Model for new conversations*'),
+    section('*◎ Your default model*'),
     ...modelBlocks(target),
-    context('A conversation already open keeps the model it started on.'),
+    context('Conversations where you picked a model keep it.'),
   );
   return blocks;
 }

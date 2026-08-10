@@ -929,10 +929,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         model: row?.modelAgent === agent ? (held.model ?? undefined) : undefined,
       };
       // The roster travels on every turn so the pickers outside a conversation —
-      // `/model`, the home tab — have something to render. `chosen` is the floor:
-      // overwritten below by the thread's own pick or the one it inherits.
+      // `/model`, the home tab — have something to render.
       const { roster, chosen } = await store.modelsFor(owner, agent);
-      const serve: Partial<Record<ConversationChoice, string>> = chosen ? { model: chosen } : {};
+      const serve: Partial<Record<ConversationChoice, string>> = {};
       // Read before the rebind below: once this thread's row names the new root,
       // its own not-yet-shed picks satisfy the inheritance query and follow it in.
       if (workspace && conversation) {
@@ -974,6 +973,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         }
       }
       const mode = serve.mode;
+      // The member's default, under everything above and kept out of `serve` so
+      // it is never written: a floor in the row stops being a floor, and the next
+      // thread in this root would inherit it after they had moved on. Served only
+      // while the agent still offers it — the picker cannot show a current id
+      // that left the roster, so serving one runs turns on a model they see no
+      // selection for.
+      const model = serve.model ?? (roster.some((m) => m.modelId === chosen) ? chosen : undefined);
 
       // §4's second rung, offered only for the machine, agent and directory the
       // session was minted under — an id means nothing anywhere else, and the
@@ -998,7 +1004,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         ...(token ? { token } : {}),
         ...(workspace ? { workspace: workspace.id, workspaceLabel: workspace.label } : {}),
         ...(mode ? { mode } : {}),
-        ...(serve.model ? { model: serve.model } : {}),
+        ...(model ? { model } : {}),
         ...(roster.length ? { models: roster } : {}),
         ...(resume ? { resume } : {}),
       });

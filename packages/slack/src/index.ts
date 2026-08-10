@@ -76,18 +76,18 @@ function gatewayClient(base: string, token: string, team: string) {
  * what it was handed, and what it was handed came from here — so anything that
  * does not parse is not a pick this bot made. */
 function readPick(value: string): { c?: string; m?: string; a?: string } {
-  let raw: Record<string, unknown>;
   try {
-    raw = JSON.parse(value) as Record<string, unknown>;
+    // Inside the try for `null`, which parses fine and then throws on the
+    // destructure — a pick that is not an object is not one this bot minted.
+    const { c, m, a } = JSON.parse(value) as Record<string, unknown>;
+    return {
+      ...(typeof c === 'string' ? { c } : {}),
+      ...(typeof m === 'string' ? { m } : {}),
+      ...(typeof a === 'string' ? { a } : {}),
+    };
   } catch {
     return {};
   }
-  const { c, m, a } = raw;
-  return {
-    ...(typeof c === 'string' ? { c } : {}),
-    ...(typeof m === 'string' ? { m } : {}),
-    ...(typeof a === 'string' ? { a } : {}),
-  };
 }
 
 async function reply(
@@ -262,11 +262,14 @@ const depsFor = (user: string) => {
       );
       // Handed on where a picker outside a thread can reach it. A roster is only
       // ever learned by running, so this turn is the only one that can teach the
-      // next pick what there is to pick from. Fail-open: the answer is in hand.
+      // next pick what there is to pick from. Fail-open: the answer is in hand,
+      // and a refusal is said out loud rather than read as a roster kept.
       if (models?.availableModels.length)
-        await send('/api/slack/roster', { user, agent, models: models.availableModels }).catch(
-          (error: unknown) => log(`roster not kept: ${String(error)}`),
-        );
+        await send('/api/slack/roster', { user, agent, models: models.availableModels })
+          .then((res) => {
+            if (!res.ok) throw new Error(String(res.status));
+          })
+          .catch((error: unknown) => log(`roster not kept: ${String(error)}`));
       return {
         text,
         notices,
@@ -436,12 +439,21 @@ const connection = socketMode({
         if (typeof who !== 'string' || !model || !agent) return;
         await announcing(who, 'default model', async () => {
           await ask('/api/slack/default-model', { user: who, agent, model });
-          const said = `◎ Model set: \`${model}\` — your next conversation starts on it.`;
-          // `/model` leaves a response URL to answer on; the home tab leaves
-          // none, so it is republished with the pick now standing in it.
-          if (typeof responseUrl === 'string')
-            await reply(responseUrl, { text: said, replace: true });
-          else await api.publishHome(who, homeBlocks(await memberTarget(who)));
+          try {
+            // `/model` leaves a response URL to answer on; the home tab leaves
+            // none, so it is republished with the pick now standing in it.
+            if (typeof responseUrl === 'string')
+              await reply(responseUrl, {
+                text: `◎ Default model: \`${model}\` — used wherever you have not picked one.`,
+                replace: true,
+              });
+            else await api.publishHome(who, homeBlocks(await memberTarget(who)));
+          } catch (error) {
+            // The pick is already stored, so "say it again and I will retry" —
+            // what a throw from here would send them — would be a lie about a
+            // press that worked, and on the home tab there is nothing to say.
+            log(`default model set, but not confirmed to ${who}: ${String(error)}`);
+          }
           return `default model ${model} on ${agent}`;
         });
         return;

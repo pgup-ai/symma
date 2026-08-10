@@ -1685,22 +1685,25 @@ describe('tenancy', () => {
         return served.agent === 'kilo' ? served : undefined;
       }, 'the endpoint serving its agent');
 
+      const keep = (models: Record<string, string>[]): Promise<Response> =>
+        post('/api/slack/roster', { agent: 'kilo', models });
       assert.equal(
         (
-          await post('/api/slack/roster', {
-            agent: 'kilo',
-            models: [
-              { modelId: 'gpt-5.6-sol[high]', name: 'sol' },
-              // Dropped rather than refusing the whole roster: what an agent
-              // advertises is its own business, and one unrenderable entry must
-              // not cost the member every other model they have.
-              { modelId: 'bad"id', name: 'no' },
-            ],
-          })
+          await keep([
+            { modelId: 'gpt-5.6-sol[high]', name: 'sol' },
+            { modelId: 'mini[low]', name: 'mini' },
+            // Dropped rather than refusing the whole roster: what an agent
+            // advertises is its own business, and one unrenderable entry must
+            // not cost the member every other model they have.
+            { modelId: 'bad"id', name: 'no' },
+          ])
         ).status,
         200,
       );
-      assert.deepEqual((await ask()).models, [{ modelId: 'gpt-5.6-sol[high]', name: 'sol' }]);
+      assert.deepEqual((await ask()).models, [
+        { modelId: 'gpt-5.6-sol[high]', name: 'sol' },
+        { modelId: 'mini[low]', name: 'mini' },
+      ]);
       // No thread named, so no turn is about to run: a home tab opened all day
       // must not mint a credential each time it renders.
       assert.equal((await ask()).token, undefined);
@@ -1751,6 +1754,36 @@ describe('tenancy', () => {
       );
       assert.equal((await ask(fresh)).model, 'gpt-5.6-sol[high]');
       assert.equal((await ask()).model, 'mini[low]', 'the thread pick is not the member default');
+
+      // And the floor stayed a floor: had it been written into the row on that
+      // first ask, it would satisfy the inheritance query from then on and the
+      // next thread in this root would keep serving it after the member moved on.
+      const pool = new Pool({ connectionString: url });
+      try {
+        assert.equal(
+          (
+            await pool.query(
+              `SELECT 1 FROM conversations WHERE user_id = $1 AND model_id IS NOT NULL`,
+              [ann.owner],
+            )
+          ).rows.length,
+          1,
+          'only the thread that picked for itself holds a model',
+        );
+      } finally {
+        await pool.end();
+      }
+
+      // A default the agent stopped offering is not served: the picker drops a
+      // current id that left the roster, so serving it would run turns on a
+      // model the member is looking at an empty selector for.
+      assert.equal((await keep([{ modelId: 'gpt-5.6-sol[high]', name: 'sol' }])).status, 200);
+      assert.equal((await ask()).model, undefined);
+      assert.equal(
+        (await ask(fresh)).model,
+        'gpt-5.6-sol[high]',
+        'a pick of the thread’s own is untouched by this',
+      );
 
       assert.equal(
         (await post('/api/slack/default-model', { agent: 'kilo', model: null })).status,
