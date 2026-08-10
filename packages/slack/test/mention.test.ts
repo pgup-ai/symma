@@ -41,6 +41,7 @@ function harness(over: {
   const posts: Posted[] = [];
   const links: string[] = [];
   const turns: Record<string, unknown>[] = [];
+  const closed: string[] = [];
   const deps: MentionDeps = {
     log: () => {},
     find: () => Promise.resolve(over.existing),
@@ -54,6 +55,10 @@ function harness(over: {
       posts.push({ channel, text, ...(threadTs ? { threadTs } : {}) });
       return Promise.resolve({ channel: 'D-nel', ts: '200.0' });
     },
+    finish: (conversation, turn) => {
+      closed.push(`${conversation}/${turn}`);
+      return Promise.resolve();
+    },
     turn: (spec) => {
       turns.push(spec);
       return Promise.resolve({
@@ -66,7 +71,7 @@ function harness(over: {
       });
     },
   };
-  return { deps, posts, turns, links };
+  return { deps, posts, turns, links, closed };
 }
 
 describe('app_mention', () => {
@@ -100,6 +105,19 @@ describe('app_mention', () => {
     assert.equal(turns[0]!.slackEventId, 'Ev-1');
   });
 
+  it('leaves no turn running behind it, in any of the ways it can end', async () => {
+    // A mention runs nothing — it opens the thread and waits — so the row it
+    // took is this event's idempotency record. Left open it reads as work in
+    // flight, and the member's first message in the thread they were just
+    // handed is refused as busy until the stale window retires it.
+    const existing = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
+    for (const over of [{}, { existing }, { rootThread: '999.0' }]) {
+      const { deps, closed } = harness(over);
+      await handleMention(MENTION, deps);
+      assert.deepEqual(closed, ['conv-1/turn-1'], JSON.stringify(over));
+    }
+  });
+
   it('still hands the thread over when Slack will not give it a link', async () => {
     // The link is how a member gets back to the channel, not why the handoff
     // happens.
@@ -130,7 +148,7 @@ describe('app_mention', () => {
     // The turn is recorded before anything is posted, so a redelivery that the
     // gateway has already seen produces silence rather than a second message.
     const existing = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
-    const { deps, posts, turns, links } = harness({ existing });
+    const { deps, posts, turns, links, closed } = harness({ existing });
     // The gateway answers with no turn, which is a Slack event it has recorded
     // before.
     deps.turn = (spec) => {
@@ -139,6 +157,7 @@ describe('app_mention', () => {
     };
     assert.equal(await handleMention(MENTION, deps), 'already handled');
     assert.deepEqual(posts, []);
+    assert.deepEqual(closed, [], 'nothing to close: the gateway kept the first one');
     assert.equal(turns.length, 1, 'it still asked, which is how it found out');
     assert.deepEqual(links, [], 'and paid Slack for nothing it was going to post');
   });

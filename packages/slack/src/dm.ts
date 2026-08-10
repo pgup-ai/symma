@@ -416,7 +416,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   if (refused === 'busy') {
     await deps.post(
       conversation.dmChannel,
-      'Still working on your last one — send this again when it lands.',
+      'Still on your previous message in this thread — send this again when that lands. A new thread here runs alongside it.',
       conversation.rootThread,
     );
     return 'still working';

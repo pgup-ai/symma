@@ -27,6 +27,11 @@ export interface MentionDeps {
     rootThread: string;
     slackEventId: string;
   }) => Promise<{ conversation: ConversationRef; turn?: string }>;
+  /** Closes the row `turn` opened. A mention runs nothing — it opens the thread
+   * and waits — so the row is this event's idempotency record and nothing else.
+   * Left open it is a turn in flight to every later check, and the member's
+   * first message in the thread they were just handed is refused as busy. */
+  finish: (conversation: string, turn: string, status: 'completed') => Promise<void>;
   /** Read only to find out whether the channel can be read at all: §4 wants that
    * said out loud, and a member who has to type first to hear it has already been
    * let down. What the thread says is the turn's to fetch, when there is one. */
@@ -105,6 +110,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
       slackEventId: mention.eventId,
     });
     if (!turn) return 'already handled';
+    await deps.finish(existing.id, turn, 'completed');
     await deps.post(existing.dmChannel, ALREADY, existing.rootThread);
     return 'continued';
   }
@@ -132,9 +138,11 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
       root.ts,
     );
     if (!turn) return 'already handled';
+    await deps.finish(conversation.id, turn, 'completed');
     await deps.post(conversation.dmChannel, ALREADY, conversation.rootThread);
     return 'adopted';
   }
   if (!turn) return 'already handled';
+  await deps.finish(conversation.id, turn, 'completed');
   return 'opened';
 }

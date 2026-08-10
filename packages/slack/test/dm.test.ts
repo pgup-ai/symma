@@ -327,7 +327,10 @@ describe('dm message', () => {
       ),
       'still working',
     );
-    assert.match(posts[0]!.text, /Still working on your last one/);
+    // Scoped out loud: the rule is per thread, and a member reading "still
+    // working" in a thread they just opened has no way to tell what is running
+    // or that anything else can run beside it.
+    assert.match(posts[0]!.text, /in this thread/);
     assert.deepEqual(runs, []);
     // And it costs the gateway no credential to find that out.
     assert.equal(asked(), 0);
