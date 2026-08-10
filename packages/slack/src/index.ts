@@ -260,10 +260,12 @@ const depsFor = (user: string) => {
         `slack-${conversation}`,
         log,
       );
-      // Handed on where a picker outside a thread can reach it. A roster is only
-      // ever learned by running, so this turn is the only one that can teach the
-      // next pick what there is to pick from. Fail-open: the answer is in hand,
-      // and a refusal is said out loud rather than read as a roster kept.
+      // Handed on where a picker outside a thread can reach it: a roster is only
+      // learned by running, so this turn is the only one that can teach the next
+      // pick what there is to pick from. The length test decides nothing —
+      // `driveAcpSession` reports no roster rather than an empty one — so this
+      // cannot clear models the agent still offers. The answer is already in
+      // hand, so a refusal here is a log line rather than a failed turn.
       if (models?.availableModels.length)
         await send('/api/slack/roster', { user, agent, models: models.availableModels })
           .then((res) => {
