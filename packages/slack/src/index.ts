@@ -17,9 +17,16 @@ import {
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import type { SlackFile } from './attachments.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
+import { homeBlocks, modelPrompt } from './home.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
-import { slackApi, MODE_ACTION, MODEL_ACTION, SHARE_ACTION } from './slack-api.js';
+import {
+  slackApi,
+  DEFAULT_MODEL_ACTION,
+  MODE_ACTION,
+  MODEL_ACTION,
+  SHARE_ACTION,
+} from './slack-api.js';
 import { readTurnTarget } from './turn-target.js';
 import { socketMode } from './socket-mode.js';
 
@@ -65,14 +72,42 @@ function gatewayClient(base: string, token: string, team: string) {
   };
 }
 
-async function reply(responseUrl: string, text: string): Promise<void> {
+/** A picker selection, read back the way `pickerOption` minted it. Slack posts
+ * what it was handed, and what it was handed came from here — so anything that
+ * does not parse is not a pick this bot made. */
+function readPick(value: string): { c?: string; m?: string; a?: string } {
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+  const { c, m, a } = raw;
+  return {
+    ...(typeof c === 'string' ? { c } : {}),
+    ...(typeof m === 'string' ? { m } : {}),
+    ...(typeof a === 'string' ? { a } : {}),
+  };
+}
+
+async function reply(
+  responseUrl: string,
+  message: { text: string; blocks?: Record<string, unknown>[]; replace?: boolean },
+): Promise<void> {
   // Ephemeral without exception. A pairing code is a credential, and `/connect`
   // can be run in any channel the app is in — an in_channel reply would put one
   // in front of everybody who can read it.
   const res = await fetch(responseUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ response_type: 'ephemeral', text }),
+    body: JSON.stringify({
+      response_type: 'ephemeral',
+      text: message.text,
+      ...(message.blocks ? { blocks: message.blocks } : {}),
+      // A pick made on the picker replaces it, so what is on screen is what is
+      // stored — one ephemeral message that is right, not two that disagree.
+      ...(message.replace ? { replace_original: true } : {}),
+    }),
     signal: AbortSignal.timeout(10_000),
   });
   // Slack answers 200 with an error body for some failures, but a non-2xx is
@@ -102,6 +137,11 @@ const mint = async (slackUser: string): Promise<MintResult> => {
 };
 
 const api = slackApi(botToken, { log });
+
+/** What `/model` and the home tab render: the turn route without a turn, which
+ * is what keeps a picker from minting a credential every time it is looked at. */
+const memberTarget = async (user: string): Promise<TurnTarget | undefined> =>
+  readTurnTarget(await ask<Partial<TurnTarget>>('/api/slack/endpoint', { user }));
 
 /**
  * Runs a handler and makes sure the member hears about it either way.
@@ -220,6 +260,13 @@ const depsFor = (user: string) => {
         `slack-${conversation}`,
         log,
       );
+      // Handed on where a picker outside a thread can reach it. A roster is only
+      // ever learned by running, so this turn is the only one that can teach the
+      // next pick what there is to pick from. Fail-open: the answer is in hand.
+      if (models?.availableModels.length)
+        await send('/api/slack/roster', { user, agent, models: models.availableModels }).catch(
+          (error: unknown) => log(`roster not kept: ${String(error)}`),
+        );
       return {
         text,
         notices,
@@ -326,6 +373,19 @@ const connection = socketMode({
         );
         return;
       }
+      if (event?.type === 'app_home_opened') {
+        // Fires for the messages tab too, which is not ours to publish into.
+        if ((event as { tab?: unknown }).tab !== 'home' || typeof event.user !== 'string') return;
+        const who = event.user;
+        try {
+          await api.publishHome(who, homeBlocks(await memberTarget(who)));
+        } catch (error) {
+          // Logged, not announced: a home tab that failed to render is not worth
+          // a DM about it, and the next open renders it again anyway.
+          log(`home for ${who} failed: ${String(error)}`);
+        }
+        return;
+      }
       if (event?.type !== 'app_mention') return;
       if (
         typeof eventId !== 'string' ||
@@ -349,16 +409,43 @@ const connection = socketMode({
       return;
     }
     if (envelope.type === 'interactive') {
-      const { user, channel, message, actions } = envelope.payload as {
+      const {
+        user,
+        channel,
+        message,
+        actions,
+        response_url: responseUrl,
+      } = envelope.payload as {
         user?: { id?: unknown };
         channel?: { id?: unknown };
         message?: { ts?: unknown; text?: unknown; thread_ts?: unknown };
+        response_url?: unknown;
         actions?: {
           action_id?: unknown;
           value?: unknown;
           selected_option?: { value?: unknown };
         }[];
       };
+      // The member's own default, from `/model` or the home tab. The home tab is
+      // not a channel, so this is answered where it was pressed.
+      const asDefault = actions?.find((a) => a.action_id === DEFAULT_MODEL_ACTION)?.selected_option
+        ?.value;
+      if (typeof asDefault === 'string') {
+        const who = user?.id;
+        const { m: model, a: agent } = readPick(asDefault);
+        if (typeof who !== 'string' || !model || !agent) return;
+        await announcing(who, 'default model', async () => {
+          await ask('/api/slack/default-model', { user: who, agent, model });
+          const said = `◎ Model set: \`${model}\` — your next conversation starts on it.`;
+          // `/model` leaves a response URL to answer on; the home tab leaves
+          // none, so it is republished with the pick now standing in it.
+          if (typeof responseUrl === 'string')
+            await reply(responseUrl, { text: said, replace: true });
+          else await api.publishHome(who, homeBlocks(await memberTarget(who)));
+          return `default model ${model} on ${agent}`;
+        });
+        return;
+      }
       // Either picker: the selection names a conversation and a chosen id, and
       // whether that conversation is this member's is the gateway's check —
       // the payload claims nothing the store does not verify.
@@ -374,14 +461,8 @@ const connection = socketMode({
         const thread = typeof message?.thread_ts === 'string' ? message.thread_ts : messageTs;
         if (typeof who !== 'string' || typeof where !== 'string' || typeof thread !== 'string')
           return;
-        let selection: { c?: unknown; m?: unknown; a?: unknown };
-        try {
-          selection = JSON.parse(picked) as { c?: unknown; m?: unknown; a?: unknown };
-        } catch {
-          return;
-        }
-        const { c: conversationId, m: chosenId } = selection;
-        if (typeof conversationId !== 'string' || typeof chosenId !== 'string') return;
+        const { c: conversationId, m: chosenId, a: pickedUnder } = readPick(picked);
+        if (!conversationId || !chosenId) return;
         await announcing(who, choice, async () => {
           await ask(`/api/slack/${choice}`, {
             user: who,
@@ -389,7 +470,7 @@ const connection = socketMode({
             [choice]: chosenId,
             // Whose roster the model came from; the gateway serves it back only
             // to that agent, since an id means nothing under another.
-            ...(typeof selection.a === 'string' ? { agent: selection.a } : {}),
+            ...(pickedUnder ? { agent: pickedUnder } : {}),
           });
           // Writes named out loud: a mode is their machine's permission tier,
           // not a cosmetic setting. A model is only ever a preference.
@@ -440,13 +521,26 @@ const connection = socketMode({
       return;
     }
     if (envelope.type !== 'slash_commands') return;
-    const command = envelope.payload as { command?: unknown; response_url?: unknown };
-    if (command.command !== '/connect') return;
+    const command = envelope.payload as {
+      command?: unknown;
+      response_url?: unknown;
+      team_id?: unknown;
+      user_id?: unknown;
+    };
     // Slack signs this URL and it is the only place the answer belongs — not a
     // channel inferred from the payload, and not a DM we would have to guess at.
     if (typeof command.response_url !== 'string') return;
+    if (command.command === '/model') {
+      // Pinned to the installing workspace for the reason `/connect` is: a Slack
+      // Connect guest arrives with their own `team_id`, and this answers with
+      // what a member of *this* team has paired.
+      if (command.team_id !== team || typeof command.user_id !== 'string') return;
+      await reply(command.response_url, modelPrompt(await memberTarget(command.user_id)));
+      return;
+    }
+    if (command.command !== '/connect') return;
     const outcome = await runConnect(envelope.payload, team, mint);
-    await reply(command.response_url, connectMessage(outcome));
+    await reply(command.response_url, { text: connectMessage(outcome) });
     // After the reply, so the line means the member was told rather than that
     // the gateway answered. A failed delivery throws instead, which the
     // socket's handler catch reports.

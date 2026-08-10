@@ -64,6 +64,9 @@ export interface SlackApi {
    * public link — it needs the bot token as a bearer header, which is why this
    * lives here and not in whatever wants the bytes. */
   fetchFile: (url: string, maxBytes: number) => Promise<FetchedFile>;
+  /** The app's home tab. Republished on every open, because it renders gateway
+   * state and nothing else would ever tell it to refresh. */
+  publishHome: (user: string, blocks: Record<string, unknown>[]) => Promise<void>;
   /** Publishes into the source thread. Returns why it could not rather than
    * throwing: §5 keeps the answer in the DM and names which of these happened,
    * and a publication that cannot land is not a lost answer. */
@@ -180,6 +183,9 @@ export const SHARE_ACTION = 'share_to_thread';
 /** The picker action ids, shared with their handlers. */
 export const MODE_ACTION = 'set_conversation_mode';
 export const MODEL_ACTION = 'set_conversation_model';
+/** A model pick with no conversation under it: `/model` and the home tab, which
+ * set what the member's *next* conversation starts on. */
+export const DEFAULT_MODEL_ACTION = 'set_default_model';
 
 /** Slack's static_select caps: options per select, characters per value. */
 const PICKER_OPTION_LIMIT = 100;
@@ -189,7 +195,9 @@ const PICKER_VALUE_LIMIT = 150;
  * must deep-equal one of `options` for Slack to accept it, so both are built
  * here and nowhere else. */
 const pickerOption = (
-  conversation: string,
+  /** Absent where the pick belongs to the member rather than to one thread —
+   * `/model` and the home tab, which have no conversation to name. */
+  conversation: string | undefined,
   id: string,
   label: string,
   about?: string,
@@ -200,7 +208,11 @@ const pickerOption = (
   ...(about ? { description: { type: 'plain_text' as const, text: about.slice(0, 75) } } : {}),
   // `a` is whose roster this came from — a model id means nothing under another
   // agent, so the selection carries where it was offered.
-  value: JSON.stringify({ c: conversation, m: id, ...(agent ? { a: agent } : {}) }),
+  value: JSON.stringify({
+    ...(conversation ? { c: conversation } : {}),
+    m: id,
+    ...(agent ? { a: agent } : {}),
+  }),
 });
 
 /** A select, bounded to what Slack will post and what can round-trip: an id
@@ -209,7 +221,7 @@ const pickerOption = (
  * answer it rides on. A current choice the bounds dropped just loses its
  * highlight; the placeholder stands in. */
 function rosterSelect(
-  conversation: string,
+  conversation: string | undefined,
   action: string,
   placeholder: string,
   entries: { id: string; label: string; about?: string; safe: boolean }[],
@@ -255,8 +267,8 @@ const modeSelect = (conversation: string, modes: SessionModes): Record<string, u
     modes.currentModeId,
   );
 
-const modelSelect = (
-  conversation: string,
+export const modelSelect = (
+  conversation: string | undefined,
   models: SessionModels,
   agent: string,
 ): Record<string, unknown>[] =>
@@ -267,7 +279,7 @@ const modelSelect = (
     ? []
     : rosterSelect(
         conversation,
-        MODEL_ACTION,
+        conversation ? MODEL_ACTION : DEFAULT_MODEL_ACTION,
         'Model',
         models.availableModels.map((model) => ({
           id: model.modelId,
@@ -529,6 +541,12 @@ export function slackApi(
       } catch {
         /* the share landed; the button outliving it is the smaller problem */
       }
+    },
+    async publishHome(user, blocks) {
+      // Through `apiCall` rather than the typed `views.publish`: that one wants
+      // the SDK's own block union, and every block this file builds is the loose
+      // shape `chat.postMessage` takes. Same client, same retries, no cast.
+      await quick.apiCall('views.publish', { user_id: user, view: { type: 'home', blocks } });
     },
     async mark(channel, ts, state) {
       // Losing a mark must not cost the answer it hints at — but a scope that

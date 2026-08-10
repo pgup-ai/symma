@@ -57,7 +57,12 @@ the resume and the driver drops whichever does not apply. A conversation runs
 one turn at a time — two at once fork the session that carries it, and neither
 half then holds the whole thread — so a second message waits and is told so. An answer leaves the DM only when the member
 presses the button (§5): the gateway states where it may go, the shared post
-names who approved it, and a destination gone bad keeps the answer here.
+names who approved it, and a destination gone bad keeps the answer here. The
+mode and model pickers ride the answers, so both are chosen mid-thread; the
+model is also choosable before there is a thread, through `/model` and the home
+tab, because a roster is learned by running and a member who has to ask first to
+pick has already asked on the wrong model. The gateway keeps the roster from the
+last turn and the member's own default under it.
 
 | package           | what it is                                                                                                                                                                         | depends on                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
@@ -65,7 +70,7 @@ names who approved it, and a destination gone bad keeps the answer here.
 | `@symma/gateway`  | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol                    |
 | `symma`           | the companion CLI — attach loop, agent detection, workspace allowlist, checkout mechanism, local spawn/lifecycle, pairing, login service                                           | protocol                    |
 | `@symma/client`   | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol                    |
-| `@symma/slack`    | the bot — Socket Mode, `/connect`, mentions, DM turns, presence copy; no agent credentials, spawns nothing                                                                         | client, protocol, Slack SDK |
+| `@symma/slack`    | the bot — Socket Mode, `/connect`, `/model`, home tab, mentions, DM turns, presence copy; no agent credentials, spawns nothing                                                     | client, protocol, Slack SDK |
 
 `@symma/client` is what jbot-review consumes at runtime, and now what the bot
 does too. It exists so neither imports gateway internals to dial a gateway — the

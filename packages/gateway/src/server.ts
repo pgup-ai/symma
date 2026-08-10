@@ -928,7 +928,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         mode: modeCapable ? (held.mode ?? undefined) : undefined,
         model: row?.modelAgent === agent ? (held.model ?? undefined) : undefined,
       };
-      const serve: Partial<Record<ConversationChoice, string>> = {};
+      // The roster travels on every turn so the pickers outside a conversation —
+      // `/model`, the home tab — have something to render. `chosen` is the floor:
+      // overwritten below by the thread's own pick or the one it inherits.
+      const { roster, chosen } = await store.modelsFor(owner, agent);
+      const serve: Partial<Record<ConversationChoice, string>> = chosen ? { model: chosen } : {};
       // Read before the rebind below: once this thread's row names the new root,
       // its own not-yet-shed picks satisfy the inheritance query and follow it in.
       if (workspace && conversation) {
@@ -982,18 +986,52 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           })
         : undefined;
 
-      // Minted here rather than on every presence check: this route is asked
-      // once per turn that is going to run, so a refusal costs no credential.
-      const token = await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES);
+      // Only for a caller naming the thread it is about to run: the pickers
+      // outside a conversation ask this same route to render, and a home tab
+      // opened all day must not mint a turn credential per look.
+      const token = conversation
+        ? await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES)
+        : undefined;
       return sendJson(res, 200, {
         ...selected,
         agent,
-        token,
+        ...(token ? { token } : {}),
         ...(workspace ? { workspace: workspace.id, workspaceLabel: workspace.label } : {}),
         ...(mode ? { mode } : {}),
         ...(serve.model ? { model: serve.model } : {}),
+        ...(roster.length ? { models: roster } : {}),
         ...(resume ? { resume } : {}),
       });
+    }
+    if (url.pathname === '/api/slack/roster') {
+      // Posted after a turn, which is the only thing that learns what an agent
+      // offers. Kept so the next pick does not have to wait for the turn after.
+      const { agent, models } = body as { agent?: unknown; models?: unknown };
+      if (!isSafeId(agent) || !Array.isArray(models))
+        return sendJson(res, 400, { error: 'request' });
+      const roster = models.flatMap((entry) => {
+        const { modelId, name, description } = (entry ?? {}) as Record<string, unknown>;
+        return isSafeModelId(modelId)
+          ? [
+              {
+                modelId,
+                ...(str(name) ? { name } : {}),
+                ...(str(description) ? { description } : {}),
+              },
+            ]
+          : [];
+      });
+      await store.rememberRoster(owner, agent, roster);
+      return sendJson(res, 200, {});
+    }
+    if (url.pathname === '/api/slack/default-model') {
+      // The pick a member makes with no thread open. `null` clears it, which is
+      // how they go back to whatever their agent is configured for.
+      const { agent, model } = body as { agent?: unknown; model?: unknown };
+      if (!isSafeId(agent) || (model !== null && !isSafeModelId(model)))
+        return sendJson(res, 400, { error: 'request' });
+      await store.setDefaultModel(owner, agent, model);
+      return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/mode' || url.pathname === '/api/slack/model') {
       const choice: ConversationChoice = url.pathname.endsWith('model') ? 'model' : 'mode';

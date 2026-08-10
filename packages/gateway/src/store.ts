@@ -6,6 +6,8 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 
+import type { SessionModel } from '@symma/protocol';
+
 /** `(workspace_id, slack_user_id)` collapsed to the users row it names. */
 export type Owner = string;
 
@@ -222,6 +224,17 @@ export interface Store {
     /** Only a model this agent offered is worth inheriting. */
     agent?: string,
   ): Promise<string | undefined>;
+  /** Keeps what an agent offered, so a member can pick from it before the turn
+   * that would otherwise be the first to learn it. Replaces rather than merges:
+   * a roster is what the agent offers now, and an entry it has dropped is one
+   * nothing should still be able to choose. */
+  rememberRoster(owner: Owner, agent: string, roster: SessionModel[]): Promise<void>;
+  /** A member's standing pick for an agent, under everything a conversation or
+   * a workspace says. Absent leaves the agent on whatever it is configured for. */
+  setDefaultModel(owner: Owner, agent: string, modelId: string | null): Promise<void>;
+  /** What this member can pick from for an agent, and what they last chose to
+   * apply everywhere. Empty for an agent they have never run. */
+  modelsFor(owner: Owner, agent: string): Promise<{ roster: SessionModel[]; chosen?: string }>;
   /** The agent session this conversation last ran in, or undefined when it ran
    * somewhere this one cannot reach. A session id means nothing off the machine
    * that minted it, and little under a different agent or in another directory,
@@ -722,6 +735,29 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return row?.value;
     },
+    async rememberRoster(owner, agent, roster) {
+      await pool.query(
+        `INSERT INTO agent_models (user_id, agent, roster) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, agent)
+         DO UPDATE SET roster = excluded.roster`,
+        [owner, agent, JSON.stringify(roster)],
+      );
+    },
+    async setDefaultModel(owner, agent, modelId) {
+      await pool.query(
+        `INSERT INTO agent_models (user_id, agent, chosen) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, agent)
+         DO UPDATE SET chosen = excluded.chosen`,
+        [owner, agent, modelId],
+      );
+    },
+    async modelsFor(owner, agent) {
+      const row = await one<{ roster: SessionModel[] | null; chosen: string | null }>(
+        `SELECT roster, chosen FROM agent_models WHERE user_id = $1 AND agent = $2`,
+        [owner, agent],
+      );
+      return { roster: row?.roster ?? [], ...(row?.chosen ? { chosen: row.chosen } : {}) };
+    },
     async resumeFor(owner, conversation, key) {
       // Joined through `conversations` for the owner check: the resume table
       // has no user of its own, and reading one by id alone would answer about
@@ -1043,6 +1079,9 @@ export function localStore(
     bindConversationChoice: needsDatabase,
     shedWorkspaceChoice: needsDatabase,
     lastChoiceFor: needsDatabase,
+    rememberRoster: needsDatabase,
+    setDefaultModel: needsDatabase,
+    modelsFor: needsDatabase,
     conversationForId: needsDatabase,
     recordResume: needsDatabase,
     resumeFor: needsDatabase,

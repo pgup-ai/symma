@@ -17,6 +17,8 @@ describe('turn target', () => {
         workspace: 'ws-1',
         workspaceLabel: 'symma',
         mode: 'agent',
+        model: 'gpt-5.6-sol[high]',
+        models: [{ modelId: 'gpt-5.6-sol[high]' }],
         resume: 'acp-1',
       }),
       {
@@ -28,6 +30,8 @@ describe('turn target', () => {
         workspace: 'ws-1',
         workspaceLabel: 'symma',
         mode: 'agent',
+        model: 'gpt-5.6-sol[high]',
+        models: [{ modelId: 'gpt-5.6-sol[high]' }],
         resume: 'acp-1',
       },
     );

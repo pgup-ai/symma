@@ -1,3 +1,4 @@
+import type { SessionModel } from './acp-protocol.js';
 import { isSafeId } from './ids.js';
 
 export type SendLine = (line: string) => void;
@@ -94,6 +95,10 @@ export interface TurnTarget extends SelectedEndpoint {
   /** The model this conversation runs on, off the agent's own roster; absent
    * leaves the agent's configured default. */
   model?: string;
+  /** What this agent last offered, kept by the gateway from the turn that saw
+   * it. A roster is only ever learned by running, so without this a member has
+   * nothing to pick from until after the question they wanted to pick for. */
+  models?: SessionModel[];
 }
 
 /**
