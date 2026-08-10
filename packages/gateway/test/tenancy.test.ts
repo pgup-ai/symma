@@ -1774,6 +1774,18 @@ describe('tenancy', () => {
         await pool.end();
       }
 
+      // A real roster carries the agent's sentence about each model and runs to
+      // kilobytes; under the pairing cap the whole POST was refused and the
+      // picker never filled, with only a log line on the bot to say so.
+      const wordy = Array.from({ length: 20 }, (_, i) => ({
+        modelId: `gpt-5.6-model-${String(i)}[high]`,
+        name: `Model ${String(i)}`,
+        description: 'What this one is for, in the agent’s own words. '.repeat(6),
+      }));
+      assert.ok(JSON.stringify(wordy).length > 4096, 'the fixture has to exceed the pairing cap');
+      assert.equal((await keep(wordy)).status, 200);
+      assert.deepEqual((await ask()).models, wordy);
+
       // A default the agent stopped offering is not served: the picker drops a
       // current id that left the roster, so serving it would run turns on a
       // model the member is looking at an empty selector for.
