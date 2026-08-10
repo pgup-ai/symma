@@ -234,3 +234,18 @@ ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_id text;
 -- agent's own, and one agent's id handed to another is a turn that fails at
 -- spawn — so a pick is served only back to the agent that offered it.
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model_agent text;
+
+-- What an agent offered a member, and what they want by default (§4). A roster
+-- is only ever learned by running the agent, so without this a member has
+-- nothing to pick from until the turn they wanted to pick for has already run.
+-- `chosen` is the floor under a conversation's own pick.
+--
+-- Keyed without the endpoint: a member with two laptops means the same thing by
+-- "codex on Terra" on both, and an agent's roster does not vary by machine.
+CREATE TABLE IF NOT EXISTS agent_models (
+  user_id text NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  agent   text NOT NULL,
+  roster  jsonb,
+  chosen  text,
+  PRIMARY KEY (user_id, agent)
+);

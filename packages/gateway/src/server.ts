@@ -928,6 +928,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         mode: modeCapable ? (held.mode ?? undefined) : undefined,
         model: row?.modelAgent === agent ? (held.model ?? undefined) : undefined,
       };
+      // The roster travels on every turn so the pickers outside a conversation —
+      // `/model`, the home tab — have something to render.
+      const { roster, chosen } = await store.modelsFor(owner, agent);
       const serve: Partial<Record<ConversationChoice, string>> = {};
       // Read before the rebind below: once this thread's row names the new root,
       // its own not-yet-shed picks satisfy the inheritance query and follow it in.
@@ -970,6 +973,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         }
       }
       const mode = serve.mode;
+      // The member's default, under everything above and kept out of `serve` so
+      // it is never written: a floor in the row stops being a floor, and the next
+      // thread in this root would inherit it after they had moved on. Served only
+      // while the agent still offers it — the picker cannot show a current id
+      // that left the roster, so serving one runs turns on a model they see no
+      // selection for.
+      const model = serve.model ?? (roster.some((m) => m.modelId === chosen) ? chosen : undefined);
 
       // §4's second rung, offered only for the machine, agent and directory the
       // session was minted under — an id means nothing anywhere else, and the
@@ -982,18 +992,52 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           })
         : undefined;
 
-      // Minted here rather than on every presence check: this route is asked
-      // once per turn that is going to run, so a refusal costs no credential.
-      const token = await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES);
+      // Only for a caller naming the thread it is about to run: the pickers
+      // outside a conversation ask this same route to render, and a home tab
+      // opened all day must not mint a turn credential per look.
+      const token = conversation
+        ? await store.mintClientToken(owner, TURN_TOKEN_TTL_MINUTES)
+        : undefined;
       return sendJson(res, 200, {
         ...selected,
         agent,
-        token,
+        ...(token ? { token } : {}),
         ...(workspace ? { workspace: workspace.id, workspaceLabel: workspace.label } : {}),
         ...(mode ? { mode } : {}),
-        ...(serve.model ? { model: serve.model } : {}),
+        ...(model ? { model } : {}),
+        ...(roster.length ? { models: roster } : {}),
         ...(resume ? { resume } : {}),
       });
+    }
+    if (url.pathname === '/api/slack/roster') {
+      // Posted after a turn, which is the only thing that learns what an agent
+      // offers. Kept so the next pick does not have to wait for the turn after.
+      const { agent, models } = body as { agent?: unknown; models?: unknown };
+      if (!isSafeId(agent) || !Array.isArray(models))
+        return sendJson(res, 400, { error: 'request' });
+      const roster = models.flatMap((entry) => {
+        const { modelId, name, description } = (entry ?? {}) as Record<string, unknown>;
+        return isSafeModelId(modelId)
+          ? [
+              {
+                modelId,
+                ...(str(name) ? { name } : {}),
+                ...(str(description) ? { description } : {}),
+              },
+            ]
+          : [];
+      });
+      await store.rememberRoster(owner, agent, roster);
+      return sendJson(res, 200, {});
+    }
+    if (url.pathname === '/api/slack/default-model') {
+      // The pick a member makes with no thread open. `null` clears it, which is
+      // how they go back to whatever their agent is configured for.
+      const { agent, model } = body as { agent?: unknown; model?: unknown };
+      if (!isSafeId(agent) || (model !== null && !isSafeModelId(model)))
+        return sendJson(res, 400, { error: 'request' });
+      await store.setDefaultModel(owner, agent, model);
+      return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/mode' || url.pathname === '/api/slack/model') {
       const choice: ConversationChoice = url.pathname.endsWith('model') ? 'model' : 'mode';

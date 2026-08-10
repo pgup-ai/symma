@@ -801,6 +801,30 @@ describe('acp', () => {
     assert.deepEqual(fake.setModelIds, []);
   });
 
+  it('reports no roster rather than an empty one', async () => {
+    // What a caller keeping the roster depends on: an agent offering nothing
+    // reads as "said nothing about models", not as "offers none". A gateway or
+    // bot that stored an empty roster here would wipe the one it already had.
+    const fake = fakeAgentIo({
+      models: { availableModels: [] },
+      onPrompt: (agent) => {
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'ok' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+    });
+    assert.equal(result.models, undefined);
+  });
+
   it('refuses a mode the agent does not offer, naming the roster', async () => {
     const fake = fakeAgentIo({
       modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },

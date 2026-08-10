@@ -9,7 +9,7 @@
       "always_online": false
     },
     "app_home": {
-      "home_tab_enabled": false,
+      "home_tab_enabled": true,
       "messages_tab_enabled": true,
       "messages_tab_read_only_enabled": false
     },
@@ -17,6 +17,11 @@
       {
         "command": "/connect",
         "description": "Pair a machine with Symma",
+        "should_escape": false
+      },
+      {
+        "command": "/model",
+        "description": "Choose the model your next conversation starts on",
         "should_escape": false
       }
     ]
@@ -45,7 +50,7 @@
     "org_deploy_enabled": false,
     "token_rotation_enabled": false,
     "event_subscriptions": {
-      "bot_events": ["app_mention", "message.im"]
+      "bot_events": ["app_home_opened", "app_mention", "message.im"]
     }
   }
 }

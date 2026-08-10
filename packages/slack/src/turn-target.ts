@@ -27,6 +27,9 @@ export function readTurnTarget(raw: Partial<TurnTarget>): TurnTarget | undefined
     ...(raw.workspaceLabel ? { workspaceLabel: raw.workspaceLabel } : {}),
     ...(raw.mode ? { mode: raw.mode } : {}),
     ...(raw.model ? { model: raw.model } : {}),
+    // What `/model` and the home tab render: they have no run of their own to
+    // learn a roster from, so the gateway's kept copy is all they get.
+    ...(raw.models?.length ? { models: raw.models } : {}),
     ...(raw.resume ? { resume: raw.resume } : {}),
   };
 }

@@ -1129,12 +1129,16 @@ describe('tenancy', () => {
       device: "Zoe's laptop",
     });
     const pool = new Pool({ connectionString: url });
-    const ask = async (user: string): Promise<Record<string, string>> =>
+    const ask = async (user: string, conversation?: string): Promise<Record<string, string>> =>
       (await (
         await fetch(`${base}/api/slack/endpoint`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
-          body: JSON.stringify({ team: 'presence', user }),
+          body: JSON.stringify({
+            team: 'presence',
+            user,
+            ...(conversation ? { conversation } : {}),
+          }),
         })
       ).json()) as Record<string, string>;
     let detach: (() => void) | undefined;
@@ -1179,13 +1183,19 @@ describe('tenancy', () => {
       // except by being told, and an unoffered name is refused anyway.
       assert.equal(live.agent, 'kilo');
 
-      // The credential is the point of the route. The bot holds none of its
-      // own (§6), so this is the whole of how it acts as Zoe — and the earlier
-      // assertions above are `deepEqual`, which is what proves a refusal mints
-      // nothing at all.
+      // Presence is not a turn: the pickers with no thread under them ask this
+      // same route to render, and a home tab opened all day must not mint a
+      // credential per look.
+      assert.equal(live.token, undefined);
+
+      // The credential is the point of the route for a caller that names the
+      // thread it is about to run. The bot holds none of its own (§6), so this
+      // is the whole of how it acts as Zoe — and the earlier assertions above
+      // are `deepEqual`, which is what proves a refusal mints nothing at all.
+      const running = await ask('zoe', 'c-zoe');
       const asZoe = (): Promise<Response> =>
         fetch(`${base}/api/endpoints`, {
-          headers: { authorization: `Bearer ${String(live.token)}` },
+          headers: { authorization: `Bearer ${String(running.token)}` },
         });
       const listed = (await (await asZoe()).json()) as { endpoint: string }[];
       assert.ok(
@@ -1642,6 +1652,144 @@ describe('tenancy', () => {
         return (await ask(first)).workspace === undefined ? off : (off(), undefined);
       }, 'the endpoint reattached offering no root');
       assert.equal((await ask(first)).model, 'mini[low]');
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
+  it('keeps a roster and a member default the pickers outside a thread run on', async () => {
+    const url = pg.getConnectionUri();
+    const ann = await provision(url, { team: 'ws', slackUser: 'ann', endpoint: 'ann-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const post = (path: string, body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'ann', ...body }),
+      });
+    const ask = async (conversation?: string): Promise<Record<string, unknown>> =>
+      (await (
+        await post('/api/slack/endpoint', conversation ? { conversation } : {})
+      ).json()) as Record<string, unknown>;
+    let detach: (() => void) | undefined;
+    try {
+      detach = await attach(
+        ann.endpointToken,
+        'ann-box',
+        ['kilo'],
+        [{ id: 'aaaaaaaaaaaa', label: 'symma' }],
+      );
+      await waitFor(async () => {
+        const served = await ask();
+        return served.agent === 'kilo' ? served : undefined;
+      }, 'the endpoint serving its agent');
+
+      const keep = (models: Record<string, string>[]): Promise<Response> =>
+        post('/api/slack/roster', { agent: 'kilo', models });
+      assert.equal(
+        (
+          await keep([
+            { modelId: 'gpt-5.6-sol[high]', name: 'sol' },
+            { modelId: 'mini[low]', name: 'mini' },
+            // Dropped rather than refusing the whole roster: what an agent
+            // advertises is its own business, and one unrenderable entry must
+            // not cost the member every other model they have.
+            { modelId: 'bad"id', name: 'no' },
+          ])
+        ).status,
+        200,
+      );
+      assert.deepEqual((await ask()).models, [
+        { modelId: 'gpt-5.6-sol[high]', name: 'sol' },
+        { modelId: 'mini[low]', name: 'mini' },
+      ]);
+      // No thread named, so no turn is about to run: a home tab opened all day
+      // must not mint a credential each time it renders.
+      assert.equal((await ask()).token, undefined);
+      assert.equal(typeof (await ask('nope')).token, 'string');
+
+      assert.equal(
+        (await post('/api/slack/default-model', { agent: 'kilo', model: 'mini[low]' })).status,
+        200,
+      );
+      assert.equal((await ask()).model, 'mini[low]');
+      // Under the agent it was picked for, and nowhere else — the same rule the
+      // per-thread pick follows, for the same reason.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(ann.endpointToken, 'ann-box', ['codex']);
+        return (await ask()).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving codex');
+      assert.equal((await ask()).model, undefined);
+      assert.equal((await ask()).models, undefined);
+
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(
+          ann.endpointToken,
+          'ann-box',
+          ['kilo'],
+          [{ id: 'aaaaaaaaaaaa', label: 'symma' }],
+        );
+        return (await ask()).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the endpoint reattached serving kilo');
+
+      // The default is a floor, not an override: a thread with a pick of its own
+      // keeps it, and one without starts on the default.
+      const fresh = (await store.openConversation(ann.owner, {
+        dmChannel: 'D-ann',
+        rootThread: '1.0',
+      }))!.id;
+      assert.equal((await ask(fresh)).model, 'mini[low]');
+      assert.equal(
+        (
+          await post('/api/slack/model', {
+            conversation: fresh,
+            model: 'gpt-5.6-sol[high]',
+            agent: 'kilo',
+          })
+        ).status,
+        200,
+      );
+      assert.equal((await ask(fresh)).model, 'gpt-5.6-sol[high]');
+      assert.equal((await ask()).model, 'mini[low]', 'the thread pick is not the member default');
+
+      // And the floor stayed a floor: had it been written into the row on that
+      // first ask, it would satisfy the inheritance query from then on and the
+      // next thread in this root would keep serving it after the member moved on.
+      const pool = new Pool({ connectionString: url });
+      try {
+        assert.equal(
+          (
+            await pool.query(
+              `SELECT 1 FROM conversations WHERE user_id = $1 AND model_id IS NOT NULL`,
+              [ann.owner],
+            )
+          ).rows.length,
+          1,
+          'only the thread that picked for itself holds a model',
+        );
+      } finally {
+        await pool.end();
+      }
+
+      // A default the agent stopped offering is not served: the picker drops a
+      // current id that left the roster, so serving it would run turns on a
+      // model the member is looking at an empty selector for.
+      assert.equal((await keep([{ modelId: 'gpt-5.6-sol[high]', name: 'sol' }])).status, 200);
+      assert.equal((await ask()).model, undefined);
+      assert.equal(
+        (await ask(fresh)).model,
+        'gpt-5.6-sol[high]',
+        'a pick of the thread’s own is untouched by this',
+      );
+
+      assert.equal(
+        (await post('/api/slack/default-model', { agent: 'kilo', model: null })).status,
+        200,
+      );
+      assert.equal((await ask()).model, undefined);
     } finally {
       detach?.();
       await store.close();
