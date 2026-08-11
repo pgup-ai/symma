@@ -221,6 +221,11 @@ function pickers(
  * real fetch — but finite. */
 const LINKS_MS = 8_000;
 
+/** The workspace lookup's slice of it. One `auth.test`, cached after it lands,
+ * so a slow one is a first message on a degraded Slack — and bounding it to the
+ * whole budget would leave the links it is there to check with none. */
+const HOST_MS = 2_000;
+
 /**
  * Stops waiting on `work` after `ms`, without stopping `work` — the Slack SDK
  * takes no signal, and a request finishing into a void costs nothing. Two jobs
@@ -501,25 +506,33 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   }
 
   // First claim on the budget: the link is what this message is about, where
-  // the catch-up below is background. Skipped outright for a message with no
-  // link in it, which is nearly all of them — `host()` is an API call the first
-  // time, and no ordinary turn should pay for a feature it is not using.
+  // the catch-up below is background. Nothing at all for a message with no link
+  // in it, which is nearly all of them — the reads here are API calls, and no
+  // ordinary turn should pay for a feature it is not using.
   //
   // One deadline over the whole resolution, permission checks included — they
   // are Slack calls too, and five quick reads or one that never answers are the
   // same wait to a member watching for the acknowledgement.
+  const links = slackLinks(message.text);
   const by = Date.now() + LINKS_MS;
   const within = <T>(read: Promise<T>): Promise<T | 'too slow'> => before(by - Date.now(), read);
+  // Bounded like every other Slack call here, and to a slice rather than the
+  // lot: unbounded it delays the acknowledgement past the ceiling, and given
+  // the ceiling it spends what the links were for. Unknown is a state this
+  // already has words for — the pin comes off, and the access check below is
+  // what was keeping anyone honest anyway.
+  const found = links.length ? await before(HOST_MS, deps.host()) : undefined;
+  const known = found === 'too slow' ? undefined : found;
   // One scan of this member's conversations for the whole message, however many
   // links it holds: their list is short, but reading it once per link is
   // latency in front of the acknowledgement buying no new answer.
   let mine: Promise<Set<string>> | undefined;
-  const linked = slackLinks(message.text).length
+  const linked = links.length
     ? await resolveLinks(message.text, {
         budgetBytes: deps.budgetBytes,
         threadReplies: deps.threadReplies,
         log: deps.log,
-        host: await deps.host(),
+        ...(known ? { host: known } : {}),
         // What this member could have opened themselves — never what the bot
         // can see, which is the union of everyone's invitations. A public
         // channel is theirs by definition; their own DM with it arrived this

@@ -134,9 +134,13 @@ export async function resolveLinks(
     // not knowing whether the member may read it is not permission, and this
     // gate is the whole reason the bot's reach is not handed to whoever pastes
     // a link.
-    const allowed = await deps
-      .reading(deps.mayRead(link.channel))
-      .catch(() => 'not yours' as const);
+    const allowed = await deps.reading(deps.mayRead(link.channel)).catch((error: unknown) => {
+      // Still refused, but reported as the bot's problem, which it is: a
+      // check that threw is no evidence about *them*, and "not yours" would
+      // send a member auditing their membership over a missing scope.
+      deps.log(`link access unknown: ${String(error)}`);
+      return 'unreadable' as const;
+    });
     if (allowed !== 'yes') {
       miss(allowed);
       continue;

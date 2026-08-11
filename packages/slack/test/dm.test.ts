@@ -783,6 +783,32 @@ describe('dm message', () => {
     assert.equal(posts.at(-1)!.text, 'the answer');
   });
 
+  it('does not let the workspace lookup eat the links it is there to check', async () => {
+    // `auth.test` is a Slack call like the rest, and it runs before the first
+    // link is looked at — unbounded, a degraded Slack spends the whole budget
+    // there and every link comes back "too slow".
+    const url = 'https://acme.slack.com/archives/C0LINKED000/p1786400100000001';
+    const { deps, runs } = harness({
+      existing: CONVERSATION,
+      channel: [{ ts: '1786400100.000001', author: 'Ola', text: 'the trace is in prod-42' }],
+    });
+    deps.host = () => new Promise(() => undefined);
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: `continue from <${url}>`,
+      },
+      deps,
+    );
+    // The pin comes off, which is what an unknown host already meant — and the
+    // link is still fetched, because the access check is what guards it.
+    assert.match(runs[0]!.prompt, /the trace is in prod-42/);
+  });
+
   it('spends nothing on a message with no link in it', async () => {
     // Which is nearly every message: the host read is an API call the first
     // time, and no ordinary turn should pay for a feature it is not using.

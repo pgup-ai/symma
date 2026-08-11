@@ -181,15 +181,18 @@ describe('slack links', () => {
     assert.deepEqual(got.missed, [{ url: theirs, why: 'not yours' }]);
   });
 
-  it('refuses a link when it cannot tell whether the member may read it', async () => {
+  it('refuses a link it cannot check, without blaming the member for it', async () => {
     // This gate is the whole reason the bot's reach is not handed to whoever
-    // pastes a link, so not knowing has to mean no. A missing scope answering
-    // by throwing must not read as permission.
+    // pastes a link, so not knowing has to mean no — a missing scope answering
+    // by throwing must not read as permission. But it is no evidence about
+    // *them* either: "you are not in that channel" would send a member auditing
+    // their own membership over a scope the app is missing.
     const url = link('C0BMCR1FGU9', '1786400100.000001');
-    const { deps, asked } = resolver({ mayReadThrows: true });
+    const { deps, asked, logged } = resolver({ mayReadThrows: true });
     const got = await resolveLinks(`<${url}>`, deps);
-    assert.deepEqual(asked, []);
-    assert.deepEqual(got.missed, [{ url, why: 'not yours' }]);
+    assert.deepEqual(asked, [], 'refused, whatever it is called');
+    assert.deepEqual(got.missed, [{ url, why: 'unreadable' }]);
+    assert.equal(logged.length, 1, 'and the reason it could not tell is not swallowed');
   });
 
   it('does not let a refusal spend the fetch allowance', async () => {
