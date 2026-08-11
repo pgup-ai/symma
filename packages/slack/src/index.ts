@@ -148,14 +148,24 @@ const memberTarget = async (user: string): Promise<TurnTarget | undefined> =>
 /** The home tab, as it stands for this member right now. The linking read is
  * allowed to fail on its own — a gateway that predates it 404s, and the tab is
  * a machine, an agent and a model besides. Losing all of that to the one card
- * that might not be on offer anyway is the wrong trade. */
+ * that might not be on offer anyway is the wrong trade.
+ *
+ * Read as a status rather than through `ask`, for the reason pairing does: a
+ * 404 is that gateway saying it has no such route, which is a fact about the
+ * deployment and not an error to repeat on every open. Anything else is. */
 const home = async (user: string): Promise<Record<string, unknown>[]> => {
   const [target, linking] = await Promise.all([
     memberTarget(user),
-    ask<Partial<Linking>>('/api/slack/link', { user }).catch((error: unknown): Partial<Linking> => {
-      log(`linking not offered to ${user}: ${String(error)}`);
-      return {};
-    }),
+    send('/api/slack/link', { user })
+      .then(async (res): Promise<Partial<Linking>> => {
+        if (res.ok) return (await res.json()) as Partial<Linking>;
+        if (res.status !== 404) log(`linking not offered to ${user}: ${String(res.status)}`);
+        return {};
+      })
+      .catch((error: unknown): Partial<Linking> => {
+        log(`linking not offered to ${user}: ${String(error)}`);
+        return {};
+      }),
   ]);
   return homeBlocks(target, {
     linked: linking.linked === true,
