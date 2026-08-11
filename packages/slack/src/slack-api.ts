@@ -147,8 +147,8 @@ const UNUSABLE: Record<string, Unusable> = {
 const MAX_PAGES = 20;
 
 /**
- * How many narration updates a minute this app may spend, across every member
- * of the workspace at once.
+ * How many `chat.update` calls a minute this app may spend on acknowledgements,
+ * across every member of the workspace at once.
  *
  * Slack counts `chat.update` per app per workspace and not per channel — "all
  * tokens associated with a single app in a workspace ... draw from the same
@@ -161,19 +161,40 @@ const MAX_PAGES = 20;
  *
  * Under the tier rather than at it, because the same pool pays for those.
  */
-export const NARRATION_PER_MINUTE = 30;
+export const UPDATES_PER_MINUTE = 30;
 
-/** Whether there is room for one more, spending it if so. A minute of stamps
- * rather than a token bucket: this is asked a few dozen times a minute at most,
- * and the window it has to be right about is exactly a minute. */
-export function narrationBudget(perMinute = NARRATION_PER_MINUTE): () => boolean {
+export interface UpdateBudget {
+  /** Whether `updates` more will fit, spending them if so. Narration is the
+   * only caller that asks, because narration is the only one that may give
+   * way — and it asks for two on a turn's first step, since a step written is
+   * a step that has to be taken back off. */
+  room: (updates: number) => boolean;
+  /** Spends one whatever the answer would have been, for an update that has to
+   * land. Over the ceiling by however many turns are mid-flight, which is the
+   * gap between this and `perMinute` — not the whole of Slack's. */
+  take: () => void;
+}
+
+/** A minute of stamps rather than a token bucket: this is asked a few dozen
+ * times a minute at most, and the window it has to be right about is exactly a
+ * minute. Monotonic, so an NTP step backwards cannot hold stamps inside that
+ * window for the length of the correction. */
+export function updateBudget(perMinute = UPDATES_PER_MINUTE): UpdateBudget {
   const spent: number[] = [];
-  return () => {
-    const now = Date.now();
-    while (spent.length && now - spent[0]! >= 60_000) spent.shift();
-    if (spent.length >= perMinute) return false;
-    spent.push(now);
-    return true;
+  /** Now, with the window pruned to it. */
+  const now = (): number => {
+    const at = performance.now();
+    while (spent.length && at - spent[0]! >= 60_000) spent.shift();
+    return at;
+  };
+  return {
+    room: (updates) => {
+      const at = now();
+      if (spent.length + updates > perMinute) return false;
+      for (let i = 0; i < updates; i += 1) spent.push(at);
+      return true;
+    },
+    take: () => spent.push(now()),
   };
 }
 

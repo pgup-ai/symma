@@ -90,7 +90,10 @@ function harness(
   } = {},
 ) {
   let scans = 0;
-  let narrations = 0;
+  /** What narration asked the shared budget for, and what the turn spent of it
+   * — the tidy included, which is the half a per-narration count misses. */
+  const asks: number[] = [];
+  let charged = 0;
   const posts: {
     channel: string;
     text: string;
@@ -200,9 +203,15 @@ function harness(
           : { ok: true, bytes: Buffer.from(over.fileBytes) },
       );
     },
-    mayNarrate: () => {
-      narrations += 1;
-      return over.budgetSpent !== true;
+    updates: {
+      room: (n) => {
+        asks.push(n);
+        charged += over.budgetSpent === true ? 0 : n;
+        return over.budgetSpent !== true;
+      },
+      take: () => {
+        charged += 1;
+      },
     },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
@@ -249,7 +258,8 @@ function harness(
   return {
     deps,
     scans: () => scans,
-    narrations: () => narrations,
+    asks,
+    charged: () => charged,
     posts,
     turns,
     runs,
@@ -559,7 +569,7 @@ describe('dm message', () => {
   it('offers the session it is picking up, beside the scope it runs in', async () => {
     // The offer rides the same message as the scope and says "if it still can":
     // whether the agent still holds that session is not known until it is asked.
-    const { deps, posts } = harness({
+    const { deps, posts, charged } = harness({
       existing: CONVERSATION,
       endpoint: {
         ...READY,
@@ -588,12 +598,15 @@ describe('dm message', () => {
     // The harness records an aside list only when there is one, so an answer with
     // nothing to add carries no key at all.
     assert.equal(posts[1]!.notices, undefined);
+    // The "…" has to come back off, and this turn narrated nothing to reserve
+    // that with — so the tidy pays for itself rather than going uncounted.
+    assert.equal(charged(), 1);
   });
 
   it('spends no update on a turn that never said anything', async () => {
-    // The `chat.update` budget is per channel, and most turns answer without
-    // narrating: tidying an acknowledgement that was never written on would spend
-    // that budget on every answer instead.
+    // Most turns answer without narrating, and tidying an acknowledgement that
+    // was never written on would spend the workspace's `chat.update` budget on
+    // every one of them.
     const { deps, updates } = harness({ existing: CONVERSATION });
     await handleDm(
       {
@@ -663,7 +676,7 @@ describe('dm message', () => {
     // Asked after the per-turn interval, not before it: a turn narrating every
     // frame would otherwise drain the workspace's allowance just by being busy,
     // without ever writing a line.
-    const { deps, runs, narrations } = harness({ existing: CONVERSATION });
+    const { deps, runs, asks } = harness({ existing: CONVERSATION });
     await handleDm(
       {
         user: 'U-nel',
@@ -677,7 +690,11 @@ describe('dm message', () => {
     );
     for (let i = 0; i < 5; i += 1) runs[0]!.onProgress!('Reading dm.ts');
     await flush();
-    assert.equal(narrations(), 1, 'five frames inside one interval, one request for budget');
+    // One request, for two: the step, and the tidy that step makes certain.
+    // Charged per narration, a workspace's whole allowance of narrated turns
+    // lands one uncounted `chat.update` each — twice the ceiling in a busy
+    // minute, which is when it matters.
+    assert.deepEqual(asks, [2], 'five frames inside one interval, one request for budget');
   });
 
   it('takes the narration back off once the answer is there to read', async () => {

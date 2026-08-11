@@ -26,7 +26,7 @@ import {
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
 import { LINKS_PER_MESSAGE, resolveLinks, slackLinks, type LinkMiss } from './links.js';
-import { plainly, type MarkState } from './slack-api.js';
+import { plainly, type MarkState, type UpdateBudget } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
@@ -329,11 +329,10 @@ export interface DmDeps {
   /** Every conversation this member is in — the other way a link is theirs to
    * read. Undefined where the scan failed, which is not the same as none. */
   conversationsOf: (user: string) => Promise<Set<string> | undefined>;
-  /** Whether there is room in the workspace's `chat.update` budget for one more
-   * narration update. Shared by every turn at once, because Slack counts that
-   * method per app rather than per channel — so this is the ceiling a per-turn
-   * interval cannot be. */
-  mayNarrate: () => boolean;
+  /** Room on the acknowledgement, shared by every turn at once: Slack counts
+   * `chat.update` per app rather than per channel, so this is the ceiling a
+   * per-turn interval cannot be. */
+  updates: UpdateBudget;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -664,8 +663,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     if (now - lastShown < PROGRESS_MIN_MS) return;
     // Asked after this turn's own floor, so a quiet turn does not spend the
     // workspace's budget just by being asked, and refused rather than queued:
-    // narration is only worth anything while it is current.
-    if (!deps.mayNarrate()) return;
+    // narration is only worth anything while it is current. Two on the first
+    // step, because the cleanup below is not optional once a step is written —
+    // unreserved, every narrating turn would put one uncounted `chat.update`
+    // over the ceiling, and a busy minute would clear it twice over.
+    if (!deps.updates.room(lastShown ? 1 : 2)) return;
     lastShown = now;
     // Caught on the chain and not on the call, so a `working` that throws where
     // it stands rather than rejecting cannot leave `updating` rejected — every
@@ -684,6 +686,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
   const settle = async (text: string): Promise<void> => {
     if (!lastShown && !inFlight) return;
+    // Taken rather than asked, and only where no step paid for it already: an
+    // acknowledgement left mid-step above a delivered answer reports the turn
+    // wrongly, where a quiet one is merely quiet.
+    if (!lastShown) deps.updates.take();
     await before(
       TIDY_MS,
       updating.then(() => deps.working(acked.channel, acked.ts, text)).catch(() => undefined),

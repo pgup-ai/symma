@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { narrationBudget, slackApi } from '../src/slack-api.js';
+import { slackApi, updateBudget } from '../src/slack-api.js';
 
 /** Slack answers 200 with `ok: false`, so every case here is a 200. */
 const answering = (...bodies: unknown[]) => {
@@ -39,21 +39,29 @@ const THREE_FROM_TWO = {
 };
 
 describe('slack api', () => {
-  it('holds a minute of narration, then lets the window carry it', () => {
+  it('holds a minute of updates, then lets the window carry it', () => {
     // Slack counts `chat.update` per app per workspace, so this is the ceiling
     // every turn shares — a per-turn interval cannot honour a shared budget,
     // whatever it is set to.
-    const spend = narrationBudget(3);
-    assert.deepEqual([spend(), spend(), spend(), spend()], [true, true, true, false]);
+    const budget = updateBudget(3);
+    // Two for a turn's first step: the step, and the tidy that has to follow it.
+    assert.equal(budget.room(2), true);
+    // All of an ask or none of it — a refusal that spent half of what it asked
+    // for would charge a narration nobody wrote for a tidy nobody owes, and
+    // take the room off a turn already past its first step.
+    assert.equal(budget.room(2), false);
+    assert.deepEqual([budget.room(1), budget.room(1)], [true, false]);
+    // And the update that has to land lands, ceiling or no ceiling — the
+    // overshoot is the turns in flight, not the whole of the next minute.
+    budget.take();
     // The window is exactly a minute, and it slides: what was spent 60s ago is
-    // not spent now.
-    const later = Date.now() + 60_000;
-    const real = Date.now;
+    // not spent now. Monotonic, so this is the clock that moves it.
+    const clock = performance.now.bind(performance);
     try {
-      Date.now = () => later;
-      assert.equal(spend(), true);
+      performance.now = () => clock() + 60_000;
+      assert.equal(budget.room(1), true);
     } finally {
-      Date.now = real;
+      performance.now = clock;
     }
   });
 

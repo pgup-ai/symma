@@ -63,7 +63,9 @@ Narration on the acknowledgement runs under a budget the whole process shares,
 because Slack counts `chat.update` per app per workspace and not per channel:
 a per-turn interval cannot honour a shared ceiling, and narration is what gives
 way, since a quiet acknowledgement is a turn still running where a refused tidy
-is one that reports wrongly.
+is one that reports wrongly. So the account is of updates and not of narrations:
+a step reserves the tidy that takes it back off, because charging only what it
+writes puts one uncounted `chat.update` per narrating turn over the ceiling.
 Slack permalinks pasted into a message are fetched by the bot and ride the
 prompt — not the context, which an honoured resume drops — because the agent has
 only its own machine's Slack access, which is usually none. The bot reads with
