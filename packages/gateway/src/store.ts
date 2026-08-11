@@ -235,7 +235,11 @@ export interface Store {
    * linked again between the refusal and this would otherwise lose the token
    * they just granted, silently. False says the stored token is no longer the
    * refused one, which is that member — still linked, and not to be told
-   * otherwise. */
+   * otherwise.
+   *
+   * Deliberately not gated on the member being active, unlike the read and the
+   * write: this destroys a credential, and one left on a deactivated row is the
+   * case that most wants destroying. */
   forgetSlackUserToken(owner: Owner, token: string): Promise<boolean>;
   /** The agent this member's turns run on, of the ones their machine offers.
    * Undefined until they pick, and served only while it is still offered. */
