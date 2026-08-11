@@ -657,13 +657,18 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         ...unsupportedNote(decision.agent, answer.unsupported),
         ...approvalNote(answer.approvals),
         ...(spent(answer.models?.currentModelId, answer.usage) ?? []),
+        // Said, not just shown: a bare `codex resume <id>` under an answer reads
+        // as a claim that the turn resumed something, which on a fresh session
+        // is exactly backwards. It is an offer — the same session, open in their
+        // own terminal — and four words is the difference.
+        //
         // The command is a closed set at the parse boundary; the session id is
-        // the agent's own string and is not.
-        // A mismatch is the agent having minted a fresh session rather than taking
-        // the one offered, which is the only time this thread has an id it was
-        // not already given. Same test the driver sends the transcript on.
+        // the agent's own string and is not. A mismatch is the agent having
+        // minted a fresh session rather than taking the one offered, which is
+        // the only time this thread has an id it was not already given. Same
+        // test the driver sends the transcript on.
         ...(answer.resumeWith && answer.session !== decision.resume
-          ? [`\`${answer.resumeWith} ${plainly(answer.session)}\``]
+          ? [`Yours in the terminal too: \`${answer.resumeWith} ${plainly(answer.session)}\``]
           : []),
       ],
       // The picker renders the agent's own roster, so it exists exactly where
