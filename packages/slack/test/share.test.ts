@@ -24,15 +24,15 @@ function harness(
   } = {},
 ) {
   const shared: { channel: string; thread: string; text: string; asMember?: string }[] = [];
-  let unlinked = 0;
+  const unlinked: string[] = [];
   const settled: { channel: string; ts: string; text: string }[] = [];
   const posts: { channel: string; text: string; threadTs?: string }[] = [];
   const deps: ShareDeps = {
     destination: () =>
       Promise.resolve('to' in over ? over.to : { channel: 'C-incidents', thread: '100.0' }),
     asMember: () => Promise.resolve(over.asMember),
-    unlink: () => {
-      unlinked += 1;
+    unlink: (token) => {
+      unlinked.push(token);
       return Promise.resolve();
     },
     share: (channel, thread, text, asMember) => {
@@ -50,7 +50,7 @@ function harness(
       return Promise.resolve(undefined);
     },
   };
-  return { deps, shared, posts, settled, unlinked: () => unlinked };
+  return { deps, shared, posts, settled, unlinked };
 }
 
 describe('share back', () => {
@@ -77,7 +77,9 @@ describe('share back', () => {
     // and the home tab goes on claiming they post as themselves.
     const { deps, shared, unlinked } = harness({ asMember: 'xoxp-nel', tokenDead: true });
     assert.equal(await handleShare(CLICK, deps), 'shared');
-    assert.equal(unlinked(), 1);
+    // Named, not blanket: a member who linked again between the refusal and this
+    // keeps the grant they just made.
+    assert.deepEqual(unlinked, ['xoxp-nel']);
     assert.deepEqual(
       shared.map((entry) => [entry.asMember, entry.text]),
       [

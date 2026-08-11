@@ -227,8 +227,14 @@ export interface Store {
   /** The member's own Slack token, for publishing as them rather than as the
    * bot. Undefined until they link, which is what everything falls back from. */
   slackUserToken(owner: Owner): Promise<string | undefined>;
-  /** `null` unlinks, which is what a token Slack has stopped honouring is. */
-  setSlackUserToken(owner: Owner, token: string | null): Promise<void>;
+  /** False where there was no active member to write to, which is a link that
+   * raced their deactivation — the callback has to say so rather than report a
+   * link that is not there. */
+  setSlackUserToken(owner: Owner, token: string): Promise<boolean>;
+  /** Drops a token Slack has stopped honouring, and only that one: a member who
+   * linked again between the refusal and this would otherwise lose the token
+   * they just granted, silently. */
+  forgetSlackUserToken(owner: Owner, token: string): Promise<void>;
   /** The agent this member's turns run on, of the ones their machine offers.
    * Undefined until they pick, and served only while it is still offered. */
   defaultAgentFor(owner: Owner): Promise<string | undefined>;
@@ -754,8 +760,15 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     async setSlackUserToken(owner, token) {
       // Active members only, or a callback that raced deactivation writes the
       // credential back in behind the cleanup that just removed it.
-      await pool.query(
+      const { rowCount } = await pool.query(
         `UPDATE users SET slack_user_token = $2 WHERE id = $1 AND deactivated_at IS NULL`,
+        [owner, token],
+      );
+      return rowCount === 1;
+    },
+    async forgetSlackUserToken(owner, token) {
+      await pool.query(
+        `UPDATE users SET slack_user_token = NULL WHERE id = $1 AND slack_user_token = $2`,
         [owner, token],
       );
     },
@@ -1119,6 +1132,7 @@ export function localStore(
     lastChoiceFor: needsDatabase,
     slackUserToken: needsDatabase,
     setSlackUserToken: needsDatabase,
+    forgetSlackUserToken: needsDatabase,
     defaultAgentFor: needsDatabase,
     setDefaultAgent: needsDatabase,
     rememberRoster: needsDatabase,

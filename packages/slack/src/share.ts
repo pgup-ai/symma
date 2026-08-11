@@ -31,10 +31,10 @@ export interface ShareDeps {
    * Undefined is ordinary, not a failure — the bot posts with their name in
    * front of it, as it always did. */
   asMember: () => Promise<string | undefined>;
-  /** Forgets a token Slack has stopped honouring, so the next share does not
-   * spend a refused call on it and the home tab stops claiming they post as
-   * themselves. Fails open: the share has already landed by then. */
-  unlink: () => Promise<void>;
+  /** Forgets the token Slack has stopped honouring, and only that one — a
+   * member who linked again in between keeps the grant they just made. Fails
+   * open: the answer lands either way. */
+  unlink: (token: string) => Promise<void>;
   share: (
     channel: string,
     thread: string,
@@ -82,23 +82,25 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
   // token Slack records exactly that, so the message needs no sentence saying
   // whose it is; without one the bot is the author and has to say.
   const asBot = `<@${request.user}> shared:\n\n${request.text}`;
-  let author = await deps.asMember();
-  let result = await deps.share(to.channel, to.thread, author ? request.text : asBot, author);
+  const token = await deps.asMember();
+  let result = await deps.share(to.channel, to.thread, token ? request.text : asBot, token);
+  // Whose post the failure is about, which the fallback below changes: telling
+  // them *they* are not in the channel over a refusal the bot got would send
+  // them looking at their own membership for somebody else's problem.
+  let byMember = Boolean(token);
   // Their token stopped working — revoked, or an install replaced. The bot can
   // still publish, and an answer they approved is worth more than the name on
-  // it. Forgotten as well, or every later share pays for the same refusal and
-  // the home tab goes on saying they post as themselves.
-  if (!result.ok && result.why === 'author') {
-    await deps.unlink().catch(() => undefined);
-    // The retry is the bot's, so whatever it is refused for is about the bot —
-    // telling them *they* are not in the channel would be the wrong subject.
-    author = undefined;
+  // it. `author` only ever comes back for a post that carried a token, so the
+  // test for one below states that rather than guarding against it.
+  if (token && !result.ok && result.why === 'author') {
+    await deps.unlink(token).catch(() => undefined);
+    byMember = false;
     result = await deps.share(to.channel, to.thread, asBot);
   }
   if (!result.ok) {
     await deps.post(
       request.channel,
-      `Kept this here — ${because(result.why, Boolean(author))}. Nothing was lost.`,
+      `Kept this here — ${because(result.why, byMember)}. Nothing was lost.`,
       request.thread,
     );
     // The button stays: the destination is what failed, and fixing it makes

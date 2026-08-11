@@ -805,7 +805,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // their name — and every answer they publish would go out as you.
     if ((await store.ensureMember(granted.team.id, account.id)) !== owner)
       return void done('That signed in as a different account. Start again from Slack.');
-    await store.setSlackUserToken(owner, account.access_token);
+    // Nothing was written where they stopped being a member while this was out
+    // in their browser. Saying "linked" then would be the one sentence they act
+    // on being wrong about the only thing it reports.
+    if (!(await store.setSlackUserToken(owner, account.access_token)))
+      return void done('Your symma account is not active, so nothing was linked.');
     return void done('Linked. Answers you share now go out as you — close this tab.');
   }
   // Companion routes authenticate with their per-endpoint token, not the
@@ -1126,8 +1130,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       return sendJson(res, 200, { url: authorize.toString(), linked });
     }
     if (url.pathname === '/api/slack/unlink') {
-      // Slack stopped honouring it, which the bot finds out by being refused.
-      await store.setSlackUserToken(owner, null);
+      // The token Slack refused, dropped only if it is still the stored one: a
+      // member who linked again in between would otherwise lose the grant they
+      // had just made, with nothing saying so.
+      const { token } = body as { token?: unknown };
+      if (!str(token)) return sendJson(res, 400, { error: 'request' });
+      await store.forgetSlackUserToken(owner, token);
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/user-token') {

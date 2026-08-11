@@ -565,8 +565,8 @@ const connection = socketMode({
             // a member's credential between the two clicks that need it.
             asMember: async () =>
               (await ask<{ token?: string }>('/api/slack/user-token', { user: who })).token,
-            unlink: async () => {
-              await ask('/api/slack/unlink', { user: who });
+            unlink: async (token: string) => {
+              await ask('/api/slack/unlink', { user: who, token });
             },
             share: api.share,
             post: api.post,

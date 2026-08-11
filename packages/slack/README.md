@@ -18,6 +18,14 @@ the DM, `chat:write` with `im:write` to answer there, and `reactions:write`
 to mark their message while a run is out. **Re-paste it after a change and reinstall**, or the
 new scopes are not granted.
 
+`redirect_urls` is the one field to edit before pasting: replace
+`https://REPLACE-WITH-SYMMA_GATEWAY_PUBLIC_URL` with the gateway's own
+`SYMMA_GATEWAY_PUBLIC_URL`, exactly. Slack matches the redirect it is handed
+against this list character for character, so a near miss fails the account
+linking flow at Slack's own consent screen with `redirect_uri_mismatch`. Leaving
+it as it is costs nothing else: without the linking flow configured the gateway
+never offers one, and everything else works.
+
 **2. Make an app-level token.** _Basic Information_ → _App-Level Tokens_ →
 _Generate_, with the `connections:write` scope. This is the `xapp-…` token Socket
 Mode dials with. The `xoxb-…` bot token is separate and also needed now — reading
