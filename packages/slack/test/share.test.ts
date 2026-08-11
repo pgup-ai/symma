@@ -75,11 +75,14 @@ describe('share back', () => {
     // than the name on it, so it goes out as the bot with them named — and the
     // dead token is forgotten, or every later share pays for the same refusal
     // and the home tab goes on claiming they post as themselves.
-    const { deps, shared, unlinked } = harness({ asMember: 'xoxp-nel', tokenDead: true });
+    const { deps, shared, posts, unlinked } = harness({ asMember: 'xoxp-nel', tokenDead: true });
     assert.equal(await handleShare(CLICK, deps), 'shared');
     // Named, not blanket: a member who linked again between the refusal and this
     // keeps the grant they just made.
     assert.deepEqual(unlinked, ['xoxp-nel']);
+    // And they are told, or they find out from a channel post that does not say
+    // their name beside a home tab that has quietly stopped offering it.
+    assert.match(posts[0]!.text, /as Symma, not as you/);
     assert.deepEqual(
       shared.map((entry) => [entry.asMember, entry.text]),
       [

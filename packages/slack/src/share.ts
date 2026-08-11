@@ -114,6 +114,15 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
     request.messageTs,
     `${request.text}\n\n_Shared to the thread._`,
   );
-  await deps.post(request.channel, 'Shared to the thread.', request.thread);
+  // The fallback, said out loud: they linked so their name would be on it, and
+  // it is not. Finding that in the channel, beside a home tab that has quietly
+  // stopped offering to fix it, is the part worth avoiding.
+  await deps.post(
+    request.channel,
+    Boolean(token) && !byMember
+      ? 'Shared to the thread — as Symma, not as you. Slack has stopped accepting your sign-in, so I disconnected it. Connect again from the home tab.'
+      : 'Shared to the thread.',
+    request.thread,
+  );
   return 'shared';
 }

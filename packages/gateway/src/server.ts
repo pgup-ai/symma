@@ -803,12 +803,14 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // The account that came back has to be the member the state named. Without
     // this, finishing somebody else's flow would file your posting rights under
     // their name — and every answer they publish would go out as you.
-    if ((await store.ensureMember(granted.team.id, account.id)) !== owner)
+    const signedIn = await store.ensureMember(granted.team.id, account.id);
+    if (signedIn && signedIn !== owner)
       return void done('That signed in as a different account. Start again from Slack.');
-    // Nothing was written where they stopped being a member while this was out
-    // in their browser. Saying "linked" then would be the one sentence they act
-    // on being wrong about the only thing it reports.
-    if (!(await store.setSlackUserToken(owner, account.access_token)))
+    // `ensureMember` answers with nothing for a member who is not active, so a
+    // deactivation arrives here rather than as a mismatch above; the write
+    // covers one that lands after this. Either way, "linked" would be the one
+    // sentence this page exists to report, wrong.
+    if (!signedIn || !(await store.setSlackUserToken(owner, account.access_token)))
       return void done('Your symma account is not active, so nothing was linked.');
     return void done('Linked. Answers you share now go out as you — close this tab.');
   }
