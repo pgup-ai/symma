@@ -13,15 +13,23 @@ const CLICK: ShareRequest = {
   conversation: 'conv-1',
 };
 
-function harness(over: { to?: { channel: string; thread: string }; why?: Unusable } = {}) {
-  const shared: { channel: string; thread: string; text: string }[] = [];
+function harness(
+  over: {
+    to?: { channel: string; thread: string };
+    why?: Unusable;
+    /** The member's own Slack token, when they have linked their account. */
+    asMember?: string;
+  } = {},
+) {
+  const shared: { channel: string; thread: string; text: string; asMember?: string }[] = [];
   const settled: { channel: string; ts: string; text: string }[] = [];
   const posts: { channel: string; text: string; threadTs?: string }[] = [];
   const deps: ShareDeps = {
     destination: () =>
       Promise.resolve('to' in over ? over.to : { channel: 'C-incidents', thread: '100.0' }),
-    share: (channel, thread, text) => {
-      shared.push({ channel, thread, text });
+    asMember: () => Promise.resolve(over.asMember),
+    share: (channel, thread, text, asMember) => {
+      shared.push({ channel, thread, text, ...(asMember ? { asMember } : {}) });
       return Promise.resolve(over.why ? { ok: false as const, why: over.why } : { ok: true });
     },
     settle: (channel, ts, text) => {
@@ -37,6 +45,30 @@ function harness(over: { to?: { channel: string; thread: string }; why?: Unusabl
 }
 
 describe('share back', () => {
+  it('posts as the member themselves once they have linked their account', async () => {
+    // Slack decides authorship by token type, so handing their token over is
+    // the whole mechanism — and with it the message is theirs, so the sentence
+    // naming who approved it is the bot's own name badge and goes.
+    const { deps, shared } = harness({ asMember: 'xoxp-nel' });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
+    assert.deepEqual(shared, [
+      {
+        channel: 'C-incidents',
+        thread: '100.0',
+        text: 'the deploy fails on a missing env var',
+        asMember: 'xoxp-nel',
+      },
+    ]);
+  });
+
+  it("tells them about their own membership, not the bot's", async () => {
+    // Posting as them, `not_in_channel` is Slack refusing *them* — pointing at
+    // the bot's membership would send them looking in the wrong place.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', why: 'removed' });
+    assert.equal(await handleShare(CLICK, deps), 'kept: removed');
+    assert.match(posts[0]!.text, /you are not in that channel/);
+  });
+
   it('posts to the thread it came from, with the approver named', async () => {
     const { deps, shared, posts, settled } = harness();
     assert.equal(await handleShare(CLICK, deps), 'shared');

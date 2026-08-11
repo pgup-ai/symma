@@ -74,6 +74,10 @@ export interface SlackApi {
     channel: string,
     thread: string,
     text: string,
+    /** The member's own Slack token. Slack decides authorship by token type, so
+     * this is the whole difference between the answer going out as them and
+     * going out as the bot with their name typed in front of it. */
+    asMember?: string,
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
 }
 
@@ -186,6 +190,9 @@ export const MODEL_ACTION = 'set_conversation_model';
 /** A model pick with no conversation under it: `/model` and the home tab, which
  * set what the member's *next* conversation starts on. */
 export const DEFAULT_MODEL_ACTION = 'set_default_model';
+/** Which of their machine's agents a member works with. The home tab only —
+ * it is a choice about the machine, not about a thread. */
+export const DEFAULT_AGENT_ACTION = 'set_default_agent';
 
 /** Slack's static_select caps: options per select, characters per value. */
 const PICKER_OPTION_LIMIT = 100;
@@ -292,6 +299,19 @@ export const modelSelect = (
         models.currentModelId,
         agent,
       );
+
+/** The agents this machine is logged into. Names, not a roster the agent
+ * published, so there is nothing to describe them with — and nothing to escape
+ * either: an unsafe one is dropped rather than shown, since the gateway would
+ * refuse the pick it produced. */
+export const agentSelect = (agents: string[], current: string): Record<string, unknown>[] =>
+  rosterSelect(
+    undefined,
+    DEFAULT_AGENT_ACTION,
+    'Agent',
+    agents.map((agent) => ({ id: agent, label: agent, safe: isSafeId(agent) })),
+    current,
+  );
 
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */
@@ -571,9 +591,14 @@ export function slackApi(
         .add({ channel, timestamp: ts, name: MARK[state] })
         .catch(swallow(`marking ${state}`));
     },
-    async share(channel, thread, text) {
+    async share(channel, thread, text, asMember) {
       try {
-        await client.chat.postMessage({ channel, text, thread_ts: thread });
+        // Built per call rather than cached: it belongs to one member, and a
+        // client kept between them is a client posting as the wrong one.
+        const author = asMember
+          ? new WebClient(asMember, options.fetch ? { fetch: options.fetch } : {})
+          : client;
+        await author.chat.postMessage({ channel, text, thread_ts: thread });
         return { ok: true };
       } catch (error) {
         const why = UNUSABLE[slackCode(error) ?? ''];

@@ -62,7 +62,15 @@ mode and model pickers ride the answers, so both are chosen mid-thread; the
 model is also choosable before there is a thread, through `/model` and the home
 tab, because a roster is learned by running and a member who has to ask first to
 pick has already asked on the wrong model. The gateway keeps the roster from the
-last turn and the member's own default under it.
+last turn and the member's own default under it. The agent is chosen the same
+way, on the home tab and only where the machine offers more than one — a pick
+their companion stops advertising falls back rather than refusing the turn, and
+nothing has to be shed with it because a model is served only to the agent it
+was picked under and a resume only to the one it was minted under. An answer
+shared back goes out as the member themselves once they have linked their Slack
+account (§5): Slack decides authorship by token type, so the gateway holds one
+`chat:write` user token per member and hands it to the bot for that one post.
+Without the link it is the bot posting with their name in front, as before.
 
 | package           | what it is                                                                                                                                                                         | depends on                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |

@@ -11,7 +11,7 @@
  */
 import type { TurnTarget } from '@symma/protocol';
 
-import { modelSelect, plainly } from './slack-api.js';
+import { agentSelect, modelSelect, plainly } from './slack-api.js';
 
 const context = (text: string): Record<string, unknown> => ({
   type: 'context',
@@ -72,14 +72,25 @@ export function modelPrompt(target: TurnTarget | undefined): {
   };
 }
 
+/** Whether this member's answers can go out under their own name, and where
+ * they say yes to that. Absent where the deployment has no Slack app
+ * credentials, which is the state to render nothing at all for. */
+export interface Linking {
+  linked: boolean;
+  url?: string;
+}
+
 /**
- * The home tab: what this member's setup is, and the one choice that belongs
+ * The home tab: what this member's setup is, and the choices that belong
  * outside a conversation.
  *
  * Block Kit has no colour of its own — the home tab is Slack's surface, not
  * ours — so the brand carries as the site's marks and the site's voice.
  */
-export function homeBlocks(target: TurnTarget | undefined): Record<string, unknown>[] {
+export function homeBlocks(
+  target: TurnTarget | undefined,
+  linking?: Linking,
+): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [
     {
       type: 'header',
@@ -107,10 +118,49 @@ export function homeBlocks(target: TurnTarget | undefined): Record<string, unkno
         : '⌘ No approved projects — conversations run in an empty temp directory',
     ),
     context('◫ Access level is chosen in each conversation'),
+  );
+
+  // Only where the machine is logged into more than one — the gateway sends the
+  // list on that condition, since a picker with one option is a control that
+  // does nothing. Above the model, because a model belongs to the agent that
+  // offered it: changing agent is the bigger of the two choices.
+  const agents = target.agents?.length ? agentSelect(target.agents, target.agent ?? '') : [];
+  if (agents.length)
+    blocks.push(
+      { type: 'divider' },
+      section('*⌁ The agent you work with*'),
+      { type: 'actions', elements: agents },
+      context('Threads already open move with you, and are caught up from the DM.'),
+    );
+
+  blocks.push(
     { type: 'divider' },
     section('*◎ Your default model*'),
     ...modelBlocks(target),
     context('Conversations where you picked a model keep it.'),
   );
+
+  // §5's "attributable to whoever approved it". Only ever shown as what it is:
+  // the member handing over their own posting rights, for the one thing they
+  // already press a button to do.
+  if (linking?.linked) blocks.push(context('◆ Answers you share go out as you.'));
+  else if (linking?.url)
+    blocks.push(
+      { type: 'divider' },
+      section('*◆ Share as yourself*'),
+      context(
+        'Answers you share go out from Symma with your name in front. Connect your account and they go out as you.',
+      ),
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Connect my account' },
+            url: linking.url,
+          },
+        ],
+      },
+    );
   return blocks;
 }

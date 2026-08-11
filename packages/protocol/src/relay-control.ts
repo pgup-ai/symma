@@ -99,6 +99,9 @@ export interface TurnTarget extends SelectedEndpoint {
    * it. A roster is only ever learned by running, so without this a member has
    * nothing to pick from until after the question they wanted to pick for. */
   models?: SessionModel[];
+  /** Every agent this machine is logged into, when there is more than one to
+   * choose between. `agent` is the one these turns run on. */
+  agents?: string[];
 }
 
 /**

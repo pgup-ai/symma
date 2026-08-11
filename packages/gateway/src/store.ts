@@ -224,6 +224,15 @@ export interface Store {
     /** Only a model this agent offered is worth inheriting. */
     agent?: string,
   ): Promise<string | undefined>;
+  /** The member's own Slack token, for publishing as them rather than as the
+   * bot. Undefined until they link, which is the state everything falls back
+   * from. */
+  slackUserToken(owner: Owner): Promise<string | undefined>;
+  setSlackUserToken(owner: Owner, token: string): Promise<void>;
+  /** The agent this member's turns run on, of the ones their machine offers.
+   * Undefined until they pick, and served only while it is still offered. */
+  defaultAgentFor(owner: Owner): Promise<string | undefined>;
+  setDefaultAgent(owner: Owner, agent: string | null): Promise<void>;
   /** Keeps what an agent offered, so a member can pick from it before the turn
    * that would otherwise be the first to learn it. Replaces rather than merges:
    * a roster is what the agent offers now, and an entry it has dropped is one
@@ -735,6 +744,26 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return row?.value;
     },
+    async slackUserToken(owner) {
+      const row = await one<{ token: string | null }>(
+        `SELECT slack_user_token AS token FROM users WHERE id = $1 AND deactivated_at IS NULL`,
+        [owner],
+      );
+      return row?.token ?? undefined;
+    },
+    async setSlackUserToken(owner, token) {
+      await pool.query(`UPDATE users SET slack_user_token = $2 WHERE id = $1`, [owner, token]);
+    },
+    async defaultAgentFor(owner) {
+      const row = await one<{ agent: string | null }>(
+        `SELECT default_agent AS agent FROM users WHERE id = $1`,
+        [owner],
+      );
+      return row?.agent ?? undefined;
+    },
+    async setDefaultAgent(owner, agent) {
+      await pool.query(`UPDATE users SET default_agent = $2 WHERE id = $1`, [owner, agent]);
+    },
     async rememberRoster(owner, agent, roster) {
       await pool.query(
         `INSERT INTO agent_models (user_id, agent, roster) VALUES ($1, $2, $3)
@@ -1079,6 +1108,10 @@ export function localStore(
     bindConversationChoice: needsDatabase,
     shedWorkspaceChoice: needsDatabase,
     lastChoiceFor: needsDatabase,
+    slackUserToken: needsDatabase,
+    setSlackUserToken: needsDatabase,
+    defaultAgentFor: needsDatabase,
+    setDefaultAgent: needsDatabase,
     rememberRoster: needsDatabase,
     setDefaultModel: needsDatabase,
     modelsFor: needsDatabase,

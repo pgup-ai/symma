@@ -1810,6 +1810,59 @@ describe('tenancy', () => {
     }
   });
 
+  it('runs a member on the agent they picked, while their machine still has it', async () => {
+    const url = pg.getConnectionUri();
+    const rae = await provision(url, { team: 'ws', slackUser: 'rae', endpoint: 'rae-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const post = (path: string, body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'rae', ...body }),
+      });
+    const ask = async (): Promise<Record<string, unknown>> =>
+      (await (await post('/api/slack/endpoint', {})).json()) as Record<string, unknown>;
+    let detach: (() => void) | undefined;
+    try {
+      detach = await waitFor(async () => {
+        const off = await attach(rae.endpointToken, 'rae-box', ['codex', 'kilo']);
+        return (await ask()).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint serving what it found first');
+      // Both, so the picker has something to offer. The one it runs is separate
+      // from the ones it could.
+      assert.deepEqual((await ask()).agents, ['codex', 'kilo']);
+
+      assert.equal((await post('/api/slack/default-agent', { agent: 'kilo' })).status, 200);
+      assert.equal((await ask()).agent, 'kilo');
+
+      // A pick their machine no longer offers falls back rather than refusing:
+      // an agent they stopped logging into would otherwise take every turn down
+      // with it, and the companion is the authority on what it can run.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(rae.endpointToken, 'rae-box', ['codex']);
+        return (await ask()).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint reattached without kilo');
+      // And no picker where there is nothing to pick between.
+      assert.equal((await ask()).agents, undefined);
+
+      // The pick is kept through that, so logging back in restores it rather
+      // than making them choose again.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(rae.endpointToken, 'rae-box', ['codex', 'kilo']);
+        return (await ask()).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the pick came back with the agent');
+
+      assert.equal((await post('/api/slack/default-agent', { agent: 'bad id' })).status, 400);
+      assert.equal((await post('/api/slack/default-agent', { agent: null })).status, 200);
+      assert.equal((await ask()).agent, 'codex', 'cleared, so whatever it finds first');
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
   it('refuses a spent code, and a companion with nothing to run', async () => {
     const url = pg.getConnectionUri();
     const vic = await provision(url, { team: 'pairhttp', slackUser: 'vic', endpoint: 'vic-old' });

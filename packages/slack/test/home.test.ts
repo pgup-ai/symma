@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import type { TurnTarget } from '@symma/protocol';
 
 import { homeBlocks, modelPrompt } from '../src/home.js';
-import { DEFAULT_MODEL_ACTION } from '../src/slack-api.js';
+import { DEFAULT_AGENT_ACTION, DEFAULT_MODEL_ACTION } from '../src/slack-api.js';
 
 const paired: TurnTarget = {
   endpoint: 'e1',
@@ -53,6 +53,31 @@ describe('the surfaces with no thread under them', () => {
       assert.match(text(blocks), /\/connect/);
       assert.deepEqual(selects(blocks), []);
     }
+  });
+
+  it('offers the agents the machine has, and only where there is a choice', () => {
+    const picker = (target: TurnTarget): Record<string, unknown> | undefined =>
+      selects(homeBlocks(target)).find((s) => s.action_id === DEFAULT_AGENT_ACTION);
+    // One agent is not a choice — a picker with a single option is a control
+    // that does nothing, so the gateway does not send the list and this renders
+    // none. Above the model picker, which is the smaller of the two decisions.
+    assert.equal(picker(paired), undefined);
+
+    const both = { ...paired, agents: ['codex', 'kilo'] };
+    const shown = picker(both)!;
+    assert.deepEqual(
+      (shown.options as { value: string }[]).map((o) => JSON.parse(o.value)),
+      [{ m: 'codex' }, { m: 'kilo' }],
+      'the agent it carries, and no conversation — this is a member-level pick',
+    );
+    // The one they are on is the current selection, not just an option in the
+    // list: a picker that shows no selection reads as nothing being chosen.
+    assert.equal((shown.initial_option as { value: string }).value, JSON.stringify({ m: 'codex' }));
+    assert.ok(
+      text(homeBlocks(both)).indexOf(DEFAULT_AGENT_ACTION) <
+        text(homeBlocks(both)).indexOf(DEFAULT_MODEL_ACTION),
+      'agent above model',
+    );
   });
 
   it('renders the setup as it is, not as it would read best', () => {

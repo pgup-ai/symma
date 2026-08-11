@@ -27,10 +27,15 @@ export interface ShareDeps {
   /** Where this conversation may publish, per the gateway. Undefined when it
    * has nowhere to go back to, or is not this member's. */
   destination: (conversation: string) => Promise<{ channel: string; thread: string } | undefined>;
+  /** The member's own Slack token, when they have linked their account.
+   * Undefined is the ordinary state, not a failure: the answer goes out under
+   * the bot's name with theirs in front of it, as it always did. */
+  asMember: () => Promise<string | undefined>;
   share: (
     channel: string,
     thread: string,
     text: string,
+    asMember?: string,
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
   post: (channel: string, text: string, threadTs?: string) => Promise<unknown>;
   settle: (channel: string, ts: string, text: string) => Promise<void>;
@@ -39,14 +44,21 @@ export interface ShareDeps {
 export type ShareOutcome = 'shared' | 'no destination' | `kept: ${Unusable}`;
 
 /** What went wrong, in the member's words. §5: a publication that cannot land
- * is not a lost answer, so each of these says the answer is still here. */
-const because: Record<Unusable, string> = {
-  archived: 'that thread is in an archived channel',
-  removed: 'I am not in that channel any more',
-  locked: 'that channel is read-only now',
-  gone: 'that thread is gone',
-  scope: 'I no longer have permission to post there',
-};
+ * is not a lost answer, so each of these says the answer is still here.
+ *
+ * Two of them change subject with the author. Posting as the member, Slack is
+ * refusing *them* — and "I am not in that channel" would send them looking at
+ * the bot's membership for a problem with their own. */
+const because = (why: Unusable, asMember: boolean): string =>
+  ({
+    archived: 'that thread is in an archived channel',
+    removed: asMember ? 'you are not in that channel' : 'I am not in that channel any more',
+    locked: 'that channel is read-only now',
+    gone: 'that thread is gone',
+    scope: asMember
+      ? 'Slack would not let me post as you there'
+      : 'I no longer have permission to post there',
+  })[why];
 
 export async function handleShare(request: ShareRequest, deps: ShareDeps): Promise<ShareOutcome> {
   const to = await deps.destination(request.conversation);
@@ -58,17 +70,21 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
     return 'no destination';
   }
 
-  // Their name on it, not the bot's: §5 wants a channel post attributable to
-  // whoever approved it.
+  // §5 wants a channel post attributable to whoever approved it. With their own
+  // token that is what Slack records — the message is theirs, so it needs no
+  // sentence saying whose it is. Without one the bot is the author and has to
+  // say who asked for it, which is the weaker version of the same thing.
+  const token = await deps.asMember();
   const result = await deps.share(
     to.channel,
     to.thread,
-    `<@${request.user}> shared:\n\n${request.text}`,
+    token ? request.text : `<@${request.user}> shared:\n\n${request.text}`,
+    token,
   );
   if (!result.ok) {
     await deps.post(
       request.channel,
-      `Kept this here — ${because[result.why]}. Nothing was lost.`,
+      `Kept this here — ${because(result.why, Boolean(token))}. Nothing was lost.`,
       request.thread,
     );
     // The button stays: the destination is what failed, and fixing it makes
