@@ -19,6 +19,38 @@ export interface SlackApi {
   /** The member's DM channel. Asked for rather than assumed: Slack's docs
    * disagree about whether a user id can stand in as a channel. */
   openDm: (user: string) => Promise<string>;
+  /** This workspace's own `something.slack.com`. A permalink from anywhere else
+   * names ids that mean nothing here. Undefined where Slack would not say, which
+   * leaves the check off rather than refusing every link. */
+  host: () => Promise<string | undefined>;
+  /** What the bot can say about a channel. `public` is one any member of this
+   * workspace could open for themselves; `private` is one it is in but cannot
+   * vouch for a member's access to; `unseen` is one it cannot read at all — a
+   * different answer, since a member may well be in a channel the bot was never
+   * invited to. */
+  visibility: (channel: string) => Promise<'public' | 'private' | 'unseen'>;
+  /** The non-public conversations this member shares with the bot — the other
+   * way a thread is theirs to read. Asked as their whole list rather than one
+   * channel at a time, since a person is in far fewer conversations than a busy
+   * channel has people, and a message with several links should cost one scan
+   * rather than one each. Public ones are left out: they are answered by
+   * `visibility` without a scan, and in a large workspace they are most of the
+   * pages. Empty where Slack would not say, which refuses rather than guesses.
+   *
+   * The intersection, and that is the property the whole access rule rests on:
+   * "Using a bot user token, this method returns the channels and conversations
+   * your bot is party to. Specifying a `user` parameter filters to conversations
+   * your bot shares with that user" (docs.slack.dev, users.conversations,
+   * checked 2026-08). So a channel here is one they are both in — the member
+   * could have read it, and the bot can fetch it — and a channel the bot cannot
+   * see never appears, which is why `visibility` answers `unseen` for those
+   * rather than leaving them to this.
+   *
+   * Undefined where the scan failed, which is not an empty list: one says they
+   * are in nothing, the other that nobody asked successfully, and a member told
+   * the first over the second audits their own memberships over a missing
+   * scope. */
+  conversationsOf: (user: string) => Promise<Set<string> | undefined>;
   /** A link back to a message, so a conversation lifted out of a channel says
    * which thread it came from. Undefined rather than throwing: a handoff without
    * its link is worth having, and one that refused to happen is not. */
@@ -402,7 +434,83 @@ export function slackApi(
     return resolved;
   };
 
+  // Both answer about the workspace rather than about a turn: one call each,
+  // ever. Not `memberOf` below, which a member changes by joining a channel.
+  let host: Promise<string | undefined> | undefined;
+  const publicity = new Map<string, Promise<'public' | 'private' | 'unseen'>>();
+
   return {
+    host: () => {
+      host ??= quick.auth
+        .test()
+        .then((got) => (typeof got.url === 'string' ? new URL(got.url).host : undefined))
+        .catch((error: unknown) => {
+          // Left unknown rather than remembered as unknown: a blip at boot would
+          // otherwise turn the host check off for the life of the process. The
+          // logger is a caller's callback, so it gets `mark`'s treatment: a
+          // throw from it must not be what ends the turn.
+          host = undefined;
+          try {
+            options.log?.(`workspace host unknown: ${String(error)}`);
+          } catch {
+            /* a caller's logger is not worth the turn */
+          }
+          return undefined;
+        });
+      return host;
+    },
+    async conversationsOf(user) {
+      const theirs = new Set<string>();
+      try {
+        for await (const page of quick.paginate('users.conversations', {
+          user,
+          types: 'private_channel,mpim',
+          limit: 1000,
+          exclude_archived: false,
+        })) {
+          for (const one of (page as { channels?: { id?: unknown }[] }).channels ?? [])
+            if (typeof one.id === 'string') theirs.add(one.id);
+        }
+      } catch (error) {
+        // Undefined, not the empty set, and whatever was collected is dropped:
+        // a half-read list answers "not in it" for everything past the page
+        // that failed, which is a refusal dressed as an answer. Said out loud,
+        // because a missing scope here is otherwise a member auditing their own
+        // memberships — and swallowed, since a caller's logger throwing must
+        // not be what decides they cannot read their own channel.
+        try {
+          options.log?.(
+            `cannot list ${user}'s conversations: ${slackCode(error) ?? String(error)}`,
+          );
+        } catch {
+          /* a caller's logger is not worth the answer */
+        }
+        return undefined;
+      }
+      return theirs;
+    },
+    visibility: (channel) => {
+      const known = publicity.get(channel);
+      if (known) return known;
+      const asking = quick.conversations
+        .info({ channel })
+        .then((got) =>
+          got.channel?.is_channel === true && got.channel.is_private !== true
+            ? ('public' as const)
+            : ('private' as const),
+        )
+        .catch((error: unknown) => {
+          publicity.delete(channel);
+          try {
+            options.log?.(`cannot see ${channel}: ${slackCode(error) ?? String(error)}`);
+          } catch {
+            /* a caller's logger is not worth the answer */
+          }
+          return 'unseen' as const;
+        });
+      publicity.set(channel, asking);
+      return asking;
+    },
     async threadReplies(channel, thread) {
       try {
         const raw: RawMessage[] = [];

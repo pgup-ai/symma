@@ -25,10 +25,15 @@ import {
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
+import { LINKS_PER_MESSAGE, resolveLinks, slackLinks, type LinkMiss } from './links.js';
 import { plainly, type MarkState } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
+  /** Who is asking. Their access is the one that decides what a link in this
+   * message may be resolved into — never the bot's, which is the union of
+   * everyone's invitations. */
+  user: string;
   /** The DM channel, always a `D` id — resolved by Slack, not by us. */
   channel: string;
   ts: string;
@@ -211,6 +216,52 @@ function pickers(
   return Object.keys(offer).length ? { conversation, agent, ...offer } : undefined;
 }
 
+/** These reads sit in front of the acknowledgement, so a Slack call that never
+ * settles is a member watching nothing happen. Generous — five threads is a
+ * real fetch — but finite. */
+const LINKS_MS = 8_000;
+
+/** The workspace lookup's slice of it. One `auth.test`, cached after it lands,
+ * so a slow one is a first message on a degraded Slack — and bounding it to the
+ * whole budget would leave the links it is there to check with none. Short,
+ * because the fallback is benign: the pin comes off and the access check is
+ * what was guarding the fetch anyway. */
+const HOST_MS = 1_000;
+
+/**
+ * Stops waiting on `work` after `ms`, without stopping `work` — the Slack SDK
+ * takes no signal, and a request finishing into a void costs nothing. Two jobs
+ * on the one handle: `unref` so waiting on something nobody reads cannot be the
+ * last thing holding the process open, and the clear so a deadline that lost
+ * its race, or a rejection that skipped past it, is not left pending — one
+ * handle per read adds up under traffic.
+ */
+async function before<T>(ms: number, work: Promise<T>): Promise<T | 'too slow'> {
+  let late: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<'too slow'>((resolve) => {
+        late = setTimeout(() => resolve('too slow'), Math.max(0, ms));
+        late.unref();
+      }),
+    ]);
+  } finally {
+    clearTimeout(late);
+  }
+}
+
+/** Why a link the member pasted is not in the prompt, in their words. Their
+ * next move differs by which it was: a channel that is not theirs is not a
+ * message that was too long. */
+const WHY: Record<LinkMiss['why'], string> = {
+  'not yours': 'it is not a channel you are in',
+  unreadable: 'I cannot read it',
+  'too long': 'it did not fit',
+  'too slow': 'Slack was too slow',
+  'over the cap': `I take ${String(LINKS_PER_MESSAGE)} links per message`,
+};
+
 export interface DmDeps {
   find: (dmChannel: string, rootThread: string) => Promise<ConversationRef | undefined>;
   /** The machine this member's agent would run on, whatever state it is in, and
@@ -268,6 +319,14 @@ export interface DmDeps {
   /** The DM thread itself, which is the durable transcript a follow-up is
    * caught up from. Undefined when the bot cannot read the channel. */
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
+  /** This workspace's own host, for pinning pasted links to it. */
+  host: () => Promise<string | undefined>;
+  /** What the bot can say about a channel: anyone's, its own to see but not to
+   * vouch for, or not visible to it at all. */
+  visibility: (channel: string) => Promise<'public' | 'private' | 'unseen'>;
+  /** Every conversation this member is in — the other way a link is theirs to
+   * read. Undefined where the scan failed, which is not the same as none. */
+  conversationsOf: (user: string) => Promise<Set<string> | undefined>;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -448,10 +507,70 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
+  // First claim on the budget: the link is what this message is about, where
+  // the catch-up below is background. Nothing at all for a message with no link
+  // in it, which is nearly all of them — the reads here are API calls, and no
+  // ordinary turn should pay for a feature it is not using.
+  //
+  // One deadline over the whole resolution, permission checks included — they
+  // are Slack calls too, and five quick reads or one that never answers are the
+  // same wait to a member watching for the acknowledgement.
+  const links = slackLinks(message.text);
+  const by = Date.now() + LINKS_MS;
+  const within = <T>(read: Promise<T>): Promise<T | 'too slow'> => before(by - Date.now(), read);
+  // Bounded like every other Slack call here, and to a slice rather than the
+  // lot: unbounded it delays the acknowledgement past the ceiling, and given
+  // the ceiling it spends what the links were for. Unknown is a state this
+  // already has words for — the pin comes off, and the access check below is
+  // what was keeping anyone honest anyway.
+  const found = links.length ? await before(HOST_MS, deps.host()) : undefined;
+  const known = found === 'too slow' ? undefined : found;
+  // One scan of this member's conversations for the whole message, however many
+  // links it holds: their list is short, but reading it once per link is
+  // latency in front of the acknowledgement buying no new answer.
+  let mine: Promise<Set<string> | undefined> | undefined;
+  const linked = links.length
+    ? await resolveLinks(message.text, {
+        budgetBytes: deps.budgetBytes,
+        threadReplies: deps.threadReplies,
+        log: deps.log,
+        ...(known ? { host: known } : {}),
+        // What this member could have opened themselves — never what the bot
+        // can see, which is the union of everyone's invitations. A public
+        // channel is theirs by definition; their own DM with it arrived this
+        // turn; anything else has to have them in it.
+        //
+        // A channel the bot cannot see is its own answer. Slack restricts the
+        // membership list to conversations the *bot* shares with them, so a
+        // private channel it was never invited to is one it cannot tell them
+        // about — and "you are not in that channel" would be a guess, usually
+        // wrong, about the one thing they can check for themselves.
+        mayRead: async (channel) => {
+          if (channel === conversation.dmChannel) return 'yes';
+          const seen = await deps.visibility(channel);
+          if (seen === 'public') return 'yes';
+          if (seen === 'unseen') return 'unreadable';
+          const theirs = await (mine ??= deps.conversationsOf(message.user));
+          // A scan that failed is not a member standing outside the channel.
+          // Only a list that arrived can say they are not in it.
+          if (!theirs) return 'unreadable';
+          return theirs.has(channel) ? 'yes' : 'not yours';
+        },
+        self: { channel: conversation.dmChannel, root: conversation.rootThread },
+        spent: () => Date.now() > by,
+        reading: within,
+      })
+    : { sections: [], missed: [], spent: 0 };
+
   // Even when a resume is on offer, because whether the agent still has that
   // session is not known until it has been asked — and arriving without the
   // thread is the half that cannot be recovered from (§4).
-  const caught = existing ? await catchUp(message, conversation, deps) : undefined;
+  const caught = existing
+    ? await catchUp(message, conversation, {
+        ...deps,
+        budgetBytes: Math.max(0, deps.budgetBytes - linked.spent),
+      })
+    : undefined;
 
   // Fetched before the run so a refusal is one aside rather than a failed turn,
   // and after the endpoint check so a shut laptop costs no downloads.
@@ -486,8 +605,18 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // honoured, which is the comparison `driveAcpSession` itself makes to decide
   // whether to send the transcript — a turn whose resume was refused ran on that
   // transcript, and still has to say what was missing from it.
+  // Links this answer ran without rest beside the catch-up note, but
+  // unconditionally: the fetch rides the prompt, so no resume makes this stop
+  // being true.
+  const leftOutNote = linked.missed.length
+    ? `This ran without ${linked.missed.map((miss) => `<${miss.url}> — ${WHY[miss.why]}`).join(', ')}.`
+    : undefined;
   const restingFor = (ranIn: string | undefined): string =>
-    [scope, decision.resume !== undefined && ranIn === decision.resume ? undefined : caught?.note]
+    [
+      scope,
+      leftOutNote,
+      decision.resume !== undefined && ranIn === decision.resume ? undefined : caught?.note,
+    ]
       .filter(Boolean)
       .join(' ');
   const opening = restingFor(decision.resume);
@@ -496,8 +625,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
+  const following = linked.sections.length
+    ? `Reading the ${linked.sections.length > 1 ? 'threads' : 'thread'} behind your ${
+        linked.sections.length > 1 ? 'links' : 'link'
+      }.`
+    : undefined;
   // Said only while the turn is out.
-  const inFlight = [attempting, reading].filter(Boolean).join(' ');
+  const inFlight = [attempting, following, reading].filter(Boolean).join(' ');
   // The ellipsis is the "still going" cue, and it belongs to the in-flight text
   // rather than to what rests, which is as true after the answer as before it —
   // so a turn with nothing else to say needs no update to take a cue off a line
@@ -539,19 +673,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
   const settle = async (text: string): Promise<void> => {
     if (!lastShown && !inFlight) return;
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
+    await before(
+      TIDY_MS,
       updating.then(() => deps.working(acked.channel, acked.ts, text)).catch(() => undefined),
-      new Promise<void>((resolve) => {
-        deadline = setTimeout(resolve, TIDY_MS);
-        // Two different jobs on the same handle: `unref` so waiting on a line
-        // nobody reads cannot be the last thing holding a process open, and the
-        // clear below so a deadline that lost its race is not left pending — one
-        // handle per turn adds up under traffic.
-        deadline.unref();
-      }),
-    ]);
-    clearTimeout(deadline);
+    );
   };
 
   let answer: {
@@ -576,7 +701,21 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // The member's pick when they have made one, else the agent's own
       // default. The prefix is what makes it parse either way.
       model: `${decision.agent}/${decision.model ?? 'default'}`,
-      prompt: message.text,
+      // The fetched threads ride the prompt rather than the context: context is
+      // dropped where a resume is honoured, and a link pasted into this message
+      // is new to that session too. The unread line is for an agent with Slack
+      // access of its own — it may reach what the bot cannot.
+      prompt: [
+        message.text,
+        ...linked.sections,
+        ...(linked.missed.length
+          ? [
+              `Not fetched above — read ${linked.missed.length > 1 ? 'them' : 'it'} yourself if you have Slack access: ${linked.missed
+                .map((miss) => miss.url)
+                .join(', ')}`,
+            ]
+          : []),
+      ].join('\n\n'),
       onProgress: narrate,
       ...(caught?.context ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
