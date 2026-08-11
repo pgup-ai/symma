@@ -22,7 +22,7 @@ Use this skill with a hostile review mindset after implementation and before fin
 5. Bias hard toward deletion. Flag and fix:
    - one-use helpers, wrappers, types, options, or files that do not reduce real complexity
    - duplicate validation, impossible-state guards, rethrow-only catches, and speculative fallbacks
-   - assertions weakened or deleted inside existing tests to make a change pass; the fix is restoring them unless the PR states the behavior change that invalidates them
+   - assertions weakened or deleted inside existing tests to make a change pass; restore them when the contract is unchanged, or update them to assert the new contract when the PR states that behavior change — a rationale alone never discharges the assertion
    - scope creep, repeated docs/config text, and unused exports
    - duplicated logic where an existing package primitive already fits; search with `rg` before keeping new logic
 6. Keep additions only when they fix requested behavior, preserve an existing contract, cover a real regression, or document a concrete operational constraint.
