@@ -75,8 +75,8 @@ export interface SlackApi {
     thread: string,
     text: string,
     /** The member's own Slack token. Slack decides authorship by token type, so
-     * this is the whole difference between the answer going out as them and
-     * going out as the bot with their name typed in front of it. */
+     * this is the whole difference between posting as them and posting as the
+     * bot with their name typed in front. */
     asMember?: string,
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
 }
@@ -300,10 +300,9 @@ export const modelSelect = (
         agent,
       );
 
-/** The agents this machine is logged into. Names, not a roster the agent
- * published, so there is nothing to describe them with — and nothing to escape
- * either: an unsafe one is dropped rather than shown, since the gateway would
- * refuse the pick it produced. */
+/** The agents this machine is logged into: names the companion resolved, not a
+ * roster with descriptions. One outside the wire's alphabet is dropped rather
+ * than shown, since the gateway would refuse the pick it produced. */
 export const agentSelect = (agents: string[], current: string): Record<string, unknown>[] =>
   rosterSelect(
     undefined,
@@ -593,8 +592,7 @@ export function slackApi(
     },
     async share(channel, thread, text, asMember) {
       try {
-        // Built per call rather than cached: it belongs to one member, and a
-        // client kept between them is a client posting as the wrong one.
+        // Built per call: a client cached across members posts as the wrong one.
         const author = asMember
           ? new WebClient(asMember, options.fetch ? { fetch: options.fetch } : {})
           : client;

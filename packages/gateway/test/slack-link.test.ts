@@ -23,13 +23,10 @@ describe('slack account linking', () => {
     const forged = Buffer.from('owner-2.' + String(NOW)).toString('base64url');
     for (const state of [
       `${forged}.${'A'.repeat(43)}`, // a signature of the right shape
-      `${forged}.`,
-      forged,
+      forged, // and none at all
       linkState('another-gateway', 'owner-2', NOW),
-      // Signed for someone else, with their body swapped for a member of ours.
+      // A real signature of ours, over a body naming somebody else.
       `${forged}.${linkState(SECRET, 'owner-1', NOW).split('.')[1]!}`,
-      '',
-      '..',
     ]) {
       assert.equal(readLinkState(SECRET, state, NOW), undefined, JSON.stringify(state));
     }

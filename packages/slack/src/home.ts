@@ -120,10 +120,10 @@ export function homeBlocks(
     context('◫ Access level is chosen in each conversation'),
   );
 
-  // Only where the machine is logged into more than one — the gateway sends the
-  // list on that condition, since a picker with one option is a control that
-  // does nothing. Above the model, because a model belongs to the agent that
-  // offered it: changing agent is the bigger of the two choices.
+  // Above the model, because a model belongs to the agent that offered it:
+  // changing agent is the larger of the two choices. Absent where the machine
+  // has only one — the gateway sends no list, and a select with one option is a
+  // control that does nothing.
   const agents = target.agents?.length ? agentSelect(target.agents, target.agent ?? '') : [];
   if (agents.length)
     blocks.push(
@@ -140,9 +140,8 @@ export function homeBlocks(
     context('Conversations where you picked a model keep it.'),
   );
 
-  // §5's "attributable to whoever approved it". Only ever shown as what it is:
-  // the member handing over their own posting rights, for the one thing they
-  // already press a button to do.
+  // §5's "attributable to whoever approved it", offered as what it is: their own
+  // posting rights, for the one thing they already press a button to do.
   if (linking?.linked) blocks.push(context('◆ Answers you share go out as you.'));
   else if (linking?.url)
     blocks.push(

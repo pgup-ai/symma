@@ -445,9 +445,8 @@ const connection = socketMode({
           selected_option?: { value?: unknown };
         }[];
       };
-      // Which agent this member works with, from the home tab. Nothing else to
-      // shed with it: a model is only ever served back to the agent it was
-      // picked under, and a resume only to the agent it was minted under.
+      // Nothing is shed with an agent change: a model is served only back to the
+      // agent it was picked under, a resume only to the one it was minted under.
       const asAgent = actions?.find((a) => a.action_id === DEFAULT_AGENT_ACTION)?.selected_option
         ?.value;
       if (typeof asAgent === 'string') {
@@ -558,9 +557,8 @@ const connection = socketMode({
           { user: who, channel: where, messageTs, thread, text, conversation },
           {
             destination: depsFor(who).destination,
-            // Fetched per share, not per turn: it is the member's own
-            // credential, and the bot has no business holding one between the
-            // two clicks that need it.
+            // Fetched per share, not per turn: the bot has no business holding
+            // a member's credential between the two clicks that need it.
             asMember: async () =>
               (await ask<{ token?: string }>('/api/slack/user-token', { user: who })).token,
             share: api.share,

@@ -1,15 +1,13 @@
 /**
  * The state that carries a member through Slack's OAuth consent and back.
  *
- * Signed rather than stored: it has to survive a round trip through a browser
- * and Slack, and a row per abandoned click is a table nobody prunes. Its own
- * module because `server.ts` starts listening at import, so nothing in there
- * can be tested directly — and this is the half of the flow where being wrong
- * is a member's posting rights filed under somebody else's name.
+ * Signed rather than stored: a row per abandoned click is a table nobody
+ * prunes. Its own module because `server.ts` listens at import and so cannot be
+ * tested, and this is the half where being wrong is a member's posting rights
+ * filed under somebody else's name.
  *
- * It is not a credential. It proves only that this gateway minted it, and the
- * callback still checks the Slack account that comes back is the member it
- * names.
+ * Not a credential: it proves only that this gateway minted it, and the
+ * callback still checks the account coming back is the member it names.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
 

@@ -28,8 +28,8 @@ export interface ShareDeps {
    * has nowhere to go back to, or is not this member's. */
   destination: (conversation: string) => Promise<{ channel: string; thread: string } | undefined>;
   /** The member's own Slack token, when they have linked their account.
-   * Undefined is the ordinary state, not a failure: the answer goes out under
-   * the bot's name with theirs in front of it, as it always did. */
+   * Undefined is ordinary, not a failure — the bot posts with their name in
+   * front of it, as it always did. */
   asMember: () => Promise<string | undefined>;
   share: (
     channel: string,
@@ -71,9 +71,8 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
   }
 
   // §5 wants a channel post attributable to whoever approved it. With their own
-  // token that is what Slack records — the message is theirs, so it needs no
-  // sentence saying whose it is. Without one the bot is the author and has to
-  // say who asked for it, which is the weaker version of the same thing.
+  // token Slack records exactly that, so the message needs no sentence saying
+  // whose it is; without one the bot is the author and has to say.
   const token = await deps.asMember();
   const result = await deps.share(
     to.channel,

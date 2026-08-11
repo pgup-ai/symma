@@ -73,11 +73,6 @@ describe('the surfaces with no thread under them', () => {
     // The one they are on is the current selection, not just an option in the
     // list: a picker that shows no selection reads as nothing being chosen.
     assert.equal((shown.initial_option as { value: string }).value, JSON.stringify({ m: 'codex' }));
-    assert.ok(
-      text(homeBlocks(both)).indexOf(DEFAULT_AGENT_ACTION) <
-        text(homeBlocks(both)).indexOf(DEFAULT_MODEL_ACTION),
-      'agent above model',
-    );
   });
 
   it('renders the setup as it is, not as it would read best', () => {

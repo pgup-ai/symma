@@ -225,8 +225,7 @@ export interface Store {
     agent?: string,
   ): Promise<string | undefined>;
   /** The member's own Slack token, for publishing as them rather than as the
-   * bot. Undefined until they link, which is the state everything falls back
-   * from. */
+   * bot. Undefined until they link, which is what everything falls back from. */
   slackUserToken(owner: Owner): Promise<string | undefined>;
   setSlackUserToken(owner: Owner, token: string): Promise<void>;
   /** The agent this member's turns run on, of the ones their machine offers.
