@@ -94,6 +94,7 @@ function harness(
    * — the tidy included, which is the half a per-narration count misses. */
   const asks: number[] = [];
   let charged = 0;
+  let stamps = 0;
   const posts: {
     channel: string;
     text: string;
@@ -204,13 +205,16 @@ function harness(
       );
     },
     updates: {
+      // Stamps from zero — a reservation is a moment, and the first of them in
+      // a process is falsy.
       room: (n) => {
         asks.push(n);
-        charged += over.budgetSpent === true ? 0 : n;
-        return over.budgetSpent !== true;
+        if (over.budgetSpent === true) return undefined;
+        charged += n;
+        return stamps++;
       },
-      take: () => {
-        charged += 1;
+      take: (reserved) => {
+        if (reserved === undefined) charged += 1;
       },
     },
     working: (channel, ts, text) => {
@@ -676,7 +680,7 @@ describe('dm message', () => {
     // Asked after the per-turn interval, not before it: a turn narrating every
     // frame would otherwise drain the workspace's allowance just by being busy,
     // without ever writing a line.
-    const { deps, runs, asks } = harness({ existing: CONVERSATION });
+    const { deps, runs, asks, charged } = harness({ existing: CONVERSATION });
     await handleDm(
       {
         user: 'U-nel',
@@ -695,13 +699,16 @@ describe('dm message', () => {
     // lands one uncounted `chat.update` each — twice the ceiling in a busy
     // minute, which is when it matters.
     assert.deepEqual(asks, [2], 'five frames inside one interval, one request for budget');
+    // And two is all it costs: the tidy that followed spent the reservation it
+    // was handed rather than charging the workspace a second time.
+    assert.equal(charged(), 2);
   });
 
   it('takes the narration back off once the answer is there to read', async () => {
     // Asserted on what Slack finished applying, with the step deliberately the
     // slower of the two: concurrent updates on one message can land either way
     // round, and a restore that lost that race would put the step back.
-    const { deps, posts, timeline } = harness({
+    const { deps, posts, timeline, charged } = harness({
       existing: CONVERSATION,
       narrates: 'Reading dm.ts',
       updateDelays: [20, 0],
@@ -725,6 +732,10 @@ describe('dm message', () => {
     // before this update is waited on, or one Slack sits on would hold the thread
     // against the member's next message.
     assert.equal(timeline.at(-1), atRest(posts[0]!.text));
+    // Two updates, and two is what the workspace was charged: the step reserved
+    // the one undoing it, and handed that reservation over rather than paying
+    // for it twice.
+    assert.equal(charged(), 2);
   });
 
   it('still says what was missing when the resume it offered was refused', async () => {

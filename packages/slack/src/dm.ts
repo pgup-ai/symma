@@ -657,6 +657,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // in either order, and the cleanup below losing that race would leave a step
   // sitting above the answer — the thing it is there to take away.
   let lastShown = 0;
+  let reserved: number | undefined;
   let updating = Promise.resolve();
   const narrate = (title: string): void => {
     const now = Date.now();
@@ -667,7 +668,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // step, because the cleanup below is not optional once a step is written —
     // unreserved, every narrating turn would put one uncounted `chat.update`
     // over the ceiling, and a busy minute would clear it twice over.
-    if (!deps.updates.room(lastShown ? 1 : 2)) return;
+    const paid = deps.updates.room(lastShown ? 1 : 2);
+    if (paid === undefined) return;
+    reserved ??= paid;
     lastShown = now;
     // Caught on the chain and not on the call, so a `working` that throws where
     // it stands rather than rejecting cannot leave `updating` rejected — every
@@ -686,10 +689,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
   const settle = async (text: string): Promise<void> => {
     if (!lastShown && !inFlight) return;
-    // Taken rather than asked, and only where no step paid for it already: an
-    // acknowledgement left mid-step above a delivered answer reports the turn
-    // wrongly, where a quiet one is merely quiet.
-    if (!lastShown) deps.updates.take();
+    // Taken rather than asked: an acknowledgement left mid-step above a
+    // delivered answer reports the turn wrongly, where a quiet one is merely
+    // quiet. The reservation goes with it, so a turn that outran its own minute
+    // is charged again rather than landing this uncounted.
+    deps.updates.take(reserved);
     await before(
       TIDY_MS,
       updating.then(() => deps.working(acked.channel, acked.ts, text)).catch(() => undefined),

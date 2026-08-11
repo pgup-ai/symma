@@ -167,12 +167,18 @@ export interface UpdateBudget {
   /** Whether `updates` more will fit, spending them if so. Narration is the
    * only caller that asks, because narration is the only one that may give
    * way — and it asks for two on a turn's first step, since a step written is
-   * a step that has to be taken back off. */
-  room: (updates: number) => boolean;
-  /** Spends one whatever the answer would have been, for an update that has to
-   * land. Over the ceiling by however many turns are mid-flight, which is the
-   * gap between this and `perMinute` — not the whole of Slack's. */
-  take: () => void;
+   * a step that has to be taken back off. Answers with the moment they were
+   * spent, which is what the cleanup comes back with. */
+  room: (updates: number) => number | undefined;
+  /** Spends the cleanup whatever the answer would have been — a refused tidy
+   * leaves an acknowledgement reporting a finished turn as still running.
+   *
+   * `reserved` is what `room` answered for the step that committed it, or
+   * undefined where no step did. Aged out of the window — a turn can outlive
+   * its own minute — it buys nothing and the cleanup is charged again. Held as
+   * a stamp that expires rather than an obligation that clears, so a turn that
+   * dies before settling costs the budget a minute and not a restart. */
+  take: (reserved: number | undefined) => void;
 }
 
 /** A minute of stamps rather than a token bucket: this is asked a few dozen
@@ -190,11 +196,14 @@ export function updateBudget(perMinute = UPDATES_PER_MINUTE): UpdateBudget {
   return {
     room: (updates) => {
       const at = now();
-      if (spent.length + updates > perMinute) return false;
+      if (spent.length + updates > perMinute) return undefined;
       for (let i = 0; i < updates; i += 1) spent.push(at);
-      return true;
+      return at;
     },
-    take: () => spent.push(now()),
+    take: (reserved) => {
+      const at = now();
+      if (reserved === undefined || at - reserved >= 60_000) spent.push(at);
+    },
   };
 }
 
