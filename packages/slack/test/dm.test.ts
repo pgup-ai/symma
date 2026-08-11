@@ -66,6 +66,8 @@ function harness(
     host?: string;
     /** Channels the member could not open for themselves. */
     notMine?: string[];
+    /** Not public, but the member is in them — a private channel, a group DM. */
+    privateMine?: string[];
     /** The source channel thread a mention came out of, for a conversation whose
      * `source` says where to read it. `null` is one the bot cannot read. */
     channel?: ThreadMessage[] | null;
@@ -115,7 +117,9 @@ function harness(
     host: () => Promise.resolve(over.host ?? 'acme.slack.com'),
     // Every channel a test links to is one the member could open, unless it
     // says otherwise — the refusal has its own test.
-    publicChannel: (channel) => Promise.resolve(!(over.notMine ?? []).includes(channel)),
+    publicChannel: (channel) =>
+      Promise.resolve(!(over.notMine ?? []).concat(over.privateMine ?? []).includes(channel)),
+    memberOf: (_user, channel) => Promise.resolve((over.privateMine ?? []).includes(channel)),
     threadReplies: (channel) => {
       if (channel !== 'D-nel')
         return Promise.resolve(over.channel === null ? undefined : (over.channel ?? []));
@@ -266,7 +270,14 @@ describe('dm message', () => {
   it('resumes the conversation the thread root names', async () => {
     const { deps, posts, turns } = harness({ existing: CONVERSATION });
     const outcome = await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'what broke?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'what broke?',
+      },
       deps,
     );
     assert.equal(outcome, 'resumed');
@@ -285,7 +296,10 @@ describe('dm message', () => {
     // member's own message, which is what their replies will thread under.
     const { deps, turns } = harness();
     assert.equal(
-      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps),
+      await handleDm(
+        { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+        deps,
+      ),
       'opened',
     );
     // The whole spec, not one absent key: asserting `sourceChannel === undefined`
@@ -304,7 +318,14 @@ describe('dm message', () => {
     const { deps, posts, turns } = harness();
     assert.equal(
       await handleDm(
-        { channel: 'D-nel', ts: '250.0', threadTs: '111.0', eventId: 'Ev-1', text: 'what broke?' },
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '111.0',
+          eventId: 'Ev-1',
+          text: 'what broke?',
+        },
         deps,
       ),
       'opened',
@@ -319,7 +340,14 @@ describe('dm message', () => {
     const { deps, posts, asked } = harness({ existing: CONVERSATION, turn: false });
     assert.equal(
       await handleDm(
-        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'what broke?' },
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '200.0',
+          eventId: 'Ev-1',
+          text: 'what broke?',
+        },
         deps,
       ),
       'already handled',
@@ -334,7 +362,14 @@ describe('dm message', () => {
     const { deps, posts, runs, asked } = harness({ existing: CONVERSATION, busy: true });
     assert.equal(
       await handleDm(
-        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '200.0',
+          eventId: 'Ev-1',
+          text: 'and now?',
+        },
         deps,
       ),
       'still working',
@@ -348,7 +383,13 @@ describe('dm message', () => {
   });
 
   it('closes the turn on every way out, or the thread stays busy forever', async () => {
-    const ask = { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' };
+    const ask = {
+      user: 'U-nel',
+      channel: 'D-nel',
+      ts: '250.0',
+      eventId: 'Ev-1',
+      text: 'what broke?',
+    };
     for (const [why, over, message, status] of [
       ['nothing to ask', {}, { ...ask, text: '  ' }, 'cancelled'],
       ['refused', { endpoint: null }, ask, 'cancelled'],
@@ -385,7 +426,10 @@ describe('dm message', () => {
   it('runs the question on the member’s own machine and posts what came back', async () => {
     const { deps, posts, runs } = harness({ answer: 'the deploy fails on a missing env var' });
     assert.equal(
-      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps),
+      await handleDm(
+        { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+        deps,
+      ),
       'opened',
     );
     // Their words on their own machine, and the conversation is the run — so a
@@ -423,7 +467,14 @@ describe('dm message', () => {
       modes: roster,
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'change it' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'change it',
+      },
       deps,
     );
     assert.equal(runs[0]!.mode, 'agent');
@@ -450,7 +501,14 @@ describe('dm message', () => {
       models,
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     // `provider/model` is the only shape the specs parse, brackets and all.
@@ -487,7 +545,14 @@ describe('dm message', () => {
       resumeWith: 'codex resume',
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'and now?',
+      },
       deps,
     );
     assert.equal(
@@ -505,7 +570,14 @@ describe('dm message', () => {
     // that budget on every answer instead.
     const { deps, updates } = harness({ existing: CONVERSATION });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     assert.deepEqual(updates, []);
@@ -521,7 +593,14 @@ describe('dm message', () => {
       updateThrows: true,
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     // The restore still ran and still landed: what the throw took out was one
@@ -539,7 +618,14 @@ describe('dm message', () => {
       updateDelays: [20, 0],
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     assert.deepEqual(
@@ -566,7 +652,14 @@ describe('dm message', () => {
     };
     const refused = harness({ ...over, endpoint: { ...READY, resume: 'acp-9' } });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'why?',
+      },
       refused.deps,
     );
     assert.match(refused.updates.at(-1)!.text, /I cannot read <#C-incidents> just now/);
@@ -575,7 +668,14 @@ describe('dm message', () => {
     // unused, so a warning about it would be about nothing.
     const honoured = harness({ ...over, endpoint: { ...READY, resume: 'acp-1' } });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'why?',
+      },
       honoured.deps,
     );
     assert.doesNotMatch(honoured.updates.at(-1)!.text, /I cannot read/);
@@ -592,6 +692,7 @@ describe('dm message', () => {
     });
     await handleDm(
       {
+        user: 'U-nel',
         channel: 'D-nel',
         ts: '250.0',
         threadTs: '200.0',
@@ -626,6 +727,7 @@ describe('dm message', () => {
     });
     await handleDm(
       {
+        user: 'U-nel',
         channel: 'D-nel',
         ts: '250.0',
         threadTs: '200.0',
@@ -647,7 +749,14 @@ describe('dm message', () => {
     const url = 'https://acme.slack.com/archives/C0FOREIGN00/p1786400100000001';
     const { deps, posts, runs } = harness({ existing: CONVERSATION, channel: null });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: `see <${url}>` },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: `see <${url}>`,
+      },
       deps,
     );
     // The member hears it where the catch-up note lives — in the resting text,
@@ -669,7 +778,14 @@ describe('dm message', () => {
       return Promise.resolve('acme.slack.com');
     };
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'what broke?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'what broke?',
+      },
       deps,
     );
     assert.equal(hosts, 0);
@@ -687,7 +803,14 @@ describe('dm message', () => {
       channel: [{ ts: '1786400100.000001', author: 'Ola', text: 'their private plans' }],
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: `see <${url}>` },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: `see <${url}>`,
+      },
       deps,
     );
     assert.doesNotMatch(runs[0]!.prompt, /their private plans/);
@@ -698,6 +821,7 @@ describe('dm message', () => {
     const { deps, posts, runs } = harness({ existing: CONVERSATION, fileBytes: 'a,b\n1,2\n' });
     await handleDm(
       {
+        user: 'U-nel',
         channel: 'D-nel',
         ts: '250.0',
         threadTs: '200.0',
@@ -739,6 +863,7 @@ describe('dm message', () => {
     });
     await handleDm(
       {
+        user: 'U-nel',
         channel: 'D-nel',
         ts: '250.0',
         threadTs: '200.0',
@@ -764,6 +889,7 @@ describe('dm message', () => {
     });
     await handleDm(
       {
+        user: 'U-nel',
         channel: 'D-nel',
         ts: '250.0',
         threadTs: '200.0',
@@ -797,7 +923,14 @@ describe('dm message', () => {
       resumeWith: 'codex resume',
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     // Asides in order: the agent's own first, then what it cost, then the
@@ -821,7 +954,14 @@ describe('dm message', () => {
       ],
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     assert.deepEqual(posts[1]!.notices, [
@@ -842,7 +982,14 @@ describe('dm message', () => {
       })),
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     assert.deepEqual(posts[1]!.notices, [
@@ -864,6 +1011,7 @@ describe('dm message', () => {
     });
     await handleDm(
       {
+        user: 'U-nel',
         channel: 'D-nel',
         ts: '250.0',
         threadTs: '200.0',
@@ -894,7 +1042,14 @@ describe('dm message', () => {
       ),
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     assert.deepEqual(sheds, ['model:conv-1']);
@@ -906,7 +1061,14 @@ describe('dm message', () => {
     // nothing here at all.
     const { deps, posts } = harness({ existing: CONVERSATION, usage: { cachedTokens: 12 } });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     assert.equal(posts[1]!.notices, undefined);
@@ -920,7 +1082,14 @@ describe('dm message', () => {
       usage: { totalTokens: 120_000, cachedTokens: 118_000 },
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-2', text: 'hello' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-2',
+        text: 'hello',
+      },
       cheap.deps,
     );
     assert.equal(cheap.posts[1]!.notices, undefined);
@@ -937,7 +1106,14 @@ describe('dm message', () => {
       modes: roster,
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'look' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'look',
+      },
       deps,
     );
     // Absent mode still runs read-only, and the tier is said, not implied.
@@ -955,7 +1131,14 @@ describe('dm message', () => {
       fails: new Error('acp:codex slack-conv-1: mode yolo not offered (offers: read-only, agent)'),
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     // Without the shed this thread fails every turn from here on: the picker
@@ -973,7 +1156,14 @@ describe('dm message', () => {
       shedFails: true,
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
       deps,
     );
     // A stale mode still stored means the retry fails the same way — saying
@@ -989,7 +1179,14 @@ describe('dm message', () => {
       modes: { currentModeId: 'read-only', availableModes: [{ id: 'read-only' }] },
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'hi' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'hi',
+      },
       deps,
     );
     assert.equal(posts[1]!.pickers, undefined);
@@ -1001,7 +1198,10 @@ describe('dm message', () => {
     // `Invalid model "default"; expected "provider/model"`. The prefix is not
     // read by anything, so the agent's own name is the honest one to use.
     const { deps, runs } = harness();
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
 
     assert.equal(runs[0]!.model, 'kilo/default');
   });
@@ -1013,7 +1213,10 @@ describe('dm message', () => {
     const { deps, posts, runs, askedFor } = harness({
       endpoint: { ...READY, workspace: 'ws-abc123', workspaceLabel: 'symma' },
     });
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
 
     assert.match(posts[0]!.text, /^`symma` ·/);
     assert.doesNotMatch(posts[0]!.text, /cannot see your files/);
@@ -1030,7 +1233,10 @@ describe('dm message', () => {
     const { deps, posts } = harness({
       endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'we`ird <!here>' },
     });
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
 
     assert.match(posts[0]!.text, /^`we ird &lt;!here&gt;` · `read-only`$/);
     // Two spans — label and mode — each opened and closed; the mode span is
@@ -1053,7 +1259,14 @@ describe('dm message', () => {
       ],
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'why?',
+      },
       deps,
     );
     assert.match(runs[0]!.context!, /here is the trace/);
@@ -1084,7 +1297,14 @@ describe('dm message', () => {
       narrates: 'Reading dm.ts',
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'why?',
+      },
       deps,
     );
     assert.match(posts[0]!.text, /I cannot read <#C-incidents> just now/);
@@ -1104,7 +1324,14 @@ describe('dm message', () => {
     });
     await assert.rejects(
       handleDm(
-        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '200.0',
+          eventId: 'Ev-1',
+          text: 'why?',
+        },
         deps,
       ),
       /slack is down/,
@@ -1122,7 +1349,14 @@ describe('dm message', () => {
     });
     assert.equal(
       await handleDm(
-        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '200.0',
+          eventId: 'Ev-1',
+          text: 'why?',
+        },
         deps,
       ),
       'resumed',
@@ -1140,7 +1374,14 @@ describe('dm message', () => {
     ];
     const { deps, posts, runs } = harness({ existing: CONVERSATION, history });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'and now?',
+      },
       deps,
     );
 
@@ -1168,7 +1409,14 @@ describe('dm message', () => {
     // under it carries no thread at all rather than a trimmed one.
     const { deps, posts } = harness({ existing: CONVERSATION, history, budgetBytes: 280 });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'and now?',
+      },
       deps,
     );
     assert.match(posts[0]!.text, /earlier messages that did not fit/);
@@ -1180,7 +1428,14 @@ describe('dm message', () => {
     const { deps, posts, runs } = harness({ existing: CONVERSATION, history: null });
     assert.equal(
       await handleDm(
-        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '200.0',
+          eventId: 'Ev-1',
+          text: 'and now?',
+        },
         deps,
       ),
       'resumed',
@@ -1199,7 +1454,14 @@ describe('dm message', () => {
     });
     assert.equal(
       await handleDm(
-        { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '200.0',
+          eventId: 'Ev-1',
+          text: 'and now?',
+        },
         deps,
       ),
       'resumed',
@@ -1213,7 +1475,10 @@ describe('dm message', () => {
       answer: 'the deploy fails on a missing env var',
       notices: ['Warning: skill descriptions were shortened.'],
     });
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
     const answered = posts.at(-1)!;
     assert.equal(answered.text, 'the deploy fails on a missing env var');
     assert.deepEqual(answered.notices, ['Warning: skill descriptions were shortened.']);
@@ -1227,7 +1492,14 @@ describe('dm message', () => {
       resumeWith: 'codex resume',
     });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'and now?',
+      },
       deps,
     );
     assert.equal(runs[0]!.resume, 'acp-0');
@@ -1258,7 +1530,7 @@ describe('dm message', () => {
     // nothing rather than a button that would refuse itself.
     const from = harness({ destination: { channel: 'C-incidents', thread: '100.0' } });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
       from.deps,
     );
     assert.deepEqual(from.posts.at(-1)!.offerShare, {
@@ -1268,7 +1540,7 @@ describe('dm message', () => {
 
     const own = harness();
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
       own.deps,
     );
     assert.equal(own.posts.at(-1)!.offerShare, undefined);
@@ -1277,7 +1549,10 @@ describe('dm message', () => {
   it('does not spend a laptop on a message with no question in it', async () => {
     const { deps, posts, runs, asked } = harness();
     assert.equal(
-      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: '   ' }, deps),
+      await handleDm(
+        { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: '   ' },
+        deps,
+      ),
       'nothing to ask',
     );
     assert.deepEqual(runs, []);
@@ -1290,7 +1565,10 @@ describe('dm message', () => {
     // member is looking — so silence in the thread is what they would get.
     const { deps, posts } = harness({ fails: new Error('endpoint went away') });
     assert.equal(
-      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps),
+      await handleDm(
+        { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+        deps,
+      ),
       'failed',
     );
     assert.match(posts.at(-1)!.text, /did not finish/);
@@ -1303,7 +1581,10 @@ describe('dm message', () => {
     // nothing happening. It goes on their message — the acknowledgement is at
     // '300.0', and marking that would put it where they are not looking.
     const { deps, marks } = harness();
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
     assert.deepEqual(marks, [
       { channel: 'D-nel', ts: '250.0', state: 'working' },
       { channel: 'D-nel', ts: '250.0', state: 'done' },
@@ -1312,7 +1593,13 @@ describe('dm message', () => {
 
   it('marks anything that goes wrong failed, rather than leaving it running', async () => {
     const states = (marks: { state: MarkState }[]) => marks.map((m) => m.state);
-    const ask = { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' };
+    const ask = {
+      user: 'U-nel',
+      channel: 'D-nel',
+      ts: '250.0',
+      eventId: 'Ev-1',
+      text: 'what broke?',
+    };
 
     const ran = harness({ fails: new Error('endpoint went away') });
     await handleDm(ask, ran.deps);
@@ -1331,13 +1618,16 @@ describe('dm message', () => {
     // that was turned away is a lie about what happened to it.
     const refused = harness({ endpoint: null });
     await handleDm(
-      { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
       refused.deps,
     );
     assert.deepEqual(refused.marks, []);
 
     const empty = harness();
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: '  ' }, empty.deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: '  ' },
+      empty.deps,
+    );
     assert.deepEqual(empty.marks, []);
   });
 
@@ -1346,7 +1636,10 @@ describe('dm message', () => {
     // would turn a quiet success into a reported failure.
     const { deps, posts } = harness({ answer: '  ' });
     assert.equal(
-      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps),
+      await handleDm(
+        { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+        deps,
+      ),
       'opened',
     );
     assert.match(posts.at(-1)!.text, /without producing an answer/);
@@ -1368,7 +1661,7 @@ describe('dm message', () => {
       const { deps, posts } = harness({ endpoint: { ...READY, state } });
       assert.equal(
         await handleDm(
-          { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+          { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
           deps,
         ),
         outcome,
@@ -1385,7 +1678,10 @@ describe('dm message', () => {
     const bare: TurnTarget = { endpoint: 'ep-1', device: 'the studio Mac', state: 'ready' };
     const { deps, posts, runs } = harness({ endpoint: bare });
     assert.equal(
-      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps),
+      await handleDm(
+        { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+        deps,
+      ),
       'refused: unusable',
     );
     assert.deepEqual(runs, []);
@@ -1401,7 +1697,7 @@ describe('dm message', () => {
     assert.equal(
       String(
         await handleDm(
-          { channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+          { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
           deps,
         ),
       ),
@@ -1415,7 +1711,10 @@ describe('dm message', () => {
     // pairing, so this is the ordinary state of one that has not started — not
     // an edge case, and not somewhere to leave a sentence with a hole in it.
     const { deps, posts } = harness({ endpoint: { ...READY, device: '', state: 'unstarted' } });
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
     assert.match(posts[0]!.text, /from your machine\b/);
   });
 
@@ -1424,7 +1723,10 @@ describe('dm message', () => {
     // naming one they never had.
     const { deps, posts } = harness({ endpoint: null });
     assert.equal(
-      await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps),
+      await handleDm(
+        { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+        deps,
+      ),
       'refused: unpaired',
     );
     assert.match(posts[0]!.text, /`\/connect`/);
@@ -1434,7 +1736,10 @@ describe('dm message', () => {
     // The event was answered, so a redelivery must not answer it again — the
     // refusal is a reply like any other.
     const { deps, turns } = harness({ endpoint: { ...READY, state: 'asleep' } });
-    await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
+    await handleDm(
+      { user: 'U-nel', channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
     assert.equal(turns.length, 1);
   });
 });

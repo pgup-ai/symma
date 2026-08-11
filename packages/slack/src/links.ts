@@ -101,7 +101,11 @@ export async function resolveLinks(
     self?: { channel: string; root: string };
     /** True once these reads have taken long enough. They happen before the
      * acknowledgement, so a stalled one is a member watching nothing happen. */
-    spent?: () => boolean;
+    spent: () => boolean;
+    /** Stops waiting on one read at the same deadline. Sampling between links
+     * bounds five quick calls; it does nothing about the first one never
+     * answering, which is the shape a stalled Slack takes. */
+    reading: <T>(read: Promise<T>) => Promise<T | 'too slow'>;
   },
 ): Promise<ResolvedLinks> {
   const links = slackLinks(text, deps.host).filter(
@@ -109,33 +113,47 @@ export async function resolveLinks(
   );
   const sections: string[] = [];
   const missed: LinkMiss[] = [];
+  let fetches = 0;
   let spent = 0;
   for (const link of links) {
     const miss = (why: LinkMiss['why']): number => missed.push({ url: link.url, why });
-    if (sections.length + missed.length >= LINKS_PER_MESSAGE) {
+    // The cap is on fetches, not on links: a refusal costs Slack nothing, so
+    // spending the allowance on one would let an early bad link push a readable
+    // one out of a message that never made five requests.
+    if (fetches >= LINKS_PER_MESSAGE) {
       miss('over the cap');
       continue;
     }
-    if (deps.spent?.()) {
+    if (deps.spent()) {
       miss('too slow');
       continue;
     }
+    // Fails closed: not knowing whether the member may read it is not
+    // permission, and this gate is the whole reason the bot's own reach is not
+    // handed to whoever pastes a link.
     if (!(await deps.mayRead(link.channel).catch(() => false))) {
       miss('not yours');
       continue;
     }
-    const messages = await deps.threadReplies(link.channel, link.root).catch((error: unknown) => {
-      deps.log(`link not read: ${String(error)}`);
-      return undefined;
-    });
+    fetches += 1;
+    const messages = await deps
+      .reading(deps.threadReplies(link.channel, link.root))
+      .catch((error: unknown) => {
+        deps.log(`link not read: ${String(error)}`);
+        return undefined;
+      });
+    if (messages === 'too slow') {
+      miss('too slow');
+      continue;
+    }
     if (!messages) {
       miss('unreadable');
       continue;
     }
     // "Fetched just now" tells the agent it need not reach for Slack itself —
     // and does not tell it not to, since one with real access can go deeper.
-    // Charged with the snapshot it introduces, plus room for the suffix below,
-    // or the assembled prompt is over a ceiling its own parts were each inside.
+    // Charged like the snapshot it introduces, or the assembled prompt is over
+    // a ceiling its own parts were each inside.
     const label = `Behind ${link.url}, fetched just now`;
     // Greedy in the member's order: the first link is the one the message is
     // most likely about, and an even split starves it for a footnote.

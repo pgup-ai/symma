@@ -40,7 +40,9 @@
         "groups:history",
         "groups:read",
         "im:history",
+        "im:read",
         "mpim:history",
+        "mpim:read",
         "im:write",
         "reactions:write",
         "users:read"

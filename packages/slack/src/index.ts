@@ -379,6 +379,7 @@ const connection = socketMode({
         await announcing(user, `dm in ${channel}`, () =>
           handleDm(
             {
+              user,
               channel,
               ts: dm.ts as string,
               ...(typeof dm.thread_ts === 'string' ? { threadTs: dm.thread_ts } : {}),
@@ -402,6 +403,7 @@ const connection = socketMode({
               threadReplies: deps.threadReplies,
               host: api.host,
               publicChannel: api.publicChannel,
+              memberOf: api.memberOf,
               destination: deps.destination,
               budgetBytes,
               log,

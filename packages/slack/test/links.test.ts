@@ -22,6 +22,10 @@ function resolver(over: {
    * unless a test says which are. */
   mine?: string[];
   spent?: boolean;
+  /** `mayRead` throws rather than answering — a missing scope, Slack down. */
+  mayReadThrows?: boolean;
+  /** The read never settles inside the deadline. */
+  slowRead?: boolean;
 }) {
   const asked: string[] = [];
   const logged: string[] = [];
@@ -30,7 +34,13 @@ function resolver(over: {
     logged,
     deps: {
       budgetBytes: over.budgetBytes ?? 24_000,
-      mayRead: (channel: string) => Promise.resolve(over.mine ? over.mine.includes(channel) : true),
+      mayRead: (channel: string) =>
+        over.mayReadThrows
+          ? Promise.reject(new Error('missing_scope'))
+          : Promise.resolve(over.mine ? over.mine.includes(channel) : true),
+      spent: () => over.spent === true,
+      reading: <T>(read: Promise<T>): Promise<T | 'too slow'> =>
+        over.slowRead ? Promise.resolve('too slow' as const) : read,
       threadReplies: (channel: string, thread: string) => {
         asked.push(`${channel}/${thread}`);
         if (over.throws) return Promise.reject(new Error('thread too long to read'));
@@ -41,7 +51,6 @@ function resolver(over: {
       },
       ...(over.host ? { host: over.host } : {}),
       ...(over.self ? { self: over.self } : {}),
-      ...(over.spent ? { spent: () => true } : {}),
     },
   };
 }
@@ -170,6 +179,50 @@ describe('slack links', () => {
     const got = await resolveLinks(`what is in <${theirs}>?`, deps);
     assert.deepEqual(asked, [], 'refused before the fetch, not after');
     assert.deepEqual(got.missed, [{ url: theirs, why: 'not yours' }]);
+  });
+
+  it('refuses a link when it cannot tell whether the member may read it', async () => {
+    // This gate is the whole reason the bot's reach is not handed to whoever
+    // pastes a link, so not knowing has to mean no. A missing scope answering
+    // by throwing must not read as permission.
+    const url = link('C0BMCR1FGU9', '1786400100.000001');
+    const { deps, asked } = resolver({ mayReadThrows: true });
+    const got = await resolveLinks(`<${url}>`, deps);
+    assert.deepEqual(asked, []);
+    assert.deepEqual(got.missed, [{ url, why: 'not yours' }]);
+  });
+
+  it('does not let a refusal spend the fetch allowance', async () => {
+    // The cap is on requests to Slack, and a refusal makes none — so a link the
+    // member cannot read must not push a readable one out of the message.
+    const theirs = link('C0PRIVATE00', '1786400100.000001');
+    const readable = Array.from({ length: LINKS_PER_MESSAGE }, (_, i) => [
+      `C0AAAAAAAA${String(i)}`,
+      `${String(1786400200 + i)}.000001`,
+    ]);
+    const { deps } = resolver({
+      mine: readable.map(([c]) => c!),
+      threads: Object.fromEntries(readable.map(([c, ts]) => [`${c!}/${ts!}`, THREAD])),
+    });
+    const got = await resolveLinks(
+      [theirs, ...readable.map(([c, ts]) => link(c!, ts!))].join(' '),
+      deps,
+    );
+    assert.equal(got.sections.length, LINKS_PER_MESSAGE);
+    assert.deepEqual(got.missed, [{ url: theirs, why: 'not yours' }]);
+  });
+
+  it('stops waiting on a read that will not answer', async () => {
+    // Sampling between links bounds five quick calls and does nothing about the
+    // first one never returning, which is the shape a stalled Slack takes.
+    const url = link('C0BMCR1FGU9', '1786400100.000001');
+    const { deps } = resolver({
+      slowRead: true,
+      threads: { 'C0BMCR1FGU9/1786400100.000001': THREAD },
+    });
+    const got = await resolveLinks(`<${url}>`, deps);
+    assert.deepEqual(got.missed, [{ url, why: 'too slow' }]);
+    assert.deepEqual(got.sections, []);
   });
 
   it('ignores a permalink from another workspace', async () => {

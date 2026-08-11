@@ -30,6 +30,10 @@ import { plainly, type MarkState } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
+  /** Who is asking. Their access is the one that decides what a link in this
+   * message may be resolved into — never the bot's, which is the union of
+   * everyone's invitations. */
+  user: string;
   /** The DM channel, always a `D` id — resolved by Slack, not by us. */
   channel: string;
   ts: string;
@@ -289,6 +293,9 @@ export interface DmDeps {
   host: () => Promise<string | undefined>;
   /** Whether a channel is one any member could open for themselves. */
   publicChannel: (channel: string) => Promise<boolean>;
+  /** Whether this member is in that conversation — the other way it is theirs
+   * to read. */
+  memberOf: (user: string, channel: string) => Promise<boolean>;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -474,21 +481,40 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // link in it, which is nearly all of them — `host()` is an API call the first
   // time, and no ordinary turn should pay for a feature it is not using.
   const by = Date.now() + LINKS_MS;
+  // One deadline over the whole resolution: five quick reads and one that never
+  // answers are the same wait to a member watching for the acknowledgement. The
+  // handle is cleared on the way out, or a message with links leaves one behind
+  // per read for as long as the deadline had left.
+  const within = async <T>(read: Promise<T>): Promise<T | 'too slow'> => {
+    let late: ReturnType<typeof setTimeout> | undefined;
+    const answer = await Promise.race([
+      read,
+      new Promise<'too slow'>((resolve) => {
+        late = setTimeout(() => resolve('too slow'), Math.max(0, by - Date.now()));
+        late.unref();
+      }),
+    ]);
+    clearTimeout(late);
+    return answer;
+  };
   const linked = slackLinks(message.text).length
     ? await resolveLinks(message.text, {
         budgetBytes: deps.budgetBytes,
         threadReplies: deps.threadReplies,
         log: deps.log,
         host: await deps.host(),
-        // What this member could have opened themselves. A public channel is
-        // that by definition; their own DM with the bot is the one private
-        // thread it can vouch for, since there is exactly one per member and
-        // this turn arrived in it. Everything else the bot happens to be in is
-        // somebody else's, and its reach is not theirs to borrow.
-        mayRead: (channel) =>
-          channel === conversation.dmChannel ? Promise.resolve(true) : deps.publicChannel(channel),
+        // What this member could have opened themselves — never what the bot
+        // can see, which is the union of everyone's invitations. A public
+        // channel is theirs by definition; their own DM with the bot arrived
+        // this turn; anything else has to have them in it, private channels and
+        // group DMs alike.
+        mayRead: async (channel) =>
+          channel === conversation.dmChannel ||
+          (await deps.publicChannel(channel)) ||
+          (await deps.memberOf(message.user, channel)),
         self: { channel: conversation.dmChannel, root: conversation.rootThread },
         spent: () => Date.now() > by,
+        reading: within,
       })
     : { sections: [], missed: [], spent: 0 };
 

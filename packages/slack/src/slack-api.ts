@@ -29,6 +29,11 @@ export interface SlackApi {
    * anything it cannot see either, since that is not a channel it can vouch
    * for. */
   publicChannel: (channel: string) => Promise<boolean>;
+  /** Whether this member is in that conversation — the other way a thread is
+   * theirs to read: a private channel or a group DM they are part of. Asked of
+   * their own list rather than the channel's, since a person is in far fewer
+   * conversations than a busy channel has people. */
+  memberOf: (user: string, channel: string) => Promise<boolean>;
   /** A link back to a message, so a conversation lifted out of a channel says
    * which thread it came from. Undefined rather than throwing: a handoff without
    * its link is worth having, and one that refused to happen is not. */
@@ -412,8 +417,8 @@ export function slackApi(
     return resolved;
   };
 
-  // Both answer about the workspace rather than about a turn, and neither
-  // changes while the process lives: one call each, ever.
+  // Both answer about the workspace rather than about a turn: one call each,
+  // ever. Not `memberOf` below, which a member changes by joining a channel.
   let host: Promise<string | undefined> | undefined;
   const publicity = new Map<string, Promise<boolean>>();
 
@@ -424,12 +429,37 @@ export function slackApi(
         .then((got) => (typeof got.url === 'string' ? new URL(got.url).host : undefined))
         .catch((error: unknown) => {
           // Left unknown rather than remembered as unknown: a blip at boot would
-          // otherwise turn the host check off for the life of the process.
+          // otherwise turn the host check off for the life of the process. The
+          // logger is a caller's callback, so it gets `mark`'s treatment: a
+          // throw from it must not be what ends the turn.
           host = undefined;
-          options.log?.(`workspace host unknown: ${String(error)}`);
+          try {
+            options.log?.(`workspace host unknown: ${String(error)}`);
+          } catch {
+            /* a caller's logger is not worth the turn */
+          }
           return undefined;
         });
       return host;
+    },
+    async memberOf(user, channel) {
+      try {
+        for await (const page of quick.paginate('users.conversations', {
+          user,
+          types: 'public_channel,private_channel,mpim,im',
+          limit: 1000,
+          exclude_archived: false,
+        })) {
+          const mine = (page as { channels?: { id?: unknown }[] }).channels ?? [];
+          if (mine.some((one) => one.id === channel)) return true;
+        }
+        return false;
+      } catch (error) {
+        // Not knowing is not permission. Said out loud because a missing scope
+        // here refuses every private link silently otherwise.
+        options.log?.(`cannot tell whether ${user} is in ${channel}: ${slackCode(error) ?? ''}`);
+        return false;
+      }
     },
     publicChannel: (channel) => {
       const known = publicity.get(channel);
