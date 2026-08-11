@@ -873,53 +873,64 @@ describe('tenancy', () => {
     const again = await provision(url, { team: 'revoke', slackUser: 'nia', endpoint: 'nia-box' });
 
     const legs = new AbortController();
+    /** Settles the moment the leg ends, however it ends — and attached here
+     * rather than at the assertion, which is the part that matters: a dropped
+     * leg *rejects*, and a rejection nobody is holding yet is an unhandled one.
+     * That fails the run rather than the assertion, on whichever test the loop
+     * happens to be in. The revocation below awaits a pool round-trip, which is
+     * all the room that race needs. */
+    const ending = (leg: Promise<unknown>): Promise<true> =>
+      leg.then(
+        () => true,
+        () => true,
+      );
     /** True if the leg closed within `ms`, false if it is still serving. */
-    const closes = async (leg: Promise<unknown>, ms: number): Promise<boolean> =>
-      (await within(
-        ms,
-        leg.then(
-          () => true,
-          () => true,
-        ),
-      )) === true;
+    const closes = async (leg: Promise<true>, ms: number): Promise<boolean> =>
+      (await within(ms, leg)) === true;
     try {
       // A `hello` and then a body that never ends: the already-authenticated
       // leg an SSE-only sweep leaves usable for frames and for a re-`hello`.
       // The hello also flushes the request headers, which undici holds back
       // until the body writes.
-      const doomedIngest = fetch(`${base}/api/endpoints/nia-box/ingest`, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${nia.endpointToken}` },
-        body: new ReadableStream({
-          start: (c: ReadableStreamDefaultController<Uint8Array>) =>
-            c.enqueue(
-              new TextEncoder().encode(
-                `${JSON.stringify({
-                  kind: 'hello',
-                  endpoint: 'nia-box',
-                  device: 'nia-box',
-                  agents: [{ agent: 'kilo' }],
-                  maxSessions: 2,
-                })}\n`,
+      const doomedIngest = ending(
+        fetch(`${base}/api/endpoints/nia-box/ingest`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${nia.endpointToken}` },
+          body: new ReadableStream({
+            start: (c: ReadableStreamDefaultController<Uint8Array>) =>
+              c.enqueue(
+                new TextEncoder().encode(
+                  `${JSON.stringify({
+                    kind: 'hello',
+                    endpoint: 'nia-box',
+                    device: 'nia-box',
+                    agents: [{ agent: 'kilo' }],
+                    maxSessions: 2,
+                  })}\n`,
+                ),
               ),
-            ),
-        }),
-        duplex: 'half',
-        signal: legs.signal,
-      } as RequestInit);
+          }),
+          duplex: 'half',
+          signal: legs.signal,
+        } as RequestInit),
+      );
       // Drained from the moment they open, not at the assertion: the revocation
       // below awaits a pool round-trip, and an unread leg may not survive it.
-      const survivor = drain(
-        await fetch(`${base}/api/endpoints/nia-box/stream`, {
-          headers: { authorization: `Bearer ${again.endpointToken}` },
-          signal: legs.signal,
-        }),
+      const survivor = ending(
+        drain(
+          await fetch(`${base}/api/endpoints/nia-box/stream`, {
+            headers: { authorization: `Bearer ${again.endpointToken}` },
+            signal: legs.signal,
+          }),
+        ),
       );
-      const doomedClient = drain(
-        await fetch(`${base}/api/sessions/sid-nia/stream`, {
-          headers: { authorization: `Bearer ${nia.clientToken}` },
-          signal: legs.signal,
-        }),
+      const doomedClient = ending(
+        drain(
+          await fetch(`${base}/api/sessions/sid-nia/stream`, {
+            headers: { authorization: `Bearer ${nia.clientToken}` },
+            signal: legs.signal,
+          }),
+        ),
       );
 
       const pool = new Pool({ connectionString: url });
