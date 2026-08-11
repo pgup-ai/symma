@@ -363,9 +363,15 @@ describe('dm message', () => {
 
     // And the one that leaves through `announcing`: the answer landed, so the
     // turn is over whether or not the member was told.
-    const { deps, finished } = harness({ answerPostFails: new Error('slack refused it') });
+    const { deps, finished, updates } = harness({
+      answerPostFails: new Error('slack refused it'),
+      narrates: 'Reading dm.ts',
+    });
     await assert.rejects(handleDm(ask, deps));
     assert.equal(finished[0]!.status, 'completed');
+    // And the acknowledgement stops saying it is working, for the reason the
+    // mark does: it would outlive the message that never arrived.
+    assert.doesNotMatch(updates.at(-1)!.text, /Reading dm.ts/);
   });
 
   it('runs the question on the member’s own machine and posts what came back', async () => {
@@ -536,6 +542,35 @@ describe('dm message', () => {
     // before this update is waited on, or one Slack sits on would hold the thread
     // against the member's next message.
     assert.equal(timeline.at(-1), atRest(posts[0]!.text));
+  });
+
+  it('still says what was missing when the resume it offered was refused', async () => {
+    // `driveAcpSession` sends the transcript on exactly the turns whose resume
+    // was not honoured, and answers with the session it actually ran in — so the
+    // same comparison says whether the warning is about this answer. Refused, it
+    // ran on a transcript that was missing a channel, and the member has to be
+    // told that after the answer as much as before it.
+    const over = {
+      existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
+      channel: null,
+      history: [{ ts: '201.0', author: 'U-nel', text: 'still waiting' }],
+      narrates: 'Reading dm.ts',
+    };
+    const refused = harness({ ...over, endpoint: { ...READY, resume: 'acp-9' } });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      refused.deps,
+    );
+    assert.match(refused.updates.at(-1)!.text, /I cannot read <#C-incidents> just now/);
+
+    // Honoured — the harness answers in `acp-1` — and the transcript went
+    // unused, so a warning about it would be about nothing.
+    const honoured = harness({ ...over, endpoint: { ...READY, resume: 'acp-1' } });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      honoured.deps,
+    );
+    assert.doesNotMatch(honoured.updates.at(-1)!.text, /I cannot read/);
   });
 
   it('does not leave a promise standing over a turn that failed', async () => {

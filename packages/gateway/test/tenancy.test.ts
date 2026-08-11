@@ -1775,14 +1775,16 @@ describe('tenancy', () => {
       }
 
       // A real roster carries the agent's sentence about each model and runs to
-      // kilobytes. Sized against the pairing cap on purpose: under it the whole
-      // POST was refused, and the picker never filled.
+      // kilobytes, which the bot's routes were refusing whole: they read their
+      // body through the reader written for `/api/pair`, 4096-byte cap included.
       const wordy = Array.from({ length: 20 }, (_, i) => ({
         modelId: `gpt-5.6-model-${String(i)}[high]`,
         name: `Model ${String(i)}`,
         description: 'What this one is for, in the agent’s own words. '.repeat(6),
       }));
-      assert.ok(JSON.stringify(wordy).length > 4096, 'the fixture has to exceed the pairing cap');
+      // Sized past that on purpose — a fixture trimmed under it stops covering
+      // the bug without failing.
+      assert.ok(JSON.stringify(wordy).length > 4096, 'the fixture no longer exceeds 4096 bytes');
       assert.equal((await keep(wordy)).status, 200);
       assert.deepEqual((await ask()).models, wordy);
 

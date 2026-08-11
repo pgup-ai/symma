@@ -481,25 +481,28 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // takes the place of the catch-up note, which describes a transcript a
   // successful resume makes no use of.
   const attempting = decision.resume ? 'Picking up where it left off, if it still can.' : undefined;
-  // What the answer was produced without: a channel that could not be read, or a
-  // history that did not fit. Not a turn-scoped line — it stays true of the
-  // answer, and a member who reads one as if it had the whole thread has been
-  // told something wrong by its removal.
-  const missing = decision.resume ? undefined : caught?.note;
+  // The acknowledgement with nothing turn-scoped left in it: what the answer was
+  // produced without stays true of the answer. Dropped only where the resume was
+  // honoured, which is the comparison `driveAcpSession` itself makes to decide
+  // whether to send the transcript — a turn whose resume was refused ran on that
+  // transcript, and still has to say what was missing from it.
+  const restingFor = (ranIn: string | undefined): string =>
+    [scope, decision.resume !== undefined && ranIn === decision.resume ? undefined : caught?.note]
+      .filter(Boolean)
+      .join(' ');
+  const opening = restingFor(decision.resume);
   // Named up front: a member who attached three files and sees two read should
   // learn it now, not from an answer that quietly used one.
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
-  // What the acknowledgement is left saying, and what it says only while the
-  // turn is out — which is the line `settle` below takes it back to.
-  const rest = [scope, missing].filter(Boolean).join(' ');
+  // Said only while the turn is out.
   const inFlight = [attempting, reading].filter(Boolean).join(' ');
   // The ellipsis is the "still going" cue, and it belongs to the in-flight text
   // rather than to what rests, which is as true after the answer as before it —
   // so a turn with nothing else to say needs no update to take a cue off a line
   // that never moved. The 👀 on their own message is what says it is running.
-  const ack = inFlight ? `${rest} ${inFlight.replace(/\.$/, '')}…` : rest;
+  const ack = inFlight ? `${opening} ${inFlight.replace(/\.$/, '')}…` : opening;
   const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
@@ -528,20 +531,17 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       .catch(() => undefined);
   };
 
-  // Slack cannot fold the narration away the way a terminal does, so once the
-  // turn is over the last step, the ellipsis and a resume that has already been
-  // attempted are all in the way — leaving the scope and whatever the answer
-  // was produced without, both as true then as at the start. Queued behind the narration it is undoing, and called
-  // only after the turn is closed: a `chat.update` Slack is slow to take would
-  // otherwise hold the turn open, and a member's next message would be refused
-  // for a line nobody is waiting on. Nothing to do where the message already
-  // says only the scope, so a quiet turn spends no update at all. Fail-open like
-  // `narrate`, and waited on to a deadline rather than indefinitely.
-  const settle = async (): Promise<void> => {
+  // Slack cannot fold the narration away the way a terminal does, so the last
+  // step and the ellipsis are in the way once the turn is over. Queued behind
+  // the narration it is undoing, and called only after the turn is closed: a
+  // `chat.update` Slack is slow to take would otherwise hold the turn open, and
+  // a member's next message would be refused for a line nobody is waiting on.
+  // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
+  const settle = async (text: string): Promise<void> => {
     if (!lastShown && !inFlight) return;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      updating.then(() => deps.working(acked.channel, acked.ts, rest)).catch(() => undefined),
+      updating.then(() => deps.working(acked.channel, acked.ts, text)).catch(() => undefined),
       new Promise<void>((resolve) => {
         deadline = setTimeout(resolve, TIDY_MS);
         // Two different jobs on the same handle: `unref` so waiting on a line
@@ -624,10 +624,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // read is said here too, where the member is deciding whether to resend.
       skippedNote(attached),
     );
-    // A failure leaves the promises above it standing otherwise — "Reading
-    // rows.csv…" over "That run did not finish" is the acknowledgement
-    // outliving the turn it was about.
-    await settle();
+    // Or "Reading `rows.csv`…" is left standing over "That run did not finish".
+    await settle(opening);
     return 'failed';
   }
 
@@ -683,6 +681,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     // message and be the last thing they are told.
     await deps.mark(message.channel, message.ts, 'failed');
     await deps.finish(conversation.id, turn, 'completed', ran);
+    // Like the mark above it: an acknowledgement still saying it is working
+    // would outlive the message that never arrived.
+    await settle(restingFor(answer.session));
     throw error;
   }
   await deps.mark(message.channel, message.ts, 'done');
@@ -696,6 +697,6 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       deps.log(`cursor not moved: ${String(error)}`);
     });
   await deps.finish(conversation.id, turn, 'completed', ran);
-  await settle();
+  await settle(restingFor(answer.session));
   return existing ? 'resumed' : 'opened';
 }
