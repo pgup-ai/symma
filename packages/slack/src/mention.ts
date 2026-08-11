@@ -27,6 +27,11 @@ export interface MentionDeps {
     rootThread: string;
     slackEventId: string;
   }) => Promise<{ conversation: ConversationRef; turn?: string }>;
+  /** Closes the row `turn` opened. A mention runs nothing — it opens the thread
+   * and waits — so that row is this event's idempotency record and nothing more.
+   * Left open it reads as a turn in flight, and the member's first message in
+   * the thread they were just handed is refused as busy. */
+  finish: (conversation: string, turn: string, status: 'completed') => Promise<void>;
   /** Read only to find out whether the channel can be read at all: §4 wants that
    * said out loud, and a member who has to type first to hear it has already been
    * let down. What the thread says is the turn's to fetch, when there is one. */
@@ -105,6 +110,7 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
       slackEventId: mention.eventId,
     });
     if (!turn) return 'already handled';
+    await deps.finish(existing.id, turn, 'completed');
     await deps.post(existing.dmChannel, ALREADY, existing.rootThread);
     return 'continued';
   }
@@ -126,6 +132,10 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   // answer in. Correcting it there is the only place the member is looking.
   if (conversation.rootThread !== root.ts) {
     deps.log(`adopted ${conversation.id}; correcting the stray root`);
+    // Before the correction, not after: a post Slack refuses would otherwise
+    // take the close with it and leave the winning thread busy — the failure
+    // this whole path exists to stop.
+    if (turn) await deps.finish(conversation.id, turn, 'completed');
     await deps.post(
       root.channel,
       'Started twice — carry on in the other thread, which is where I am working.',
@@ -136,5 +146,6 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
     return 'adopted';
   }
   if (!turn) return 'already handled';
+  await deps.finish(conversation.id, turn, 'completed');
   return 'opened';
 }

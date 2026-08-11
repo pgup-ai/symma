@@ -12,6 +12,10 @@ import type { MarkState } from '../src/slack-api.js';
  * away from the update that shows it. */
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
+/** What the acknowledgement is left saying once the answer has landed: the
+ * scope, without the ellipsis that meant a turn was in flight. */
+const atRest = (ack: string): string => ack.replace(/…$/, '');
+
 const CONVERSATION: ConversationRef = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
 const READY: TurnTarget = {
   endpoint: 'ep-1',
@@ -327,7 +331,9 @@ describe('dm message', () => {
       ),
       'still working',
     );
-    assert.match(posts[0]!.text, /Still working on your last one/);
+    // Which thread, said out loud: the rule is per thread, and the refusal is
+    // unreadable to a member who cannot tell what is running or where.
+    assert.match(posts[0]!.text, /in this thread/);
     assert.deepEqual(runs, []);
     // And it costs the gateway no credential to find that out.
     assert.equal(asked(), 0);
@@ -357,9 +363,15 @@ describe('dm message', () => {
 
     // And the one that leaves through `announcing`: the answer landed, so the
     // turn is over whether or not the member was told.
-    const { deps, finished } = harness({ answerPostFails: new Error('slack refused it') });
+    const { deps, finished, updates } = harness({
+      answerPostFails: new Error('slack refused it'),
+      narrates: 'Reading dm.ts',
+    });
     await assert.rejects(handleDm(ask, deps));
     assert.equal(finished[0]!.status, 'completed');
+    // And the acknowledgement stops saying it is working, for the reason the
+    // mark does: it would outlive the message that never arrived.
+    assert.doesNotMatch(updates.at(-1)!.text, /Reading dm.ts/);
   });
 
   it('runs the question on the member’s own machine and posts what came back', async () => {
@@ -386,7 +398,7 @@ describe('dm message', () => {
     // Said up front, not discovered: until `hello.workspaces[]` lands the agent
     // opens in an empty temp dir, which is not what "your own machine" sounds
     // like to someone asking about their repo.
-    assert.match(posts[0]!.text, /no access to your files/);
+    assert.match(posts[0]!.text, /cannot see your files/);
   });
 
   it('runs in the conversation mode and offers the picker with the answer', async () => {
@@ -409,7 +421,7 @@ describe('dm message', () => {
     assert.equal(runs[0]!.mode, 'agent');
     // Read back on every turn — the member should never have to remember what
     // tier their own machine is running at.
-    assert.match(posts[0]!.text, /in `symma` — `agent` mode/);
+    assert.match(posts[0]!.text, /^`symma` · `agent`/);
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
   });
 
@@ -435,9 +447,10 @@ describe('dm message', () => {
     );
     // `provider/model` is the only shape the specs parse, brackets and all.
     assert.equal(runs[0]!.model, 'codex/gpt-5.4-mini[low]');
-    // The ellipsis is the standing "still working" hint; the narration lands on
-    // that same message rather than a second post.
-    assert.match(posts[0]!.text, /mode…$/);
+    // No ellipsis where the acknowledgement is only the scope: nothing is in
+    // flight to be about, and the line reads the same after the answer lands as
+    // it does now. The narration goes onto this same message, not a second post.
+    assert.equal(posts[0]!.text, '`symma` · `read-only`');
     runs[0]!.onProgress!('Reading dm.ts');
     await flush();
     assert.deepEqual(updates, [
@@ -451,9 +464,9 @@ describe('dm message', () => {
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
   });
 
-  it('states the scope and the session once, not on every turn', async () => {
-    // The resume is what makes this a follow-up in the same place, and the
-    // session it names is the one that answers.
+  it('offers the session it is picking up, beside the scope it runs in', async () => {
+    // The offer rides the same message as the scope and says "if it still can":
+    // whether the agent still holds that session is not known until it is asked.
     const { deps, posts } = harness({
       existing: CONVERSATION,
       endpoint: {
@@ -469,7 +482,10 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
       deps,
     );
-    assert.equal(posts[0]!.text, 'On it. Picking up where it left off, if it still can…');
+    assert.equal(
+      posts[0]!.text,
+      '`symma` · `agent-full-access` Picking up where it left off, if it still can…',
+    );
     // The harness records an aside list only when there is one, so an answer with
     // nothing to add carries no key at all.
     assert.equal(posts[1]!.notices, undefined);
@@ -500,7 +516,9 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,
     );
-    assert.equal(timeline.at(-1), posts[0]!.text);
+    // The restore still ran and still landed: what the throw took out was one
+    // step, not the queue behind it.
+    assert.equal(timeline.at(-1), atRest(posts[0]!.text));
   });
 
   it('takes the narration back off once the answer is there to read', async () => {
@@ -518,12 +536,73 @@ describe('dm message', () => {
     );
     assert.deepEqual(
       timeline.filter((entry) => !/^(mark|finish):/.test(entry)),
-      [`${posts[0]!.text}\n\n_Reading dm.ts_`, posts[0]!.text],
+      [`${posts[0]!.text}\n\n_Reading dm.ts_`, atRest(posts[0]!.text)],
     );
     // Last of everything, the mark and the turn's close included: both happen
     // before this update is waited on, or one Slack sits on would hold the thread
     // against the member's next message.
-    assert.equal(timeline.at(-1), posts[0]!.text);
+    assert.equal(timeline.at(-1), atRest(posts[0]!.text));
+  });
+
+  it('still says what was missing when the resume it offered was refused', async () => {
+    // `driveAcpSession` sends the transcript on exactly the turns whose resume
+    // was not honoured, and answers with the session it actually ran in — so the
+    // same comparison says whether the warning is about this answer. Refused, it
+    // ran on a transcript that was missing a channel, and the member has to be
+    // told that after the answer as much as before it.
+    const over = {
+      existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
+      channel: null,
+      history: [{ ts: '201.0', author: 'U-nel', text: 'still waiting' }],
+      narrates: 'Reading dm.ts',
+    };
+    const refused = harness({ ...over, endpoint: { ...READY, resume: 'acp-9' } });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      refused.deps,
+    );
+    assert.match(refused.updates.at(-1)!.text, /I cannot read <#C-incidents> just now/);
+
+    // Honoured — the harness answers in `acp-1` — and the transcript went
+    // unused, so a warning about it would be about nothing.
+    const honoured = harness({ ...over, endpoint: { ...READY, resume: 'acp-1' } });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
+      honoured.deps,
+    );
+    assert.doesNotMatch(honoured.updates.at(-1)!.text, /I cannot read/);
+  });
+
+  it('does not leave a promise standing over a turn that failed', async () => {
+    // "Reading `rows.csv`…" above "That run did not finish" is the
+    // acknowledgement outliving the turn it was about.
+    const { deps, posts, updates } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma' },
+      fileBytes: 'a,b\n',
+      fails: new Error('gone'),
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'what is in this?',
+        files: [
+          {
+            name: 'rows.csv',
+            mimetype: 'text/csv',
+            filetype: 'csv',
+            size: 4,
+            url_private_download: 'https://files/rows.csv',
+          },
+        ],
+      },
+      deps,
+    );
+    assert.match(posts[0]!.text, /Reading `rows.csv`…$/);
+    assert.equal(updates.at(-1)!.text, '`symma` · `read-only`');
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {
@@ -774,7 +853,7 @@ describe('dm message', () => {
     );
     // Absent mode still runs read-only, and the tier is said, not implied.
     assert.equal(runs[0]!.mode, undefined);
-    assert.match(posts[0]!.text, /in `symma` — `read-only` mode/);
+    assert.match(posts[0]!.text, /^`symma` · `read-only`/);
     // The first workspace turn is exactly where the picker has to appear, or
     // there is no way to ever leave read-only.
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
@@ -847,8 +926,8 @@ describe('dm message', () => {
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /in `symma`/);
-    assert.doesNotMatch(posts[0]!.text, /no access to your files/);
+    assert.match(posts[0]!.text, /^`symma` ·/);
+    assert.doesNotMatch(posts[0]!.text, /cannot see your files/);
     assert.equal(runs[0]!.workspace, 'ws-abc123');
     // The gateway cannot prefer this thread's project without being told which
     // thread is asking.
@@ -864,7 +943,7 @@ describe('dm message', () => {
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /in `we ird &lt;!here&gt;` — `read-only` mode…/);
+    assert.match(posts[0]!.text, /^`we ird &lt;!here&gt;` · `read-only`$/);
     // Two spans — label and mode — each opened and closed; the mode span is
     // safe by the wire's alphabet, so only the label needed escaping.
     assert.equal(posts[0]!.text.split('`').length - 1, 4, 'both spans opened and closed');
@@ -904,12 +983,16 @@ describe('dm message', () => {
     // Nothing copies that thread into the DM any more, so losing access to it
     // loses the question's context — and an answer given without it reads like an
     // answer about it.
-    const { deps, posts, runs } = harness({
+    const { deps, posts, runs, updates } = harness({
       existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
       channel: null,
       // So the prompt has something in it: without this the context is absent
       // entirely and asserting what it does not claim would assert nothing.
       history: [{ ts: '201.0', author: 'U-nel', text: 'still waiting' }],
+      // And so the acknowledgement is rewritten at all: with nothing in flight
+      // there is no update to take the warning off, and the assertion below
+      // would hold without the code that keeps it.
+      narrates: 'Reading dm.ts',
     });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
@@ -918,6 +1001,10 @@ describe('dm message', () => {
     assert.match(posts[0]!.text, /I cannot read <#C-incidents> just now/);
     assert.match(runs[0]!.context!, /still waiting/, 'the DM still travels');
     assert.doesNotMatch(runs[0]!.context!, /asked in/, 'and nothing claims that thread');
+    // And it is still there once the answer is: what the answer was produced
+    // without stays true of the answer, unlike the ellipsis beside it.
+    assert.match(updates.at(-1)!.text, /I cannot read <#C-incidents> just now/);
+    assert.doesNotMatch(updates.at(-1)!.text, /…$/);
   });
 
   it('leaves the cursor where it was when the answer never landed', async () => {

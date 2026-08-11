@@ -660,17 +660,25 @@ setInterval(() => {
   for (const [ip, seen] of pairTries) if (seen.resetAt <= now) pairTries.delete(ip);
 }, PAIR_WINDOW_MS).unref();
 
-/** Whole-body JSON, for the one route that takes an object and not a stream.
+/** Whole-body JSON, for the routes that take an object and not a stream.
  * Undefined for oversized, unparseable and too slow alike; one answer covers
  * them all.
  *
  * The deadline is not optional here. `requestTimeout` is 0 for the ingest
- * streams that run a whole review, so this is the only unauthenticated body on
- * the server and nothing else would ever end it — a byte cap alone lets a
- * client hold a connection by sending under it, slowly, forever. */
+ * streams that run a whole review, so `/api/pair` is the only unauthenticated
+ * body on the server and nothing else would ever end it — a byte cap alone lets
+ * a client hold a connection by sending under it, slowly, forever. */
 const MAX_PAIR_BYTES = 4096;
+/** The bot's own bodies, which arrive behind the shared secret rather than from
+ * anyone. Room for a model roster, the first of these measured in kilobytes:
+ * under the pairing cap it was refused whole and the picker never filled. */
+const MAX_BOT_BYTES = 64 * 1024;
 const PAIR_BODY_MS = Number(process.env.SYMMA_GATEWAY_PAIR_BODY_MS) || 5_000;
-async function readPairBody(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
+async function readBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+  limit: number,
+): Promise<unknown> {
   // The response, not the request: destroying it takes the socket with it and
   // marks `res.destroyed` in the same tick, which is what sendJson reads.
   // `req.destroyed` cannot say this — a request that arrived whole and was read
@@ -681,7 +689,7 @@ async function readPairBody(req: IncomingMessage, res: ServerResponse): Promise<
     req.setEncoding('utf8');
     for await (const chunk of req as AsyncIterable<string>) {
       body += chunk;
-      if (Buffer.byteLength(body) > MAX_PAIR_BYTES) return undefined;
+      if (Buffer.byteLength(body) > limit) return undefined;
     }
     return JSON.parse(body);
   } catch {
@@ -718,7 +726,7 @@ async function slackCaller(
   if (!databaseUrl || !botToken) return void sendJson(res, 404, { error: 'unsupported' });
   if (!sameSecret(bearerToken(req) ?? '', botToken))
     return void sendJson(res, 401, { error: 'unauthorized' });
-  const body = await readPairBody(req, res);
+  const body = await readBody(req, res, MAX_BOT_BYTES);
   if (typeof body !== 'object' || body === null)
     return void sendJson(res, 400, { error: 'request' });
   const { team, user } = body as { team?: unknown; user?: unknown };
@@ -772,7 +780,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // route, since what reads it is a program.
     if (!databaseUrl) return sendJson(res, 404, { error: 'unsupported' });
     if (pairThrottled(callerIp(req))) return sendJson(res, 429, { error: 'throttled' });
-    const body = await readPairBody(req, res);
+    const body = await readBody(req, res, MAX_PAIR_BYTES);
     if (typeof body !== 'object' || body === null) return sendJson(res, 400, { error: 'request' });
     const { code, device, agents } = body as {
       code?: unknown;
