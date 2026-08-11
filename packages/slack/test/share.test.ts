@@ -23,6 +23,8 @@ function harness(
     tokenDead?: boolean;
     /** The gateway will not take the unlink, so the token is still linked. */
     unlinkFails?: boolean;
+    /** They linked again before the unlink landed, so it matched nothing. */
+    relinked?: boolean;
   } = {},
 ) {
   const shared: { channel: string; thread: string; text: string; asMember?: string }[] = [];
@@ -35,7 +37,8 @@ function harness(
     asMember: () => Promise.resolve(over.asMember),
     unlink: (token) => {
       unlinked.push(token);
-      return over.unlinkFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
+      if (over.unlinkFails) return Promise.reject(new Error('gateway away'));
+      return Promise.resolve(over.relinked !== true);
     },
     share: (channel, thread, text, asMember) => {
       shared.push({ channel, thread, text, ...(asMember ? { asMember } : {}) });
@@ -102,6 +105,15 @@ describe('share back', () => {
     const { deps, posts } = harness({ asMember: 'xoxp-nel', tokenDead: true, unlinkFails: true });
     assert.equal(await handleShare(CLICK, deps), 'shared');
     assert.match(posts[0]!.text, /as Symma, not as you/);
+    assert.doesNotMatch(posts[0]!.text, /disconnected|home tab/);
+  });
+
+  it('leaves a fresh link alone, and says nothing about disconnecting it', async () => {
+    // They linked again between the refused post and the unlink, so the compare
+    // matched nothing — telling them to reconnect would send them to undo the
+    // grant they had just made.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', tokenDead: true, relinked: true });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
     assert.doesNotMatch(posts[0]!.text, /disconnected|home tab/);
   });
 

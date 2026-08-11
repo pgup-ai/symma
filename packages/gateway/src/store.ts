@@ -233,8 +233,10 @@ export interface Store {
   setSlackUserToken(owner: Owner, token: string): Promise<boolean>;
   /** Drops a token Slack has stopped honouring, and only that one: a member who
    * linked again between the refusal and this would otherwise lose the token
-   * they just granted, silently. */
-  forgetSlackUserToken(owner: Owner, token: string): Promise<void>;
+   * they just granted, silently. False says the stored token is no longer the
+   * refused one, which is that member — still linked, and not to be told
+   * otherwise. */
+  forgetSlackUserToken(owner: Owner, token: string): Promise<boolean>;
   /** The agent this member's turns run on, of the ones their machine offers.
    * Undefined until they pick, and served only while it is still offered. */
   defaultAgentFor(owner: Owner): Promise<string | undefined>;
@@ -767,10 +769,11 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       return rowCount === 1;
     },
     async forgetSlackUserToken(owner, token) {
-      await pool.query(
+      const { rowCount } = await pool.query(
         `UPDATE users SET slack_user_token = NULL WHERE id = $1 AND slack_user_token = $2`,
         [owner, token],
       );
+      return rowCount === 1;
     },
     async defaultAgentFor(owner) {
       const row = await one<{ agent: string | null }>(

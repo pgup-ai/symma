@@ -1137,8 +1137,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // had just made, with nothing saying so.
       const { token } = body as { token?: unknown };
       if (!str(token)) return sendJson(res, 400, { error: 'request' });
-      await store.forgetSlackUserToken(owner, token);
-      return sendJson(res, 200, {});
+      // Answered, not assumed: nothing cleared means they are linked to
+      // something newer, and the bot has a sentence that turns on which it was.
+      return sendJson(res, 200, { forgotten: await store.forgetSlackUserToken(owner, token) });
     }
     if (url.pathname === '/api/slack/user-token') {
       // The member's own credential, handed to the bot for one post. The bot

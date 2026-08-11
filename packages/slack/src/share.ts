@@ -32,9 +32,10 @@ export interface ShareDeps {
    * front of it, as it always did. */
   asMember: () => Promise<string | undefined>;
   /** Forgets the token Slack has stopped honouring, and only that one — a
-   * member who linked again in between keeps the grant they just made. Fails
-   * open: the answer lands either way. */
-  unlink: (token: string) => Promise<void>;
+   * member who linked again in between keeps the grant they just made, and
+   * `false` says that is what happened. Fails open: the answer lands either
+   * way. */
+  unlink: (token: string) => Promise<boolean>;
   share: (
     channel: string,
     thread: string,
@@ -88,19 +89,16 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
   // them *they* are not in the channel over a refusal the bot got would send
   // them looking at their own membership for somebody else's problem.
   let byMember = Boolean(token);
-  // Whether the dead token is actually gone. The unlink fails open, so this is
-  // not the same question — and "I disconnected it" is a claim to make only
-  // where the home tab will agree with it.
+  // Whether the dead token is actually gone: the unlink can fail, and it clears
+  // nothing where they have already linked again. "I disconnected it" is a
+  // claim to make only where the home tab will agree with it.
   let forgotten = false;
   // Their token stopped working — revoked, or an install replaced. The bot can
   // still publish, and an answer they approved is worth more than the name on
   // it. `author` only ever comes back for a post that carried a token, so the
   // test for one below states that rather than guarding against it.
   if (token && !result.ok && result.why === 'author') {
-    forgotten = await deps.unlink(token).then(
-      () => true,
-      () => false,
-    );
+    forgotten = await deps.unlink(token).catch(() => false);
     byMember = false;
     result = await deps.share(to.channel, to.thread, asBot);
   }

@@ -430,6 +430,13 @@ describe('tenancy', () => {
       // one token here that cannot be a hash — the gateway has to replay it.
       assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
       assert.equal(await store.slackUserToken(carol.owner), 'xoxp-carol');
+      // A forget drops the token it names, and says whether that was the stored
+      // one: a member who linked again between a refused post and the call that
+      // follows it keeps the grant they just made, and is not told otherwise.
+      assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-older'), false);
+      assert.equal(await store.slackUserToken(carol.owner), 'xoxp-carol');
+      assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-carol'), true);
+      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
 
       const doomed = await store.deactivateUser('other', 'carol');
       assert.deepEqual(doomed, [{ runId: 'run-carol', sessionId: 'sid-carol' }]);
