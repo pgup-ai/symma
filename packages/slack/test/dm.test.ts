@@ -717,7 +717,7 @@ describe('dm message', () => {
     assert.deepEqual(posts[1]!.notices, [
       'Warning: skills were shortened.',
       '`gpt-5.6-sol[high]` · 168.2k tokens · 60k cached',
-      '`codex resume acp-1`',
+      'Yours in the terminal too: `codex resume acp-1`',
     ]);
   });
 
@@ -1148,7 +1148,7 @@ describe('dm message', () => {
     assert.match(posts[0]!.text, /Picking up where it left off/);
     // The run came back on `acp-1`, so the offered `acp-0` is what nothing can
     // pick up now — a refused offer is exactly when the new id has to be said.
-    assert.deepEqual(posts[1]!.notices, ['`codex resume acp-1`']);
+    assert.deepEqual(posts[1]!.notices, ['Yours in the terminal too: `codex resume acp-1`']);
     // Against what it ran under, since an id means nothing on another machine.
     assert.deepEqual(finished, [
       {
