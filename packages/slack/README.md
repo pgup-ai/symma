@@ -20,12 +20,13 @@ what lets a shared answer go out as the member rather than as the bot — Slack
 decides authorship by token type. **Re-paste it after a change and reinstall**, or the
 new scopes are not granted.
 
-Account linking is the gateway's half as much as this one: it needs
-`SYMMA_SLACK_CLIENT_ID`, `SYMMA_SLACK_CLIENT_SECRET` and an `https://`
-`SYMMA_GATEWAY_PUBLIC_URL` there. With any of them missing the home tab offers
-nothing to connect, and shared answers go out under the bot's name with the
-member's in front — which is what every unlinked member gets, so it is a
-deployment choice rather than a broken one.
+Account linking is the gateway's half as much as this one: on top of the
+`SYMMA_GATEWAY_DATABASE_URL` and `SYMMA_GATEWAY_BOT_TOKEN` the rest of this
+surface already needs, it wants `SYMMA_SLACK_CLIENT_ID`,
+`SYMMA_SLACK_CLIENT_SECRET` and an `https://` `SYMMA_GATEWAY_PUBLIC_URL`. With
+any of them missing the home tab offers nothing to connect, and shared answers
+go out under the bot's name with the member's in front — which is what every
+unlinked member gets, so it is a deployment choice rather than a broken one.
 
 `redirect_urls` is the one field to edit before pasting: replace
 `https://REPLACE-WITH-SYMMA_GATEWAY_PUBLIC_URL` with the gateway's own

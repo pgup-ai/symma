@@ -108,7 +108,11 @@ export function homeBlocks(
     section(
       target.state === 'ready'
         ? `⌁ *${machine}* is ready${target.agent ? `, running \`${plainly(target.agent)}\`` : ''}`
-        : `⌁ *${machine}* is not reachable — start the companion and it will come back`,
+        : // A machine mid-turn is attached and working, so telling them to start
+          // the companion sends them to restart the thing answering them.
+          target.state === 'busy'
+          ? `⌁ *${machine}* is working on your last question`
+          : `⌁ *${machine}* is not reachable — start the companion and it will come back`,
     ),
     // A machine offering no approved project is not a broken one: conversations
     // run in an empty temp directory, and the DM says so on the turn itself.
@@ -121,9 +125,9 @@ export function homeBlocks(
   );
 
   // Above the model, because a model belongs to the agent that offered it:
-  // changing agent is the larger of the two choices. Absent where the machine
-  // has only one — the gateway sends no list, and a select with one option is a
-  // control that does nothing.
+  // changing agent is the larger of the two choices. Nothing at all for a
+  // machine that is up and runs one agent: the gateway sends no list, and a
+  // select with one option is a control that does nothing.
   const agents = target.agents?.length ? agentSelect(target.agents, target.agent ?? '') : [];
   if (agents.length)
     blocks.push(
@@ -131,6 +135,15 @@ export function homeBlocks(
       section('*⌁ The agent you work with*'),
       { type: 'actions', elements: agents },
       context('Threads already open move with you, and are caught up from the DM.'),
+    );
+  // A list only exists while the machine is attached to say what it runs, so
+  // this goes missing exactly when a member is most likely to be looking —
+  // during a turn. Said, the way the model list below it says it.
+  else if (target.state !== 'ready')
+    blocks.push(
+      { type: 'divider' },
+      section('*⌁ The agent you work with*'),
+      context('Your agents arrive with your machine.'),
     );
 
   blocks.push(

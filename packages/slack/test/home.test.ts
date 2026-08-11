@@ -73,6 +73,15 @@ describe('the surfaces with no thread under them', () => {
     // The one they are on is the current selection, not just an option in the
     // list: a picker that shows no selection reads as nothing being chosen.
     assert.equal((shown.initial_option as { value: string }).value, JSON.stringify({ m: 'codex' }));
+
+    // The list only exists while the machine is attached to say what it runs, so
+    // a member looking mid-turn finds the section gone rather than empty. Said,
+    // the way the model list below it is — and not said where the machine is up
+    // and simply has one agent, which is not a control that went missing.
+    const away = { ...both, state: 'busy' as const, agents: undefined };
+    assert.equal(picker(away), undefined);
+    assert.match(text(homeBlocks(away)), /Your agents arrive with your machine/);
+    assert.doesNotMatch(text(homeBlocks(paired)), /Your agents arrive/);
   });
 
   it('offers to post as them, says so once it can, and nothing where it cannot', () => {
@@ -91,6 +100,9 @@ describe('the surfaces with no thread under them', () => {
   it('renders the setup as it is, not as it would read best', () => {
     assert.match(text(homeBlocks(paired)), /start in `symma`/);
     assert.match(text(homeBlocks({ ...paired, state: 'asleep' })), /not reachable/);
+    // A machine mid-turn is attached and working — "start the companion" would
+    // send them to restart the thing that is answering them.
+    assert.match(text(homeBlocks({ ...paired, state: 'busy' })), /working on your last question/);
     // A machine offering no approved project still runs, in a temp directory —
     // so the row says that rather than going missing.
     assert.match(
