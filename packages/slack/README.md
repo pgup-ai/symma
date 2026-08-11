@@ -14,7 +14,7 @@ machine they want to reach.
 and paste [`app-manifest.json`](app-manifest.json). It asks for `commands` to run
 the slash command, `app_mentions:read` to hear a mention, `channels:history` and
 `groups:history` to read the thread it came from, `im:history` to hear a reply in
-the DM, `chat:write` with `im:write` to answer there, and `reactions:write`
+the DM, `mpim:history` so a pasted link into a group DM can be fetched, `chat:write` with `im:write` to answer there, and `reactions:write`
 to mark their message while a run is out. The one _user_ scope, `chat:write`, is
 what lets a shared answer go out as the member rather than as the bot — Slack
 decides authorship by token type. **Re-paste it after a change and reinstall**, or the

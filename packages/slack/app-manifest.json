@@ -38,6 +38,7 @@
         "files:read",
         "groups:history",
         "im:history",
+        "mpim:history",
         "im:write",
         "reactions:write",
         "users:read"

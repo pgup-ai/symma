@@ -25,6 +25,7 @@ import {
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
+import { LINKS_PER_MESSAGE, resolveLinks } from './links.js';
 import { plainly, type MarkState } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
@@ -448,10 +449,27 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
+  // What the message links to, fetched here because the bot is the one holding
+  // a token for this workspace — the agent has whatever access its own machine
+  // has, which is usually none and occasionally somebody else's. First claim on
+  // the budget: the link is what this message is about, where the catch-up
+  // below is background.
+  const linked = await resolveLinks(message.text, {
+    budgetBytes: deps.budgetBytes,
+    threadReplies: deps.threadReplies,
+    log: deps.log,
+    self: { channel: conversation.dmChannel, root: conversation.rootThread },
+  });
+
   // Even when a resume is on offer, because whether the agent still has that
   // session is not known until it has been asked — and arriving without the
   // thread is the half that cannot be recovered from (§4).
-  const caught = existing ? await catchUp(message, conversation, deps) : undefined;
+  const caught = existing
+    ? await catchUp(message, conversation, {
+        ...deps,
+        budgetBytes: Math.max(0, deps.budgetBytes - linked.spent),
+      })
+    : undefined;
 
   // Fetched before the run so a refusal is one aside rather than a failed turn,
   // and after the endpoint check so a shut laptop costs no downloads.
@@ -486,8 +504,25 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // honoured, which is the comparison `driveAcpSession` itself makes to decide
   // whether to send the transcript — a turn whose resume was refused ran on that
   // transcript, and still has to say what was missing from it.
+  // Links this answer ran without stay in the resting text like the catch-up
+  // note does, and unconditionally: the fetch rides the prompt, so no resume
+  // makes this stop being true of the answer. One verb with the reason beside
+  // each link, because "could not read" a thread that merely did not fit is a
+  // different fact told wrong.
+  const leftOut = [
+    ...linked.unread.map((url) => `<${url}> — I cannot read it`),
+    ...linked.crowded.map((url) => `<${url}> — it did not fit`),
+    ...(linked.skipped
+      ? [`the last ${String(linked.skipped)} — I take ${String(LINKS_PER_MESSAGE)} per message`]
+      : []),
+  ];
+  const unreadNote = leftOut.length ? `This ran without ${leftOut.join(', ')}.` : undefined;
   const restingFor = (ranIn: string | undefined): string =>
-    [scope, decision.resume !== undefined && ranIn === decision.resume ? undefined : caught?.note]
+    [
+      scope,
+      unreadNote,
+      decision.resume !== undefined && ranIn === decision.resume ? undefined : caught?.note,
+    ]
       .filter(Boolean)
       .join(' ');
   const opening = restingFor(decision.resume);
@@ -496,8 +531,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
+  const following = linked.sections.length
+    ? `Reading the ${linked.sections.length > 1 ? 'threads' : 'thread'} behind your ${
+        linked.sections.length > 1 ? 'links' : 'link'
+      }.`
+    : undefined;
   // Said only while the turn is out.
-  const inFlight = [attempting, reading].filter(Boolean).join(' ');
+  const inFlight = [attempting, following, reading].filter(Boolean).join(' ');
   // The ellipsis is the "still going" cue, and it belongs to the in-flight text
   // rather than to what rests, which is as true after the answer as before it —
   // so a turn with nothing else to say needs no update to take a cue off a line
@@ -576,7 +616,21 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // The member's pick when they have made one, else the agent's own
       // default. The prefix is what makes it parse either way.
       model: `${decision.agent}/${decision.model ?? 'default'}`,
-      prompt: message.text,
+      // The fetched threads ride the prompt rather than the context: context is
+      // dropped where a resume is honoured, and a link pasted into this message
+      // is new to that session too. The unread line is for an agent with Slack
+      // access of its own — it may reach what the bot cannot.
+      prompt: [
+        message.text,
+        ...linked.sections,
+        ...(linked.unread.length || linked.crowded.length
+          ? [
+              `Not fetched above — read ${
+                linked.unread.length + linked.crowded.length > 1 ? 'them' : 'it'
+              } yourself if you have Slack access: ${[...linked.unread, ...linked.crowded].join(', ')}`,
+            ]
+          : []),
+      ].join('\n\n'),
       onProgress: narrate,
       ...(caught?.context ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),

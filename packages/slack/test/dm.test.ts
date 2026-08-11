@@ -605,6 +605,52 @@ describe('dm message', () => {
     assert.equal(updates.at(-1)!.text, '`symma` · `read-only`');
   });
 
+  it('fetches the thread behind a pasted link, and the fetch survives a resume', async () => {
+    // The agent runs on the member's machine with whatever Slack access it has —
+    // usually none, occasionally somebody else's workspace. Left unresolved, a
+    // pasted link arrives as a bare URL and the answer becomes the agent
+    // explaining what it cannot open.
+    const url = 'https://acme.slack.com/archives/C0LINKED000/p1786400100000001';
+    const { deps, posts, runs } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, resume: 'acp-1' },
+      channel: [{ ts: '1786400100.000001', author: 'Ola', text: 'the trace is in prod-42' }],
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: `continue from <${url}>`,
+      },
+      deps,
+    );
+    // In the prompt, never the context: the driver drops context where a resume
+    // is honoured — the session already has its thread — but a link pasted into
+    // this message is new to that session too.
+    assert.match(runs[0]!.prompt, /Behind https.*fetched just now/);
+    assert.match(runs[0]!.prompt, /the trace is in prod-42/);
+    assert.doesNotMatch(runs[0]!.context ?? '', /prod-42/);
+    assert.match(posts[0]!.text, /Reading the thread behind your link/);
+  });
+
+  it('runs without a link it cannot read, and says so to both sides', async () => {
+    const url = 'https://elsewhere.slack.com/archives/C0FOREIGN00/p1786400100000001';
+    const { deps, posts, runs } = harness({ existing: CONVERSATION, channel: null });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: `see <${url}>` },
+      deps,
+    );
+    // The member hears it where the catch-up note lives — in the resting text,
+    // since no resume makes it stop being what this answer ran without. The
+    // agent hears it as an offer: one with its own Slack access can go where
+    // the bot cannot.
+    assert.match(posts[0]!.text, /This ran without <https:.*I cannot read it/);
+    assert.match(runs[0]!.prompt, /read it yourself if you have Slack access/);
+    assert.equal(posts.at(-1)!.text, 'the answer');
+  });
+
   it('hands the member’s own files to the agent, and names what it could not', async () => {
     const { deps, posts, runs } = harness({ existing: CONVERSATION, fileBytes: 'a,b\n1,2\n' });
     await handleDm(

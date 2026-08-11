@@ -55,7 +55,11 @@ thread when they are not. Both travel every turn: whether the agent still holds
 the session is not known until it has been asked, so the transcript goes with
 the resume and the driver drops whichever does not apply. A conversation runs
 one turn at a time — two at once fork the session that carries it, and neither
-half then holds the whole thread — so a second message waits and is told so. An answer leaves the DM only when the member
+half then holds the whole thread — so a second message waits and is told so.
+Slack permalinks pasted into a message are fetched by the bot and ride the
+prompt — not the context, which a honoured resume drops — because the agent has
+only its own machine's Slack access, which is usually none; a link the bot
+cannot read is named to the member and left to an agent that can. An answer leaves the DM only when the member
 presses the button (§5): the gateway states where it may go, the shared post
 names who approved it, and a destination gone bad keeps the answer here. The
 mode and model pickers ride the answers, so both are chosen mid-thread; the
