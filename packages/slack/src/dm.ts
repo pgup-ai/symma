@@ -325,8 +325,8 @@ export interface DmDeps {
    * vouch for, or not visible to it at all. */
   visibility: (channel: string) => Promise<'public' | 'private' | 'unseen'>;
   /** Every conversation this member is in — the other way a link is theirs to
-   * read. */
-  conversationsOf: (user: string) => Promise<Set<string>>;
+   * read. Undefined where the scan failed, which is not the same as none. */
+  conversationsOf: (user: string) => Promise<Set<string> | undefined>;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -528,7 +528,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // One scan of this member's conversations for the whole message, however many
   // links it holds: their list is short, but reading it once per link is
   // latency in front of the acknowledgement buying no new answer.
-  let mine: Promise<Set<string>> | undefined;
+  let mine: Promise<Set<string> | undefined> | undefined;
   const linked = links.length
     ? await resolveLinks(message.text, {
         budgetBytes: deps.budgetBytes,
@@ -550,9 +550,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
           const seen = await deps.visibility(channel);
           if (seen === 'public') return 'yes';
           if (seen === 'unseen') return 'unreadable';
-          return (await (mine ??= deps.conversationsOf(message.user))).has(channel)
-            ? 'yes'
-            : 'not yours';
+          const theirs = await (mine ??= deps.conversationsOf(message.user));
+          // A scan that failed is not a member standing outside the channel.
+          // Only a list that arrived can say they are not in it.
+          if (!theirs) return 'unreadable';
+          return theirs.has(channel) ? 'yes' : 'not yours';
         },
         self: { channel: conversation.dmChannel, root: conversation.rootThread },
         spent: () => Date.now() > by,

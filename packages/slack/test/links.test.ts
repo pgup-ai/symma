@@ -193,7 +193,9 @@ describe('slack links', () => {
       const { deps, logged } = resolver({ ...over, logThrows: true });
       const got = await resolveLinks(`<${url}>`, deps);
       assert.equal(got.missed.length, 1, JSON.stringify(over));
-      assert.equal(logged.length, 1, 'it still tried to say why');
+      // Not how many times, only that it still tried: guarding a logger by
+      // deleting the call would pass everything above this line.
+      assert.ok(logged.length > 0, 'it still tried to say why');
     }
   });
 

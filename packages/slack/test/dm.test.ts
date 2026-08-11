@@ -71,6 +71,8 @@ function harness(
     /** Channels the bot cannot see at all, so it can say nothing about who is
      * in them. */
     unseen?: string[];
+    /** The membership scan fails — a missing scope, a Slack error. */
+    scanFails?: boolean;
     /** The source channel thread a mention came out of, for a conversation whose
      * `source` says where to read it. `null` is one the bot cannot read. */
     channel?: ThreadMessage[] | null;
@@ -130,7 +132,8 @@ function harness(
       ),
     conversationsOf: () => {
       scans += 1;
-      return Promise.resolve(new Set(over.privateMine ?? []));
+      // Undefined is the scan failing, which is not the member being in nothing.
+      return Promise.resolve(over.scanFails ? undefined : new Set(over.privateMine ?? []));
     },
     // Two threads: the DM the conversation lives in, and the channel a mention
     // came out of — which is where a turn reads what it is about.
@@ -867,6 +870,31 @@ describe('dm message', () => {
     // the one thing they can check themselves, usually wrong.
     const url = 'https://acme.slack.com/archives/C0UNSEEN000/p1786400100000001';
     const { deps, posts } = harness({ existing: CONVERSATION, unseen: ['C0UNSEEN000'] });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: `see <${url}>`,
+      },
+      deps,
+    );
+    assert.match(posts[0]!.text, /I cannot read it/);
+    assert.doesNotMatch(posts[0]!.text, /not a channel you are in/);
+  });
+
+  it('does not call a member outside a channel it failed to ask about', async () => {
+    // An empty list says they are in nothing; a failed scan says nobody asked
+    // successfully. Reported as the same thing, a missing scope sends them
+    // auditing their own memberships.
+    const url = 'https://acme.slack.com/archives/C0PRIVATE00/p1786400100000001';
+    const { deps, posts } = harness({
+      existing: CONVERSATION,
+      privateMine: ['C0PRIVATE00'],
+      scanFails: true,
+    });
     await handleDm(
       {
         user: 'U-nel',

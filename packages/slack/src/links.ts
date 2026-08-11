@@ -16,6 +16,8 @@
  */
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
+const omittedNote = (n: number): string => ` (${String(n)} earlier messages did not fit)`;
+
 /** One message a permalink names: `p<sec><usec>` is its ts with the dot taken
  * out, and `thread_ts` rides along when that message is a reply — pointing at
  * the root, which is the thread the member means. */
@@ -25,6 +27,13 @@ const PERMALINK =
 /** Fetches are API calls and threads can be long; past this the member is
  * pasting an index, not a question. The rest are named, not fetched. */
 export const LINKS_PER_MESSAGE = 5;
+
+/** Room for the note a label gains when the snapshot under it was cut. Reserved
+ * before the cut, because the label is written after it and would otherwise put
+ * the section over the ceiling its own parts were each inside. Measured against
+ * a count no thread reaches, so it is the worst case rather than a guess at
+ * one. */
+const OMITTED_NOTE_BYTES = Buffer.byteLength(omittedNote(999_999), 'utf8');
 
 export interface SlackLink {
   /** As it appeared, query and all — the name the member and the agent both
@@ -178,15 +187,16 @@ export async function resolveLinks(
     // Greedy in the member's order: the first link is the one the message is
     // most likely about, and an even split starves it for a footnote.
     const snapshot = threadSnapshot(messages, {
-      budgetBytes: Math.max(0, deps.budgetBytes - spent - Buffer.byteLength(label, 'utf8') - 48),
+      budgetBytes: Math.max(
+        0,
+        deps.budgetBytes - spent - Buffer.byteLength(label, 'utf8') - OMITTED_NOTE_BYTES,
+      ),
     });
     if (!snapshot.text) {
       miss('too long');
       continue;
     }
-    const cut = snapshot.omitted
-      ? ` (${String(snapshot.omitted)} earlier messages did not fit)`
-      : '';
+    const cut = snapshot.omitted ? omittedNote(snapshot.omitted) : '';
     const section = `${label}${cut}:\n\n${snapshot.text}`;
     sections.push(section);
     spent += Buffer.byteLength(section, 'utf8');
