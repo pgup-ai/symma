@@ -53,7 +53,12 @@ describe('slack api', () => {
       channels: [{ id: 'C0PRIVATE00' }, { id: 'G0GROUPDM00' }],
     });
     const listed = slackApi('xoxb-test', { fetch: listing.fetchImpl });
-    assert.deepEqual([...(await listed.conversationsOf('U-nel'))!], ['C0PRIVATE00', 'G0GROUPDM00']);
+    // As a set, not a list: what it collected is the contract, and the order
+    // Slack happens to page them back in is not.
+    assert.deepEqual(
+      await listed.conversationsOf('U-nel'),
+      new Set(['C0PRIVATE00', 'G0GROUPDM00']),
+    );
   });
 
   it('reads a thread as names, and asks once per person', async () => {
