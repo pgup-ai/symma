@@ -477,20 +477,29 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     ? `\`${plainly(decision.label)}\` · \`${decision.mode ?? 'read-only'}\``
     : '`no project` · it cannot see your files, so keep the question self-contained';
   // The offer, not the outcome: the agent has not been asked yet, so this says
-  // what will be tried rather than claiming a resume that may not happen.
-  const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
+  // what will be tried rather than claiming a resume that may not happen. It
+  // takes the place of the catch-up note, which describes a transcript a
+  // successful resume makes no use of.
+  const attempting = decision.resume ? 'Picking up where it left off, if it still can.' : undefined;
+  // What the answer was produced without: a channel that could not be read, or a
+  // history that did not fit. Not a turn-scoped line — it stays true of the
+  // answer, and a member who reads one as if it had the whole thread has been
+  // told something wrong by its removal.
+  const missing = decision.resume ? undefined : caught?.note;
   // Named up front: a member who attached three files and sees two read should
   // learn it now, not from an answer that quietly used one.
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
-  // True only while the turn is out, which is what `settle` below takes back.
-  const inFlight = [note, reading].filter(Boolean).join(' ');
+  // What the acknowledgement is left saying, and what it says only while the
+  // turn is out — which is the line `settle` below takes it back to.
+  const rest = [scope, missing].filter(Boolean).join(' ');
+  const inFlight = [attempting, reading].filter(Boolean).join(' ');
   // The ellipsis is the "still going" cue, and it belongs to the in-flight text
-  // rather than to the scope, which is as true after the answer as before it —
+  // rather than to what rests, which is as true after the answer as before it —
   // so a turn with nothing else to say needs no update to take a cue off a line
   // that never moved. The 👀 on their own message is what says it is running.
-  const ack = inFlight ? `${scope} ${inFlight.replace(/\.$/, '')}…` : scope;
+  const ack = inFlight ? `${rest} ${inFlight.replace(/\.$/, '')}…` : rest;
   const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
@@ -521,8 +530,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
 
   // Slack cannot fold the narration away the way a terminal does, so once the
   // turn is over the last step, the ellipsis and a resume that has already been
-  // attempted are all in the way — leaving the scope, which is as true then as
-  // it was at the start. Queued behind the narration it is undoing, and called
+  // attempted are all in the way — leaving the scope and whatever the answer
+  // was produced without, both as true then as at the start. Queued behind the narration it is undoing, and called
   // only after the turn is closed: a `chat.update` Slack is slow to take would
   // otherwise hold the turn open, and a member's next message would be refused
   // for a line nobody is waiting on. Nothing to do where the message already
@@ -532,7 +541,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     if (!lastShown && !inFlight) return;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      updating.then(() => deps.working(acked.channel, acked.ts, scope)).catch(() => undefined),
+      updating.then(() => deps.working(acked.channel, acked.ts, rest)).catch(() => undefined),
       new Promise<void>((resolve) => {
         deadline = setTimeout(resolve, TIDY_MS);
         // Two different jobs on the same handle: `unref` so waiting on a line

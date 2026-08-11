@@ -948,12 +948,16 @@ describe('dm message', () => {
     // Nothing copies that thread into the DM any more, so losing access to it
     // loses the question's context — and an answer given without it reads like an
     // answer about it.
-    const { deps, posts, runs } = harness({
+    const { deps, posts, runs, updates } = harness({
       existing: { ...CONVERSATION, source: { channel: 'C-incidents', thread: '100.0' } },
       channel: null,
       // So the prompt has something in it: without this the context is absent
       // entirely and asserting what it does not claim would assert nothing.
       history: [{ ts: '201.0', author: 'U-nel', text: 'still waiting' }],
+      // And so the acknowledgement is rewritten at all: with nothing in flight
+      // there is no update to take the warning off, and the assertion below
+      // would hold without the code that keeps it.
+      narrates: 'Reading dm.ts',
     });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'why?' },
@@ -962,6 +966,10 @@ describe('dm message', () => {
     assert.match(posts[0]!.text, /I cannot read <#C-incidents> just now/);
     assert.match(runs[0]!.context!, /still waiting/, 'the DM still travels');
     assert.doesNotMatch(runs[0]!.context!, /asked in/, 'and nothing claims that thread');
+    // And it is still there once the answer is: what the answer was produced
+    // without stays true of the answer, unlike the ellipsis beside it.
+    assert.match(updates.at(-1)!.text, /I cannot read <#C-incidents> just now/);
+    assert.doesNotMatch(updates.at(-1)!.text, /…$/);
   });
 
   it('leaves the cursor where it was when the answer never landed', async () => {
