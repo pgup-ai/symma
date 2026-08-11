@@ -26,6 +26,8 @@ function resolver(over: {
   mayReadThrows?: boolean;
   /** The read never settles inside the deadline. */
   slowRead?: boolean;
+  /** The caller's logger throws, as a caller's callback may. */
+  logThrows?: boolean;
 }) {
   const asked: string[] = [];
   const logged: string[] = [];
@@ -48,6 +50,7 @@ function resolver(over: {
       },
       log: (message: string) => {
         logged.push(message);
+        if (over.logThrows) throw new Error('the logger is a caller callback');
       },
       ...(over.host ? { host: over.host } : {}),
       ...(over.self ? { self: over.self } : {}),
@@ -179,6 +182,19 @@ describe('slack links', () => {
     const got = await resolveLinks(`what is in <${theirs}>?`, deps);
     assert.deepEqual(asked, [], 'refused before the fetch, not after');
     assert.deepEqual(got.missed, [{ url: theirs, why: 'not yours' }]);
+  });
+
+  it('survives a logger that throws on the paths that only log', async () => {
+    // Both places this logs are recovery paths, and the logger is a caller's
+    // callback: one that throws there turns a link the bot merely could not
+    // read into a turn that never reached its acknowledgement.
+    const url = link('C0BMCR1FGU9', '1786400100.000001');
+    for (const over of [{ mayReadThrows: true }, { throws: true }]) {
+      const { deps, logged } = resolver({ ...over, logThrows: true });
+      const got = await resolveLinks(`<${url}>`, deps);
+      assert.equal(got.missed.length, 1, JSON.stringify(over));
+      assert.equal(logged.length, 1, 'it still tried to say why');
+    }
   });
 
   it('refuses a link it cannot check, without blaming the member for it', async () => {

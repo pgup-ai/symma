@@ -223,8 +223,10 @@ const LINKS_MS = 8_000;
 
 /** The workspace lookup's slice of it. One `auth.test`, cached after it lands,
  * so a slow one is a first message on a degraded Slack — and bounding it to the
- * whole budget would leave the links it is there to check with none. */
-const HOST_MS = 2_000;
+ * whole budget would leave the links it is there to check with none. Short,
+ * because the fallback is benign: the pin comes off and the access check is
+ * what was guarding the fetch anyway. */
+const HOST_MS = 1_000;
 
 /**
  * Stops waiting on `work` after `ms`, without stopping `work` — the Slack SDK

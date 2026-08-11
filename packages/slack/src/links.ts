@@ -112,6 +112,16 @@ export async function resolveLinks(
   const links = slackLinks(text, deps.host).filter(
     (link) => !(link.channel === deps.self?.channel && link.root === deps.self.root),
   );
+  // The logger is a caller's callback, and both places below are recovery
+  // paths: one that throws would turn a link the bot merely could not read into
+  // a turn that never reached its acknowledgement.
+  const say = (line: string): void => {
+    try {
+      deps.log(line);
+    } catch {
+      /* a caller's logger is not worth the turn */
+    }
+  };
   const sections: string[] = [];
   const missed: LinkMiss[] = [];
   let fetches = 0;
@@ -138,7 +148,7 @@ export async function resolveLinks(
       // Still refused, but reported as the bot's problem, which it is: a
       // check that threw is no evidence about *them*, and "not yours" would
       // send a member auditing their membership over a missing scope.
-      deps.log(`link access unknown: ${String(error)}`);
+      say(`link access unknown: ${String(error)}`);
       return 'unreadable' as const;
     });
     if (allowed !== 'yes') {
@@ -149,7 +159,7 @@ export async function resolveLinks(
     const messages = await deps
       .reading(deps.threadReplies(link.channel, link.root))
       .catch((error: unknown) => {
-        deps.log(`link not read: ${String(error)}`);
+        say(`link not read: ${String(error)}`);
         return undefined;
       });
     if (messages === 'too slow') {
