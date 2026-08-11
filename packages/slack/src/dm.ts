@@ -449,11 +449,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return `refused: ${decision.because}`;
   }
 
-  // What the message links to, fetched here because the bot is the one holding
-  // a token for this workspace — the agent has whatever access its own machine
-  // has, which is usually none and occasionally somebody else's. First claim on
-  // the budget: the link is what this message is about, where the catch-up
-  // below is background.
+  // First claim on the budget: the link is what this message is about, where
+  // the catch-up below is background.
   const linked = await resolveLinks(message.text, {
     budgetBytes: deps.budgetBytes,
     threadReplies: deps.threadReplies,
@@ -504,11 +501,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // honoured, which is the comparison `driveAcpSession` itself makes to decide
   // whether to send the transcript — a turn whose resume was refused ran on that
   // transcript, and still has to say what was missing from it.
-  // Links this answer ran without stay in the resting text like the catch-up
-  // note does, and unconditionally: the fetch rides the prompt, so no resume
-  // makes this stop being true of the answer. One verb with the reason beside
-  // each link, because "could not read" a thread that merely did not fit is a
-  // different fact told wrong.
+  // Links this answer ran without rest beside the catch-up note, but
+  // unconditionally: the fetch rides the prompt, so no resume makes this stop
+  // being true. A reason per link — "cannot read" a thread that merely did not
+  // fit is a different fact told wrong.
   const leftOut = [
     ...linked.unread.map((url) => `<${url}> — I cannot read it`),
     ...linked.crowded.map((url) => `<${url}> — it did not fit`),
@@ -516,11 +512,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       ? [`the last ${String(linked.skipped)} — I take ${String(LINKS_PER_MESSAGE)} per message`]
       : []),
   ];
-  const unreadNote = leftOut.length ? `This ran without ${leftOut.join(', ')}.` : undefined;
+  const leftOutNote = leftOut.length ? `This ran without ${leftOut.join(', ')}.` : undefined;
   const restingFor = (ranIn: string | undefined): string =>
     [
       scope,
-      unreadNote,
+      leftOutNote,
       decision.resume !== undefined && ranIn === decision.resume ? undefined : caught?.note,
     ]
       .filter(Boolean)
