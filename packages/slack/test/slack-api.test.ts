@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { slackApi } from '../src/slack-api.js';
+import { slackApi, updateBudget } from '../src/slack-api.js';
 
 /** Slack answers 200 with `ok: false`, so every case here is a 200. */
 const answering = (...bodies: unknown[]) => {
@@ -39,6 +39,56 @@ const THREE_FROM_TWO = {
 };
 
 describe('slack api', () => {
+  it('holds a minute of updates, then lets the window carry it', () => {
+    // Slack counts `chat.update` per app per workspace, so this is the ceiling
+    // every turn shares — a per-turn interval cannot honour a shared budget,
+    // whatever it is set to.
+    const budget = updateBudget(3);
+    const fits = (updates: number): boolean => budget.room(updates) !== undefined;
+    // Two for a turn's first step: the step, and the tidy that has to follow it.
+    assert.equal(fits(2), true);
+    // All of an ask or none of it — a refusal that spent half of what it asked
+    // for would charge a narration nobody wrote for a tidy nobody owes, and
+    // take the room off a turn already past its first step.
+    assert.equal(fits(2), false);
+    assert.deepEqual([fits(1), fits(1)], [true, false]);
+    // And a cleanup no step reserved lands anyway, ceiling or no ceiling — the
+    // overshoot is the turns in flight, not the whole of the next minute.
+    budget.take(undefined);
+    // The window is exactly a minute, and it slides: what was spent 60s ago is
+    // not spent now. Monotonic, so this is the clock that moves it.
+    const clock = performance.now.bind(performance);
+    try {
+      performance.now = () => clock() + 60_000;
+      assert.equal(fits(1), true);
+    } finally {
+      performance.now = clock;
+    }
+  });
+
+  it('charges a cleanup whose turn outlived the window it reserved in', () => {
+    // A turn can run longer than the minute its first step reserved in, and
+    // that reservation ages out with every other stamp. A tidy still trusting
+    // it lands uncounted — the same leak this budget closes, moved onto the
+    // turns most likely to hit it.
+    const budget = updateBudget(3);
+    const step = budget.room(2);
+    budget.take(step);
+    assert.notEqual(budget.room(1), undefined, 'inside the window it was paid for');
+
+    const clock = performance.now.bind(performance);
+    try {
+      performance.now = () => clock() + 60_000;
+      budget.take(step);
+      // One stamp in the new window: the cleanup charged itself, and nothing
+      // charged it twice.
+      assert.equal(budget.room(3), undefined);
+      assert.notEqual(budget.room(2), undefined);
+    } finally {
+      performance.now = clock;
+    }
+  });
+
   it('answers a failed membership scan with nothing, not with an empty list', async () => {
     // The two are opposite claims: an empty list says the member is in none of
     // it, nothing says nobody asked successfully. `dm.ts` maps them to "you are

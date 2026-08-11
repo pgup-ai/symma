@@ -21,6 +21,7 @@ import { homeBlocks, modelPrompt, type Linking } from './home.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import {
+  updateBudget,
   slackApi,
   DEFAULT_AGENT_ACTION,
   DEFAULT_MODEL_ACTION,
@@ -139,6 +140,10 @@ const mint = async (slackUser: string): Promise<MintResult> => {
 };
 
 const api = slackApi(botToken, { log });
+
+// One budget for the process, which is one app in one workspace — the unit
+// Slack counts `chat.update` by.
+const updates = updateBudget();
 
 /** What `/model` and the home tab render: the turn route without a turn, which
  * is what keeps a picker from minting a credential every time it is looked at. */
@@ -398,6 +403,7 @@ const connection = socketMode({
               shedMode: deps.shedMode,
               shedModel: deps.shedModel,
               working: deps.working,
+              updates,
               fetchFile: deps.fetchFile,
               mark: api.mark,
               threadReplies: deps.threadReplies,

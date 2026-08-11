@@ -73,6 +73,8 @@ function harness(
     unseen?: string[];
     /** The membership scan fails — a missing scope, a Slack error. */
     scanFails?: boolean;
+    /** The workspace's narration budget is gone, spent by other turns. */
+    budgetSpent?: boolean;
     /** The source channel thread a mention came out of, for a conversation whose
      * `source` says where to read it. `null` is one the bot cannot read. */
     channel?: ThreadMessage[] | null;
@@ -88,6 +90,11 @@ function harness(
   } = {},
 ) {
   let scans = 0;
+  /** What narration asked the shared budget for, and what the turn spent of it
+   * — the tidy included, which is the half a per-narration count misses. */
+  const asks: number[] = [];
+  let charged = 0;
+  let stamps = 0;
   const posts: {
     channel: string;
     text: string;
@@ -197,6 +204,19 @@ function harness(
           : { ok: true, bytes: Buffer.from(over.fileBytes) },
       );
     },
+    updates: {
+      // Stamps from zero — a reservation is a moment, and the first of them in
+      // a process is falsy.
+      room: (n) => {
+        asks.push(n);
+        if (over.budgetSpent === true) return undefined;
+        charged += n;
+        return stamps++;
+      },
+      take: (reserved) => {
+        if (reserved === undefined) charged += 1;
+      },
+    },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
       if (over.updateThrows && updates.length === 1) throw new Error('sync');
@@ -242,6 +262,8 @@ function harness(
   return {
     deps,
     scans: () => scans,
+    asks,
+    charged: () => charged,
     posts,
     turns,
     runs,
@@ -551,7 +573,7 @@ describe('dm message', () => {
   it('offers the session it is picking up, beside the scope it runs in', async () => {
     // The offer rides the same message as the scope and says "if it still can":
     // whether the agent still holds that session is not known until it is asked.
-    const { deps, posts } = harness({
+    const { deps, posts, charged } = harness({
       existing: CONVERSATION,
       endpoint: {
         ...READY,
@@ -580,12 +602,15 @@ describe('dm message', () => {
     // The harness records an aside list only when there is one, so an answer with
     // nothing to add carries no key at all.
     assert.equal(posts[1]!.notices, undefined);
+    // The "…" has to come back off, and this turn narrated nothing to reserve
+    // that with — so the tidy pays for itself rather than going uncounted.
+    assert.equal(charged(), 1);
   });
 
   it('spends no update on a turn that never said anything', async () => {
-    // The `chat.update` budget is per channel, and most turns answer without
-    // narrating: tidying an acknowledgement that was never written on would spend
-    // that budget on every answer instead.
+    // Most turns answer without narrating, and tidying an acknowledgement that
+    // was never written on would spend the workspace's `chat.update` budget on
+    // every one of them.
     const { deps, updates } = harness({ existing: CONVERSATION });
     await handleDm(
       {
@@ -626,11 +651,64 @@ describe('dm message', () => {
     assert.equal(timeline.at(-1), atRest(posts[0]!.text));
   });
 
+  it('goes quiet rather than spending a budget other turns are using', async () => {
+    // Slack counts `chat.update` per app, so the ceiling belongs in front of
+    // every turn at once. A turn that cannot have it says nothing extra — the
+    // acknowledgement is already posted, and the answer is what they waited for.
+    const { deps, posts, updates, runs } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      budgetSpent: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.deepEqual(updates, [], 'no narration, and no tidy for one that never happened');
+    assert.equal(posts.at(-1)!.text, 'the answer');
+    assert.equal(runs.length, 1);
+  });
+
+  it('asks the shared budget only for a step its own floor would allow', async () => {
+    // Asked after the per-turn interval, not before it: a turn narrating every
+    // frame would otherwise drain the workspace's allowance just by being busy,
+    // without ever writing a line.
+    const { deps, runs, asks, charged } = harness({ existing: CONVERSATION });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    for (let i = 0; i < 5; i += 1) runs[0]!.onProgress!('Reading dm.ts');
+    await flush();
+    // One request, for two: the step, and the tidy that step makes certain.
+    // Charged per narration, a workspace's whole allowance of narrated turns
+    // lands one uncounted `chat.update` each — twice the ceiling in a busy
+    // minute, which is when it matters.
+    assert.deepEqual(asks, [2], 'five frames inside one interval, one request for budget');
+    // And two is all it costs: the tidy that followed spent the reservation it
+    // was handed rather than charging the workspace a second time.
+    assert.equal(charged(), 2);
+  });
+
   it('takes the narration back off once the answer is there to read', async () => {
     // Asserted on what Slack finished applying, with the step deliberately the
     // slower of the two: concurrent updates on one message can land either way
     // round, and a restore that lost that race would put the step back.
-    const { deps, posts, timeline } = harness({
+    const { deps, posts, timeline, charged } = harness({
       existing: CONVERSATION,
       narrates: 'Reading dm.ts',
       updateDelays: [20, 0],
@@ -654,6 +732,10 @@ describe('dm message', () => {
     // before this update is waited on, or one Slack sits on would hold the thread
     // against the member's next message.
     assert.equal(timeline.at(-1), atRest(posts[0]!.text));
+    // Two updates, and two is what the workspace was charged: the step reserved
+    // the one undoing it, and handed that reservation over rather than paying
+    // for it twice.
+    assert.equal(charged(), 2);
   });
 
   it('still says what was missing when the resume it offered was refused', async () => {

@@ -26,7 +26,7 @@ import {
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
 import { LINKS_PER_MESSAGE, resolveLinks, slackLinks, type LinkMiss } from './links.js';
-import { plainly, type MarkState } from './slack-api.js';
+import { plainly, type MarkState, type UpdateBudget } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
@@ -107,9 +107,11 @@ export interface RunSpec {
   attachments?: PromptAttachment[];
 }
 
-/** `chat.update` is rate limited per channel, and a turn narrating every file
- * read would spend that budget on frames nobody reads. */
-const PROGRESS_MIN_MS = 4_000;
+/** One turn's own floor, under the budget it shares with every other turn: a
+ * step every few seconds is a member watching frames nobody reads, and it would
+ * take that budget on its own before a second turn had asked for any. Long
+ * enough to be cheap, short enough that a run still looks like it is moving. */
+const PROGRESS_MIN_MS = 10_000;
 
 /** How long the answer's own handler will wait on the update that tidies the
  * acknowledgement, for a line the member is not waiting for. Landing late is
@@ -327,6 +329,10 @@ export interface DmDeps {
   /** Every conversation this member is in — the other way a link is theirs to
    * read. Undefined where the scan failed, which is not the same as none. */
   conversationsOf: (user: string) => Promise<Set<string> | undefined>;
+  /** Room on the acknowledgement, shared by every turn at once: Slack counts
+   * `chat.update` per app rather than per channel, so this is the ceiling a
+   * per-turn interval cannot be. */
+  updates: UpdateBudget;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -651,10 +657,20 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // in either order, and the cleanup below losing that race would leave a step
   // sitting above the answer — the thing it is there to take away.
   let lastShown = 0;
+  let reserved: number | undefined;
   let updating = Promise.resolve();
   const narrate = (title: string): void => {
     const now = Date.now();
     if (now - lastShown < PROGRESS_MIN_MS) return;
+    // Asked after this turn's own floor, so a quiet turn does not spend the
+    // workspace's budget just by being asked, and refused rather than queued:
+    // narration is only worth anything while it is current. Two on the first
+    // step, because the cleanup below is not optional once a step is written —
+    // unreserved, every narrating turn would put one uncounted `chat.update`
+    // over the ceiling, and a busy minute would clear it twice over.
+    const paid = deps.updates.room(lastShown ? 1 : 2);
+    if (paid === undefined) return;
+    reserved ??= paid;
     lastShown = now;
     // Caught on the chain and not on the call, so a `working` that throws where
     // it stands rather than rejecting cannot leave `updating` rejected — every
@@ -675,7 +691,18 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     if (!lastShown && !inFlight) return;
     await before(
       TIDY_MS,
-      updating.then(() => deps.working(acked.channel, acked.ts, text)).catch(() => undefined),
+      updating
+        .then(() => {
+          // Charged against the call and not against the intention: this waits
+          // behind the narration it is undoing, and a reservation still live
+          // when that wait began can have aged out by the time the call goes.
+          // Taken rather than asked either way — an acknowledgement left
+          // mid-step above a delivered answer reports the turn wrongly, where a
+          // quiet one is merely quiet.
+          deps.updates.take(reserved);
+          return deps.working(acked.channel, acked.ts, text);
+        })
+        .catch(() => undefined),
     );
   };
 

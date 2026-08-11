@@ -146,6 +146,67 @@ const UNUSABLE: Record<string, Unusable> = {
  * cannot spin the fetch loop, not as a limit anybody should reach. */
 const MAX_PAGES = 20;
 
+/**
+ * How many `chat.update` calls a minute this app may spend on acknowledgements,
+ * across every member of the workspace at once.
+ *
+ * Slack counts `chat.update` per app per workspace and not per channel — "all
+ * tokens associated with a single app in a workspace ... draw from the same
+ * shared rate limit pool" (docs.slack.dev, rate limits, checked 2026-08) — and
+ * its tier allows 50 a minute. A per-turn interval cannot honour a budget that
+ * is shared: whatever it is set to, enough turns at once exceed it. So the
+ * ceiling is held here, in front of every turn, and narration is what gives way
+ * — an acknowledgement that goes quiet is a turn still running, where a 429 on
+ * the tidy or a share is one that reports wrongly.
+ *
+ * Under the tier rather than at it, because the same pool pays for those.
+ */
+export const UPDATES_PER_MINUTE = 30;
+
+export interface UpdateBudget {
+  /** Whether `updates` more will fit, spending them if so. Narration is the
+   * only caller that asks, because narration is the only one that may give
+   * way — and it asks for two on a turn's first step, since a step written is
+   * a step that has to be taken back off. Answers with the moment they were
+   * spent, which is what the cleanup comes back with. */
+  room: (updates: number) => number | undefined;
+  /** Spends the cleanup whatever the answer would have been — a refused tidy
+   * leaves an acknowledgement reporting a finished turn as still running.
+   *
+   * `reserved` is what `room` answered for the step that committed it, or
+   * undefined where no step did. Aged out of the window — a turn can outlive
+   * its own minute — it buys nothing and the cleanup is charged again. Held as
+   * a stamp that expires rather than an obligation that clears, so a turn that
+   * dies before settling costs the budget a minute and not a restart. */
+  take: (reserved: number | undefined) => void;
+}
+
+/** A minute of stamps rather than a token bucket: this is asked a few dozen
+ * times a minute at most, and the window it has to be right about is exactly a
+ * minute. Monotonic, so an NTP step backwards cannot hold stamps inside that
+ * window for the length of the correction. */
+export function updateBudget(perMinute = UPDATES_PER_MINUTE): UpdateBudget {
+  const spent: number[] = [];
+  /** Now, with the window pruned to it. */
+  const now = (): number => {
+    const at = performance.now();
+    while (spent.length && at - spent[0]! >= 60_000) spent.shift();
+    return at;
+  };
+  return {
+    room: (updates) => {
+      const at = now();
+      if (spent.length + updates > perMinute) return undefined;
+      for (let i = 0; i < updates; i += 1) spent.push(at);
+      return at;
+    },
+    take: (reserved) => {
+      const at = now();
+      if (reserved === undefined || at - reserved >= 60_000) spent.push(at);
+    },
+  };
+}
+
 /** Slack's own caps on a message. Exceeding either block one is a rejected post,
  * and a rejected post turns a finished run into a reported failure — which is
  * how an answer gets lost rather than merely mis-rendered. */
