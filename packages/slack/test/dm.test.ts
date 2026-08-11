@@ -73,6 +73,8 @@ function harness(
     unseen?: string[];
     /** The membership scan fails — a missing scope, a Slack error. */
     scanFails?: boolean;
+    /** The workspace's narration budget is gone, spent by other turns. */
+    budgetSpent?: boolean;
     /** The source channel thread a mention came out of, for a conversation whose
      * `source` says where to read it. `null` is one the bot cannot read. */
     channel?: ThreadMessage[] | null;
@@ -88,6 +90,7 @@ function harness(
   } = {},
 ) {
   let scans = 0;
+  let narrations = 0;
   const posts: {
     channel: string;
     text: string;
@@ -197,6 +200,10 @@ function harness(
           : { ok: true, bytes: Buffer.from(over.fileBytes) },
       );
     },
+    mayNarrate: () => {
+      narrations += 1;
+      return over.budgetSpent !== true;
+    },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
       if (over.updateThrows && updates.length === 1) throw new Error('sync');
@@ -242,6 +249,7 @@ function harness(
   return {
     deps,
     scans: () => scans,
+    narrations: () => narrations,
     posts,
     turns,
     runs,
@@ -624,6 +632,52 @@ describe('dm message', () => {
     // The restore still ran and still landed: what the throw took out was one
     // step, not the queue behind it.
     assert.equal(timeline.at(-1), atRest(posts[0]!.text));
+  });
+
+  it('goes quiet rather than spending a budget other turns are using', async () => {
+    // Slack counts `chat.update` per app, so the ceiling belongs in front of
+    // every turn at once. A turn that cannot have it says nothing extra — the
+    // acknowledgement is already posted, and the answer is what they waited for.
+    const { deps, posts, updates, runs } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      budgetSpent: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.deepEqual(updates, [], 'no narration, and no tidy for one that never happened');
+    assert.equal(posts.at(-1)!.text, 'the answer');
+    assert.equal(runs.length, 1);
+  });
+
+  it('asks the shared budget only for a step its own floor would allow', async () => {
+    // Asked after the per-turn interval, not before it: a turn narrating every
+    // frame would otherwise drain the workspace's allowance just by being busy,
+    // without ever writing a line.
+    const { deps, runs, narrations } = harness({ existing: CONVERSATION });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    for (let i = 0; i < 5; i += 1) runs[0]!.onProgress!('Reading dm.ts');
+    await flush();
+    assert.equal(narrations(), 1, 'five frames inside one interval, one request for budget');
   });
 
   it('takes the narration back off once the answer is there to read', async () => {

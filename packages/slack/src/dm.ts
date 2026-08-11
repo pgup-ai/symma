@@ -107,9 +107,11 @@ export interface RunSpec {
   attachments?: PromptAttachment[];
 }
 
-/** `chat.update` is rate limited per channel, and a turn narrating every file
- * read would spend that budget on frames nobody reads. */
-const PROGRESS_MIN_MS = 4_000;
+/** One turn's own floor, under the budget it shares with every other turn: a
+ * step every few seconds is a member watching frames nobody reads, and it would
+ * take that budget on its own before a second turn had asked for any. Long
+ * enough to be cheap, short enough that a run still looks like it is moving. */
+const PROGRESS_MIN_MS = 10_000;
 
 /** How long the answer's own handler will wait on the update that tidies the
  * acknowledgement, for a line the member is not waiting for. Landing late is
@@ -327,6 +329,11 @@ export interface DmDeps {
   /** Every conversation this member is in — the other way a link is theirs to
    * read. Undefined where the scan failed, which is not the same as none. */
   conversationsOf: (user: string) => Promise<Set<string> | undefined>;
+  /** Whether there is room in the workspace's `chat.update` budget for one more
+   * narration update. Shared by every turn at once, because Slack counts that
+   * method per app rather than per channel — so this is the ceiling a per-turn
+   * interval cannot be. */
+  mayNarrate: () => boolean;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -655,6 +662,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const narrate = (title: string): void => {
     const now = Date.now();
     if (now - lastShown < PROGRESS_MIN_MS) return;
+    // Asked after this turn's own floor, so a quiet turn does not spend the
+    // workspace's budget just by being asked, and refused rather than queued:
+    // narration is only worth anything while it is current.
+    if (!deps.mayNarrate()) return;
     lastShown = now;
     // Caught on the chain and not on the call, so a `working` that throws where
     // it stands rather than rejecting cannot leave `updating` rejected — every

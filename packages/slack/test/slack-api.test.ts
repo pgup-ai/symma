@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { slackApi } from '../src/slack-api.js';
+import { narrationBudget, slackApi } from '../src/slack-api.js';
 
 /** Slack answers 200 with `ok: false`, so every case here is a 200. */
 const answering = (...bodies: unknown[]) => {
@@ -39,6 +39,24 @@ const THREE_FROM_TWO = {
 };
 
 describe('slack api', () => {
+  it('holds a minute of narration, then lets the window carry it', () => {
+    // Slack counts `chat.update` per app per workspace, so this is the ceiling
+    // every turn shares — a per-turn interval cannot honour a shared budget,
+    // whatever it is set to.
+    const spend = narrationBudget(3);
+    assert.deepEqual([spend(), spend(), spend(), spend()], [true, true, true, false]);
+    // The window is exactly a minute, and it slides: what was spent 60s ago is
+    // not spent now.
+    const later = Date.now() + 60_000;
+    const real = Date.now;
+    try {
+      Date.now = () => later;
+      assert.equal(spend(), true);
+    } finally {
+      Date.now = real;
+    }
+  });
+
   it('answers a failed membership scan with nothing, not with an empty list', async () => {
     // The two are opposite claims: an empty list says the member is in none of
     // it, nothing says nobody asked successfully. `dm.ts` maps them to "you are

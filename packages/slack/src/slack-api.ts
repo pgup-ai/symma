@@ -146,6 +146,37 @@ const UNUSABLE: Record<string, Unusable> = {
  * cannot spin the fetch loop, not as a limit anybody should reach. */
 const MAX_PAGES = 20;
 
+/**
+ * How many narration updates a minute this app may spend, across every member
+ * of the workspace at once.
+ *
+ * Slack counts `chat.update` per app per workspace and not per channel — "all
+ * tokens associated with a single app in a workspace ... draw from the same
+ * shared rate limit pool" (docs.slack.dev, rate limits, checked 2026-08) — and
+ * its tier allows 50 a minute. A per-turn interval cannot honour a budget that
+ * is shared: whatever it is set to, enough turns at once exceed it. So the
+ * ceiling is held here, in front of every turn, and narration is what gives way
+ * — an acknowledgement that goes quiet is a turn still running, where a 429 on
+ * the tidy or a share is one that reports wrongly.
+ *
+ * Under the tier rather than at it, because the same pool pays for those.
+ */
+export const NARRATION_PER_MINUTE = 30;
+
+/** Whether there is room for one more, spending it if so. A minute of stamps
+ * rather than a token bucket: this is asked a few dozen times a minute at most,
+ * and the window it has to be right about is exactly a minute. */
+export function narrationBudget(perMinute = NARRATION_PER_MINUTE): () => boolean {
+  const spent: number[] = [];
+  return () => {
+    const now = Date.now();
+    while (spent.length && now - spent[0]! >= 60_000) spent.shift();
+    if (spent.length >= perMinute) return false;
+    spent.push(now);
+    return true;
+  };
+}
+
 /** Slack's own caps on a message. Exceeding either block one is a rejected post,
  * and a rejected post turns a finished run into a reported failure — which is
  * how an answer gets lost rather than merely mis-rendered. */
