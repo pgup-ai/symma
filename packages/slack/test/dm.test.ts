@@ -12,6 +12,10 @@ import type { MarkState } from '../src/slack-api.js';
  * away from the update that shows it. */
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
+/** What the acknowledgement is left saying once the answer has landed: the
+ * scope, without the ellipsis that meant a turn was in flight. */
+const atRest = (ack: string): string => ack.replace(/…$/, '');
+
 const CONVERSATION: ConversationRef = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
 const READY: TurnTarget = {
   endpoint: 'ep-1',
@@ -389,7 +393,7 @@ describe('dm message', () => {
     // Said up front, not discovered: until `hello.workspaces[]` lands the agent
     // opens in an empty temp dir, which is not what "your own machine" sounds
     // like to someone asking about their repo.
-    assert.match(posts[0]!.text, /no access to your files/);
+    assert.match(posts[0]!.text, /cannot see your files/);
   });
 
   it('runs in the conversation mode and offers the picker with the answer', async () => {
@@ -412,7 +416,7 @@ describe('dm message', () => {
     assert.equal(runs[0]!.mode, 'agent');
     // Read back on every turn — the member should never have to remember what
     // tier their own machine is running at.
-    assert.match(posts[0]!.text, /in `symma` — `agent` mode/);
+    assert.match(posts[0]!.text, /^`symma` · `agent`/);
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
   });
 
@@ -440,7 +444,7 @@ describe('dm message', () => {
     assert.equal(runs[0]!.model, 'codex/gpt-5.4-mini[low]');
     // The ellipsis is the standing "still working" hint; the narration lands on
     // that same message rather than a second post.
-    assert.match(posts[0]!.text, /mode…$/);
+    assert.match(posts[0]!.text, /`read-only`…$/);
     runs[0]!.onProgress!('Reading dm.ts');
     await flush();
     assert.deepEqual(updates, [
@@ -454,9 +458,9 @@ describe('dm message', () => {
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
   });
 
-  it('states the scope and the session once, not on every turn', async () => {
-    // The resume is what makes this a follow-up in the same place, and the
-    // session it names is the one that answers.
+  it('offers the session it is picking up, beside the scope it runs in', async () => {
+    // The offer rides the same message as the scope and says "if it still can":
+    // whether the agent still holds that session is not known until it is asked.
     const { deps, posts } = harness({
       existing: CONVERSATION,
       endpoint: {
@@ -472,7 +476,10 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'and now?' },
       deps,
     );
-    assert.equal(posts[0]!.text, 'On it. Picking up where it left off, if it still can…');
+    assert.equal(
+      posts[0]!.text,
+      '`symma` · `agent-full-access` Picking up where it left off, if it still can…',
+    );
     // The harness records an aside list only when there is one, so an answer with
     // nothing to add carries no key at all.
     assert.equal(posts[1]!.notices, undefined);
@@ -503,7 +510,9 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,
     );
-    assert.equal(timeline.at(-1), posts[0]!.text);
+    // The restore still ran and still landed: what the throw took out was one
+    // step, not the queue behind it.
+    assert.equal(timeline.at(-1), atRest(posts[0]!.text));
   });
 
   it('takes the narration back off once the answer is there to read', async () => {
@@ -519,14 +528,16 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,
     );
+    // And comes to rest on the scope alone: the ellipsis, and anything said about
+    // a turn in flight, have nothing left to be about once the answer is here.
     assert.deepEqual(
       timeline.filter((entry) => !/^(mark|finish):/.test(entry)),
-      [`${posts[0]!.text}\n\n_Reading dm.ts_`, posts[0]!.text],
+      [`${posts[0]!.text}\n\n_Reading dm.ts_`, atRest(posts[0]!.text)],
     );
     // Last of everything, the mark and the turn's close included: both happen
     // before this update is waited on, or one Slack sits on would hold the thread
     // against the member's next message.
-    assert.equal(timeline.at(-1), posts[0]!.text);
+    assert.equal(timeline.at(-1), atRest(posts[0]!.text));
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {
@@ -777,7 +788,7 @@ describe('dm message', () => {
     );
     // Absent mode still runs read-only, and the tier is said, not implied.
     assert.equal(runs[0]!.mode, undefined);
-    assert.match(posts[0]!.text, /in `symma` — `read-only` mode/);
+    assert.match(posts[0]!.text, /^`symma` · `read-only`/);
     // The first workspace turn is exactly where the picker has to appear, or
     // there is no way to ever leave read-only.
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'kilo', modes: roster });
@@ -850,7 +861,7 @@ describe('dm message', () => {
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /in `symma`/);
+    assert.match(posts[0]!.text, /^`symma` ·/);
     assert.doesNotMatch(posts[0]!.text, /no access to your files/);
     assert.equal(runs[0]!.workspace, 'ws-abc123');
     // The gateway cannot prefer this thread's project without being told which
@@ -867,7 +878,7 @@ describe('dm message', () => {
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /in `we ird &lt;!here&gt;` — `read-only` mode…/);
+    assert.match(posts[0]!.text, /^`we ird &lt;!here&gt;` · `read-only`…$/);
     // Two spans — label and mode — each opened and closed; the mode span is
     // safe by the wire's alphabet, so only the label needed escaping.
     assert.equal(posts[0]!.text.split('`').length - 1, 4, 'both spans opened and closed');

@@ -460,25 +460,22 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     : [];
   const attachments = attached.flatMap((entry) => (entry.ok ? [entry.file] : []));
 
-  // A run has twenty minutes to answer, so silence that long reads as broken.
-  // §4 wants the scope in the DM root rather than guessed at, so the turn that
-  // decides it names the project and the mode — an absent mode included, since
-  // read-only is the floor's truth for a workspace turn that never picked one.
-  // Only that turn: a resume is offered only where this thread's machine, agent
-  // and directory are all still the ones it was minted under, so a follow-up
-  // would be repeating the root, and the picker under every answer carries the
-  // mode. Having no workspace is the exception that repeats — nothing else tells
-  // a member their question has to stand on its own.
+  // A run takes minutes and Slack gives a bot no typing indicator, so this
+  // message is what says the question landed — and §4 wants it to say the scope
+  // rather than leave it guessed at: where the turn ran and what it could do
+  // there. A status line, not a sentence, because this is what the message reads
+  // as at rest above a finished answer. On every turn, since the mode is theirs
+  // to change mid-thread and one that ran write-capable has to say so on its own
+  // answer. The mode is named even when unset: read-only is the floor's truth
+  // for a workspace turn that never picked one.
   //
   // Through `plainly` like every other name in this message: a backtick closes
   // the span it sits in, and a `<` opens an entity that renders as a mention
   // once the answer is shared into a channel. Their own machine and their own
   // DM, so this is rendering and not a trust boundary.
-  const scope = !decision.label
-    ? 'On it. It has no access to your files, so keep the question self-contained.'
-    : decision.resume
-      ? 'On it.'
-      : `On it, in \`${plainly(decision.label)}\` — \`${decision.mode ?? 'read-only'}\` mode.`;
+  const scope = decision.label
+    ? `\`${plainly(decision.label)}\` · \`${decision.mode ?? 'read-only'}\``
+    : '`no project` · it cannot see your files, so keep the question self-contained';
   // The offer, not the outcome: the agent has not been asked yet, so this says
   // what will be tried rather than claiming a resume that may not happen.
   const note = decision.resume ? 'Picking up where it left off, if it still can.' : caught?.note;
@@ -487,10 +484,14 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
+  // What the acknowledgement says beyond the scope, and only while the turn is
+  // out: a resume that may not happen, a file list being read. Kept apart
+  // because the cleanup below comes to rest on the scope alone, and neither of
+  // these is about anything once the answer is here.
+  const inFlight = [note, reading].filter(Boolean).join(' ');
   // The trailing ellipsis is the standing "still going" cue, so it belongs on
-  // the end of whatever the acknowledgement turned out to be — not on the scope
-  // sentence, which a resume note or a file list then follows.
-  const ack = `${[scope, note, reading].filter(Boolean).join(' ').replace(/\.$/, '')}…`;
+  // the end of whatever the acknowledgement turned out to be, not on the scope.
+  const ack = `${[scope, inFlight].filter(Boolean).join(' ').replace(/\.$/, '')}…`;
   const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
@@ -658,22 +659,25 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     });
   await deps.finish(conversation.id, turn, 'completed', ran);
   // Slack cannot fold the narration away the way a terminal does, so once the
-  // answer is here the last step is only in the way. Queued behind the narration
-  // it is undoing, and left until after the turn is closed: a `chat.update` Slack
-  // is slow to take would otherwise hold the turn open, and a member's next
-  // message would be refused for a line nobody is waiting on. Guarded so a turn
-  // that never narrated spends no update, and fail-open like `narrate`.
-  // Waited on to a deadline, not indefinitely — see `TIDY_MS`.
-  if (lastShown) {
+  // answer is here the last step, the ellipsis and a note about a resume that
+  // has already happened are all only in the way. What is left is the scope,
+  // which is the part still worth reading above a finished answer. Queued behind
+  // the narration it is undoing, and left
+  // until after the turn is closed: a `chat.update` Slack is slow to take would
+  // otherwise hold the turn open, and a member's next message would be refused
+  // for a line nobody is waiting on. Skipped where the message already says only
+  // the scope, so a quiet turn still spends nothing. Fail-open like `narrate`,
+  // and waited on to a deadline rather than indefinitely — see `TIDY_MS`.
+  if (lastShown || inFlight) {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      updating.then(() => deps.working(acked.channel, acked.ts, ack)).catch(() => undefined),
+      updating.then(() => deps.working(acked.channel, acked.ts, scope)).catch(() => undefined),
       new Promise<void>((resolve) => {
         deadline = setTimeout(resolve, TIDY_MS);
         // Two different jobs on the same handle: `unref` so waiting on a line
         // nobody reads cannot be the last thing holding a process open, and the
         // clear below so a deadline that lost its race is not left pending — one
-        // handle per narrated turn adds up under traffic.
+        // handle per turn adds up under traffic.
         deadline.unref();
       }),
     ]);
