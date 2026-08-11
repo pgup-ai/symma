@@ -441,9 +441,10 @@ describe('dm message', () => {
     );
     // `provider/model` is the only shape the specs parse, brackets and all.
     assert.equal(runs[0]!.model, 'codex/gpt-5.4-mini[low]');
-    // The ellipsis is the standing "still working" hint; the narration lands on
-    // that same message rather than a second post.
-    assert.match(posts[0]!.text, /`read-only`…$/);
+    // No ellipsis where the acknowledgement is only the scope: nothing is in
+    // flight to be about, and the line reads the same after the answer lands as
+    // it does now. The narration goes onto this same message, not a second post.
+    assert.equal(posts[0]!.text, '`symma` · `read-only`');
     runs[0]!.onProgress!('Reading dm.ts');
     await flush();
     assert.deepEqual(updates, [
@@ -535,6 +536,38 @@ describe('dm message', () => {
     // before this update is waited on, or one Slack sits on would hold the thread
     // against the member's next message.
     assert.equal(timeline.at(-1), atRest(posts[0]!.text));
+  });
+
+  it('does not leave a promise standing over a turn that failed', async () => {
+    // "Reading `rows.csv`…" above "That run did not finish" is the
+    // acknowledgement outliving the turn it was about.
+    const { deps, posts, updates } = harness({
+      existing: CONVERSATION,
+      endpoint: { ...READY, workspace: 'ws-1', workspaceLabel: 'symma' },
+      fileBytes: 'a,b\n',
+      fails: new Error('gone'),
+    });
+    await handleDm(
+      {
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'what is in this?',
+        files: [
+          {
+            name: 'rows.csv',
+            mimetype: 'text/csv',
+            filetype: 'csv',
+            size: 4,
+            url_private_download: 'https://files/rows.csv',
+          },
+        ],
+      },
+      deps,
+    );
+    assert.match(posts[0]!.text, /Reading `rows.csv`…$/);
+    assert.equal(updates.at(-1)!.text, '`symma` · `read-only`');
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {
@@ -875,7 +908,7 @@ describe('dm message', () => {
     });
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
-    assert.match(posts[0]!.text, /^`we ird &lt;!here&gt;` · `read-only`…$/);
+    assert.match(posts[0]!.text, /^`we ird &lt;!here&gt;` · `read-only`$/);
     // Two spans — label and mode — each opened and closed; the mode span is
     // safe by the wire's alphabet, so only the label needed escaping.
     assert.equal(posts[0]!.text.split('`').length - 1, 4, 'both spans opened and closed');

@@ -132,13 +132,16 @@ export async function handleMention(mention: Mention, deps: MentionDeps): Promis
   // answer in. Correcting it there is the only place the member is looking.
   if (conversation.rootThread !== root.ts) {
     deps.log(`adopted ${conversation.id}; correcting the stray root`);
+    // Before the correction, not after: a post Slack refuses would otherwise
+    // take the close with it and leave the winning thread busy — the failure
+    // this whole path exists to stop.
+    if (turn) await deps.finish(conversation.id, turn, 'completed');
     await deps.post(
       root.channel,
       'Started twice — carry on in the other thread, which is where I am working.',
       root.ts,
     );
     if (!turn) return 'already handled';
-    await deps.finish(conversation.id, turn, 'completed');
     await deps.post(conversation.dmChannel, ALREADY, conversation.rootThread);
     return 'adopted';
   }

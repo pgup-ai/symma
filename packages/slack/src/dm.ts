@@ -484,12 +484,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
-  // Only true while the turn is out, which is why the cleanup below leaves it
-  // behind rather than restoring the whole acknowledgement.
+  // True only while the turn is out, which is what `settle` below takes back.
   const inFlight = [note, reading].filter(Boolean).join(' ');
-  // The trailing ellipsis is the standing "still going" cue, so it belongs on
-  // the end of whatever the acknowledgement turned out to be, not on the scope.
-  const ack = `${[scope, inFlight].filter(Boolean).join(' ').replace(/\.$/, '')}…`;
+  // The ellipsis is the "still going" cue, and it belongs to the in-flight text
+  // rather than to the scope, which is as true after the answer as before it —
+  // so a turn with nothing else to say needs no update to take a cue off a line
+  // that never moved. The 👀 on their own message is what says it is running.
+  const ack = inFlight ? `${scope} ${inFlight.replace(/\.$/, '')}…` : scope;
   const acked = await deps.post(conversation.dmChannel, ack, conversation.rootThread);
 
   await deps.mark(message.channel, message.ts, 'working');
@@ -516,6 +517,32 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     updating = updating
       .then(() => deps.working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`))
       .catch(() => undefined);
+  };
+
+  // Slack cannot fold the narration away the way a terminal does, so once the
+  // turn is over the last step, the ellipsis and a resume that has already been
+  // attempted are all in the way — leaving the scope, which is as true then as
+  // it was at the start. Queued behind the narration it is undoing, and called
+  // only after the turn is closed: a `chat.update` Slack is slow to take would
+  // otherwise hold the turn open, and a member's next message would be refused
+  // for a line nobody is waiting on. Nothing to do where the message already
+  // says only the scope, so a quiet turn spends no update at all. Fail-open like
+  // `narrate`, and waited on to a deadline rather than indefinitely.
+  const settle = async (): Promise<void> => {
+    if (!lastShown && !inFlight) return;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      updating.then(() => deps.working(acked.channel, acked.ts, scope)).catch(() => undefined),
+      new Promise<void>((resolve) => {
+        deadline = setTimeout(resolve, TIDY_MS);
+        // Two different jobs on the same handle: `unref` so waiting on a line
+        // nobody reads cannot be the last thing holding a process open, and the
+        // clear below so a deadline that lost its race is not left pending — one
+        // handle per turn adds up under traffic.
+        deadline.unref();
+      }),
+    ]);
+    clearTimeout(deadline);
   };
 
   let answer: {
@@ -588,6 +615,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // read is said here too, where the member is deciding whether to resend.
       skippedNote(attached),
     );
+    // A failure leaves the promises above it standing otherwise — "Reading
+    // rows.csv…" over "That run did not finish" is the acknowledgement
+    // outliving the turn it was about.
+    await settle();
     return 'failed';
   }
 
@@ -656,29 +687,6 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       deps.log(`cursor not moved: ${String(error)}`);
     });
   await deps.finish(conversation.id, turn, 'completed', ran);
-  // Slack cannot fold the narration away the way a terminal does, so the last
-  // step, the ellipsis and a resume that has already happened are all in the way
-  // once the answer is here — leaving the scope, which is the part still worth
-  // reading above it. Queued behind the narration it is undoing, and left until
-  // after the turn is closed: a `chat.update` Slack is slow to take would
-  // otherwise hold the turn open, and a member's next message would be refused
-  // for a line nobody is waiting on. Skipped where the message already says only
-  // the scope, so a quiet turn spends nothing. Fail-open like `narrate`, and
-  // waited on to a deadline rather than indefinitely — see `TIDY_MS`.
-  if (lastShown || inFlight) {
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      updating.then(() => deps.working(acked.channel, acked.ts, scope)).catch(() => undefined),
-      new Promise<void>((resolve) => {
-        deadline = setTimeout(resolve, TIDY_MS);
-        // Two different jobs on the same handle: `unref` so waiting on a line
-        // nobody reads cannot be the last thing holding a process open, and the
-        // clear below so a deadline that lost its race is not left pending — one
-        // handle per turn adds up under traffic.
-        deadline.unref();
-      }),
-    ]);
-    clearTimeout(deadline);
-  }
+  await settle();
   return existing ? 'resumed' : 'opened';
 }

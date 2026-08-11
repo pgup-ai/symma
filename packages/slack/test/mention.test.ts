@@ -117,6 +117,21 @@ describe('app_mention', () => {
     }
   });
 
+  it('closes the turn even when the correction post is refused', async () => {
+    // Adoption posts into the stray thread before it says anything in the
+    // winning one. A post Slack refuses would take the close with it and leave
+    // the thread that won busy — the failure this path exists to stop.
+    const { deps, closed } = harness({ rootThread: '999.0' });
+    const posting = deps.post;
+    let posts = 0;
+    deps.post = (channel, text, threadTs) =>
+      ++posts === 2
+        ? Promise.reject(new Error('channel_not_found'))
+        : posting(channel, text, threadTs);
+    await assert.rejects(handleMention(MENTION, deps));
+    assert.deepEqual(closed, ['conv-1/turn-1']);
+  });
+
   it('still hands the thread over when Slack will not give it a link', async () => {
     // The link is how a member gets back to the channel, not why the handoff
     // happens.
