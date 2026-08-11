@@ -689,14 +689,20 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
   const settle = async (text: string): Promise<void> => {
     if (!lastShown && !inFlight) return;
-    // Taken rather than asked: an acknowledgement left mid-step above a
-    // delivered answer reports the turn wrongly, where a quiet one is merely
-    // quiet. The reservation goes with it, so a turn that outran its own minute
-    // is charged again rather than landing this uncounted.
-    deps.updates.take(reserved);
     await before(
       TIDY_MS,
-      updating.then(() => deps.working(acked.channel, acked.ts, text)).catch(() => undefined),
+      updating
+        .then(() => {
+          // Charged against the call and not against the intention: this waits
+          // behind the narration it is undoing, and a reservation still live
+          // when that wait began can have aged out by the time the call goes.
+          // Taken rather than asked either way — an acknowledgement left
+          // mid-step above a delivered answer reports the turn wrongly, where a
+          // quiet one is merely quiet.
+          deps.updates.take(reserved);
+          return deps.working(acked.channel, acked.ts, text);
+        })
+        .catch(() => undefined),
     );
   };
 
