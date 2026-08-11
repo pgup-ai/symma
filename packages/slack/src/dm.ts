@@ -221,6 +221,29 @@ function pickers(
  * real fetch — but finite. */
 const LINKS_MS = 8_000;
 
+/**
+ * Stops waiting on `work` after `ms`, without stopping `work` — the Slack SDK
+ * takes no signal, and a request finishing into a void costs nothing. Two jobs
+ * on the one handle: `unref` so waiting on something nobody reads cannot be the
+ * last thing holding the process open, and the clear so a deadline that lost
+ * its race, or a rejection that skipped past it, is not left pending — one
+ * handle per read adds up under traffic.
+ */
+async function before<T>(ms: number, work: Promise<T>): Promise<T | 'too slow'> {
+  let late: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<'too slow'>((resolve) => {
+        late = setTimeout(() => resolve('too slow'), Math.max(0, ms));
+        late.unref();
+      }),
+    ]);
+  } finally {
+    clearTimeout(late);
+  }
+}
+
 /** Why a link the member pasted is not in the prompt, in their words. Their
  * next move differs by which it was: a channel that is not theirs is not a
  * message that was too long. */
@@ -293,9 +316,9 @@ export interface DmDeps {
   host: () => Promise<string | undefined>;
   /** Whether a channel is one any member could open for themselves. */
   publicChannel: (channel: string) => Promise<boolean>;
-  /** Whether this member is in that conversation — the other way it is theirs
-   * to read. */
-  memberOf: (user: string, channel: string) => Promise<boolean>;
+  /** Every conversation this member is in — the other way a link is theirs to
+   * read. */
+  conversationsOf: (user: string) => Promise<Set<string>>;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -480,23 +503,16 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // the catch-up below is background. Skipped outright for a message with no
   // link in it, which is nearly all of them — `host()` is an API call the first
   // time, and no ordinary turn should pay for a feature it is not using.
+  //
+  // One deadline over the whole resolution, permission checks included — they
+  // are Slack calls too, and five quick reads or one that never answers are the
+  // same wait to a member watching for the acknowledgement.
   const by = Date.now() + LINKS_MS;
-  // One deadline over the whole resolution: five quick reads and one that never
-  // answers are the same wait to a member watching for the acknowledgement. The
-  // handle is cleared on the way out, or a message with links leaves one behind
-  // per read for as long as the deadline had left.
-  const within = async <T>(read: Promise<T>): Promise<T | 'too slow'> => {
-    let late: ReturnType<typeof setTimeout> | undefined;
-    const answer = await Promise.race([
-      read,
-      new Promise<'too slow'>((resolve) => {
-        late = setTimeout(() => resolve('too slow'), Math.max(0, by - Date.now()));
-        late.unref();
-      }),
-    ]);
-    clearTimeout(late);
-    return answer;
-  };
+  const within = <T>(read: Promise<T>): Promise<T | 'too slow'> => before(by - Date.now(), read);
+  // One scan of this member's conversations for the whole message, however many
+  // links it holds: their list is short, but reading it once per link is
+  // latency in front of the acknowledgement buying no new answer.
+  let mine: Promise<Set<string>> | undefined;
   const linked = slackLinks(message.text).length
     ? await resolveLinks(message.text, {
         budgetBytes: deps.budgetBytes,
@@ -511,7 +527,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         mayRead: async (channel) =>
           channel === conversation.dmChannel ||
           (await deps.publicChannel(channel)) ||
-          (await deps.memberOf(message.user, channel)),
+          (await (mine ??= deps.conversationsOf(message.user))).has(channel),
         self: { channel: conversation.dmChannel, root: conversation.rootThread },
         spent: () => Date.now() > by,
         reading: within,
@@ -629,19 +645,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
   const settle = async (text: string): Promise<void> => {
     if (!lastShown && !inFlight) return;
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
+    await before(
+      TIDY_MS,
       updating.then(() => deps.working(acked.channel, acked.ts, text)).catch(() => undefined),
-      new Promise<void>((resolve) => {
-        deadline = setTimeout(resolve, TIDY_MS);
-        // Two different jobs on the same handle: `unref` so waiting on a line
-        // nobody reads cannot be the last thing holding a process open, and the
-        // clear below so a deadline that lost its race is not left pending — one
-        // handle per turn adds up under traffic.
-        deadline.unref();
-      }),
-    ]);
-    clearTimeout(deadline);
+    );
   };
 
   let answer: {

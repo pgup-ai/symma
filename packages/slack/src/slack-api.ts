@@ -29,11 +29,13 @@ export interface SlackApi {
    * anything it cannot see either, since that is not a channel it can vouch
    * for. */
   publicChannel: (channel: string) => Promise<boolean>;
-  /** Whether this member is in that conversation — the other way a thread is
-   * theirs to read: a private channel or a group DM they are part of. Asked of
-   * their own list rather than the channel's, since a person is in far fewer
-   * conversations than a busy channel has people. */
-  memberOf: (user: string, channel: string) => Promise<boolean>;
+  /** Every conversation this member is in — the other way a thread is theirs to
+   * read: a private channel or a group DM they are part of. Asked as their whole
+   * list rather than one channel at a time, since a person is in far fewer
+   * conversations than a busy channel has people, and a message with several
+   * links should cost one scan rather than one each. Empty where Slack would not
+   * say, which refuses rather than guesses. */
+  conversationsOf: (user: string) => Promise<Set<string>>;
   /** A link back to a message, so a conversation lifted out of a channel says
    * which thread it came from. Undefined rather than throwing: a handoff without
    * its link is worth having, and one that refused to happen is not. */
@@ -442,7 +444,8 @@ export function slackApi(
         });
       return host;
     },
-    async memberOf(user, channel) {
+    async conversationsOf(user) {
+      const theirs = new Set<string>();
       try {
         for await (const page of quick.paginate('users.conversations', {
           user,
@@ -450,16 +453,26 @@ export function slackApi(
           limit: 1000,
           exclude_archived: false,
         })) {
-          const mine = (page as { channels?: { id?: unknown }[] }).channels ?? [];
-          if (mine.some((one) => one.id === channel)) return true;
+          for (const one of (page as { channels?: { id?: unknown }[] }).channels ?? [])
+            if (typeof one.id === 'string') theirs.add(one.id);
         }
-        return false;
       } catch (error) {
-        // Not knowing is not permission. Said out loud because a missing scope
-        // here refuses every private link silently otherwise.
-        options.log?.(`cannot tell whether ${user} is in ${channel}: ${slackCode(error) ?? ''}`);
-        return false;
+        // Whatever was collected is dropped: a half-read list answers "not in
+        // it" for everything past the page that failed, which is a refusal
+        // dressed as an answer. Said out loud, because a missing scope here
+        // turns every private link into "not yours" and nothing says why — and
+        // swallowed, since a caller's logger throwing must not be what decides
+        // a member cannot read their own channel.
+        try {
+          options.log?.(
+            `cannot list ${user}'s conversations: ${slackCode(error) ?? String(error)}`,
+          );
+        } catch {
+          /* a caller's logger is not worth the answer */
+        }
+        return new Set<string>();
       }
+      return theirs;
     },
     publicChannel: (channel) => {
       const known = publicity.get(channel);

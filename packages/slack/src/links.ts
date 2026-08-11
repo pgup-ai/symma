@@ -128,10 +128,17 @@ export async function resolveLinks(
       miss('too slow');
       continue;
     }
-    // Fails closed: not knowing whether the member may read it is not
-    // permission, and this gate is the whole reason the bot's own reach is not
-    // handed to whoever pastes a link.
-    if (!(await deps.mayRead(link.channel).catch(() => false))) {
+    // Under the same deadline as the fetch below, since it is a Slack call too
+    // and one that stalls holds the acknowledgement just as long. Fails closed:
+    // not knowing whether the member may read it is not permission, and this
+    // gate is the whole reason the bot's reach is not handed to whoever pastes
+    // a link.
+    const allowed = await deps.reading(deps.mayRead(link.channel)).catch(() => false);
+    if (allowed === 'too slow') {
+      miss('too slow');
+      continue;
+    }
+    if (!allowed) {
       miss('not yours');
       continue;
     }

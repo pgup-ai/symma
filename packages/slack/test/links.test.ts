@@ -212,17 +212,20 @@ describe('slack links', () => {
     assert.deepEqual(got.missed, [{ url: theirs, why: 'not yours' }]);
   });
 
-  it('stops waiting on a read that will not answer', async () => {
-    // Sampling between links bounds five quick calls and does nothing about the
-    // first one never returning, which is the shape a stalled Slack takes.
+  it('stops waiting on any Slack call that will not answer', async () => {
+    // Sampling between links bounds five quick calls and does nothing about one
+    // never returning, which is the shape a stalled Slack takes. The permission
+    // check is such a call too — it is first, so this fixture stalls there, and
+    // a stall is reported as one rather than as a refusal.
     const url = link('C0BMCR1FGU9', '1786400100.000001');
-    const { deps } = resolver({
+    const { deps, asked } = resolver({
       slowRead: true,
       threads: { 'C0BMCR1FGU9/1786400100.000001': THREAD },
     });
     const got = await resolveLinks(`<${url}>`, deps);
     assert.deepEqual(got.missed, [{ url, why: 'too slow' }]);
     assert.deepEqual(got.sections, []);
+    assert.deepEqual(asked, [], 'and the fetch behind it never ran');
   });
 
   it('ignores a permalink from another workspace', async () => {

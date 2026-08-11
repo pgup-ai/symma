@@ -403,7 +403,7 @@ const connection = socketMode({
               threadReplies: deps.threadReplies,
               host: api.host,
               publicChannel: api.publicChannel,
-              memberOf: api.memberOf,
+              conversationsOf: api.conversationsOf,
               destination: deps.destination,
               budgetBytes,
               log,

@@ -82,6 +82,7 @@ function harness(
     destination?: { channel: string; thread: string };
   } = {},
 ) {
+  let scans = 0;
   const posts: {
     channel: string;
     text: string;
@@ -119,7 +120,10 @@ function harness(
     // says otherwise — the refusal has its own test.
     publicChannel: (channel) =>
       Promise.resolve(!(over.notMine ?? []).concat(over.privateMine ?? []).includes(channel)),
-    memberOf: (_user, channel) => Promise.resolve((over.privateMine ?? []).includes(channel)),
+    conversationsOf: () => {
+      scans += 1;
+      return Promise.resolve(new Set(over.privateMine ?? []));
+    },
     threadReplies: (channel) => {
       if (channel !== 'D-nel')
         return Promise.resolve(over.channel === null ? undefined : (over.channel ?? []));
@@ -224,6 +228,7 @@ function harness(
   };
   return {
     deps,
+    scans: () => scans,
     posts,
     turns,
     runs,
@@ -789,6 +794,34 @@ describe('dm message', () => {
       deps,
     );
     assert.equal(hosts, 0);
+  });
+
+  it('reads a private channel or group DM the member is in, scanning once', async () => {
+    // The other half of the access rule: a public channel is anyone's, and this
+    // is the member's own membership — a private channel, a group DM. Without
+    // it a link they can plainly open comes back "not a channel you are in".
+    const inside = 'https://acme.slack.com/archives/G0GROUPDM00/p1786400100000001';
+    const also = 'https://acme.slack.com/archives/C0PRIVATE00/p1786400200000001';
+    const { deps, runs, scans } = harness({
+      existing: CONVERSATION,
+      privateMine: ['G0GROUPDM00', 'C0PRIVATE00'],
+      channel: [{ ts: '1786400100.000001', author: 'Ola', text: 'the plan is in prod-42' }],
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: `both <${inside}> and <${also}>`,
+      },
+      deps,
+    );
+    assert.match(runs[0]!.prompt, /the plan is in prod-42/);
+    // Their list is read once for the message, not once per link: it is the
+    // same answer, and every extra read is latency in front of the ack.
+    assert.equal(scans(), 1);
   });
 
   it('will not read a member a channel they are not in', async () => {
