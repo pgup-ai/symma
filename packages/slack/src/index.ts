@@ -17,12 +17,14 @@ import {
 import { connectMessage, runConnect, type MintResult } from './connect.js';
 import type { SlackFile } from './attachments.js';
 import { handleDm, isMemberDm, type RunSpec } from './dm.js';
-import { homeBlocks, modelPrompt } from './home.js';
+import { homeBlocks, modelPrompt, type Linking } from './home.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import {
   slackApi,
+  DEFAULT_AGENT_ACTION,
   DEFAULT_MODEL_ACTION,
+  DISCONNECT_ACTION,
   MODE_ACTION,
   MODEL_ACTION,
   SHARE_ACTION,
@@ -142,6 +144,34 @@ const api = slackApi(botToken, { log });
  * is what keeps a picker from minting a credential every time it is looked at. */
 const memberTarget = async (user: string): Promise<TurnTarget | undefined> =>
   readTurnTarget(await ask<Partial<TurnTarget>>('/api/slack/endpoint', { user }));
+
+/** The home tab, as it stands for this member right now. The linking read is
+ * allowed to fail on its own — a gateway that predates it 404s, and the tab is
+ * a machine, an agent and a model besides. Losing all of that to the one card
+ * that might not be on offer anyway is the wrong trade.
+ *
+ * Read as a status rather than through `ask`, for the reason pairing does: a
+ * 404 is that gateway saying it has no such route, which is a fact about the
+ * deployment and not an error to repeat on every open. Anything else is. */
+const home = async (user: string): Promise<Record<string, unknown>[]> => {
+  const [target, linking] = await Promise.all([
+    memberTarget(user),
+    send('/api/slack/link', { user })
+      .then(async (res): Promise<Partial<Linking>> => {
+        if (res.ok) return (await res.json()) as Partial<Linking>;
+        if (res.status !== 404) log(`linking not offered to ${user}: ${String(res.status)}`);
+        return {};
+      })
+      .catch((error: unknown): Partial<Linking> => {
+        log(`linking not offered to ${user}: ${String(error)}`);
+        return {};
+      }),
+  ]);
+  return homeBlocks(target, {
+    linked: linking.linked === true,
+    ...(linking.url ? { url: linking.url } : {}),
+  });
+};
 
 /**
  * Runs a handler and makes sure the member hears about it either way.
@@ -383,7 +413,7 @@ const connection = socketMode({
         if ((event as { tab?: unknown }).tab !== 'home' || typeof event.user !== 'string') return;
         const who = event.user;
         try {
-          await api.publishHome(who, homeBlocks(await memberTarget(who)));
+          await api.publishHome(who, await home(who));
         } catch (error) {
           // Logged, not announced: a home tab that failed to render is not worth
           // a DM about it, and the next open renders it again anyway.
@@ -431,6 +461,43 @@ const connection = socketMode({
           selected_option?: { value?: unknown };
         }[];
       };
+      // Handing the token back. No conversation and no channel — the home tab is
+      // not one — so it is answered by redrawing the tab it was pressed on.
+      if (actions?.some((a) => a.action_id === DISCONNECT_ACTION)) {
+        const who = user?.id;
+        if (typeof who !== 'string') return;
+        await announcing(who, 'disconnect', async () => {
+          await ask('/api/slack/unlink', { user: who });
+          try {
+            await api.publishHome(who, await home(who));
+          } catch (error) {
+            log(`disconnected, but the home tab did not redraw for ${who}: ${String(error)}`);
+          }
+          return 'slack account disconnected';
+        });
+        return;
+      }
+      // Nothing is shed with an agent change: a model is served only back to the
+      // agent it was picked under, a resume only to the one it was minted under.
+      const asAgent = actions?.find((a) => a.action_id === DEFAULT_AGENT_ACTION)?.selected_option
+        ?.value;
+      if (typeof asAgent === 'string') {
+        const who = user?.id;
+        const { m: agent } = readPick(asAgent);
+        if (typeof who !== 'string' || !agent) return;
+        await announcing(who, 'default agent', async () => {
+          await ask('/api/slack/default-agent', { user: who, agent });
+          try {
+            await api.publishHome(who, await home(who));
+          } catch (error) {
+            // The pick is stored; a tab that would not redraw is not a reason to
+            // tell them it did not happen. The next open renders it anyway.
+            log(`agent set, but the home tab did not redraw for ${who}: ${String(error)}`);
+          }
+          return `default agent ${agent}`;
+        });
+        return;
+      }
       // The member's own default, from `/model` or the home tab. The home tab is
       // not a channel, so this is answered where it was pressed.
       const asDefault = actions?.find((a) => a.action_id === DEFAULT_MODEL_ACTION)?.selected_option
@@ -449,7 +516,7 @@ const connection = socketMode({
                 text: `◎ Default model: \`${model}\` — used wherever you have not picked one.`,
                 replace: true,
               });
-            else await api.publishHome(who, homeBlocks(await memberTarget(who)));
+            else await api.publishHome(who, await home(who));
           } catch (error) {
             // The pick is already stored, so "say it again and I will retry" —
             // what a throw from here would send them — would be a lie about a
@@ -526,6 +593,13 @@ const connection = socketMode({
           { user: who, channel: where, messageTs, thread, text, conversation },
           {
             destination: depsFor(who).destination,
+            // Fetched per share, not per turn: the bot has no business holding
+            // a member's credential between the two clicks that need it.
+            asMember: async () =>
+              (await ask<{ token?: string }>('/api/slack/user-token', { user: who })).token,
+            unlink: async (token: string) =>
+              (await ask<{ forgotten?: boolean }>('/api/slack/unlink', { user: who, token }))
+                .forgotten === true,
             share: api.share,
             post: api.post,
             settle: api.settle,

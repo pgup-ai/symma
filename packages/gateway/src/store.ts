@@ -224,6 +224,28 @@ export interface Store {
     /** Only a model this agent offered is worth inheriting. */
     agent?: string,
   ): Promise<string | undefined>;
+  /** The member's own Slack token, for publishing as them rather than as the
+   * bot. Undefined until they link, which is what everything falls back from. */
+  slackUserToken(owner: Owner): Promise<string | undefined>;
+  /** False where there was no active member to write to, which is a link that
+   * raced their deactivation — the callback has to say so rather than report a
+   * link that is not there. */
+  setSlackUserToken(owner: Owner, token: string): Promise<boolean>;
+  /** Drops a token Slack has stopped honouring, and only that one: a member who
+   * linked again between the refusal and this would otherwise lose the token
+   * they just granted, silently. False says the stored token is no longer the
+   * refused one, which is that member — still linked, and not to be told
+   * otherwise. Naming none is a member disconnecting on purpose, where whatever
+   * is stored is exactly what they mean.
+   *
+   * Deliberately not gated on the member being active, unlike the read and the
+   * write: this destroys a credential, and one left on a deactivated row is the
+   * case that most wants destroying. */
+  forgetSlackUserToken(owner: Owner, token?: string): Promise<boolean>;
+  /** The agent this member's turns run on, of the ones their machine offers.
+   * Undefined until they pick, and served only while it is still offered. */
+  defaultAgentFor(owner: Owner): Promise<string | undefined>;
+  setDefaultAgent(owner: Owner, agent: string | null): Promise<void>;
   /** Keeps what an agent offered, so a member can pick from it before the turn
    * that would otherwise be the first to learn it. Replaces rather than merges:
    * a roster is what the agent offers now, and an entry it has dropped is one
@@ -735,6 +757,41 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       );
       return row?.value;
     },
+    async slackUserToken(owner) {
+      const row = await one<{ token: string | null }>(
+        `SELECT slack_user_token AS token FROM users WHERE id = $1 AND deactivated_at IS NULL`,
+        [owner],
+      );
+      return row?.token ?? undefined;
+    },
+    async setSlackUserToken(owner, token) {
+      // Active members only, or a callback that raced deactivation writes the
+      // credential back in behind the cleanup that just removed it.
+      const { rowCount } = await pool.query(
+        `UPDATE users SET slack_user_token = $2 WHERE id = $1 AND deactivated_at IS NULL`,
+        [owner, token],
+      );
+      return rowCount === 1;
+    },
+    async forgetSlackUserToken(owner, token) {
+      const { rowCount } = await pool.query(
+        `UPDATE users SET slack_user_token = NULL
+          WHERE id = $1 AND slack_user_token IS NOT NULL
+            AND ($2::text IS NULL OR slack_user_token = $2)`,
+        [owner, token ?? null],
+      );
+      return rowCount === 1;
+    },
+    async defaultAgentFor(owner) {
+      const row = await one<{ agent: string | null }>(
+        `SELECT default_agent AS agent FROM users WHERE id = $1`,
+        [owner],
+      );
+      return row?.agent ?? undefined;
+    },
+    async setDefaultAgent(owner, agent) {
+      await pool.query(`UPDATE users SET default_agent = $2 WHERE id = $1`, [owner, agent]);
+    },
     async rememberRoster(owner, agent, roster) {
       await pool.query(
         `INSERT INTO agent_models (user_id, agent, roster) VALUES ($1, $2, $3)
@@ -924,7 +981,11 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         );
         await client.query(
           `WITH target AS (
-           UPDATE users u SET deactivated_at = now()
+           -- The Slack token goes with the membership rather than merely out of
+           -- reach of the read that guards on deactivated_at: it is a live
+           -- posting credential of theirs, and the point of removing someone is
+           -- that it stops existing, not that it stops being served.
+           UPDATE users u SET deactivated_at = now(), slack_user_token = NULL
              FROM workspaces w
             WHERE w.id = u.workspace_id AND w.slack_team_id = $1 AND u.slack_user_id = $2
            RETURNING u.id
@@ -1079,6 +1140,11 @@ export function localStore(
     bindConversationChoice: needsDatabase,
     shedWorkspaceChoice: needsDatabase,
     lastChoiceFor: needsDatabase,
+    slackUserToken: needsDatabase,
+    setSlackUserToken: needsDatabase,
+    forgetSlackUserToken: needsDatabase,
+    defaultAgentFor: needsDatabase,
+    setDefaultAgent: needsDatabase,
     rememberRoster: needsDatabase,
     setDefaultModel: needsDatabase,
     modelsFor: needsDatabase,

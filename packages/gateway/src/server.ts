@@ -29,6 +29,7 @@ import {
   type RunControl,
 } from './journal.js';
 import { createRelay, parseEndpointTokens } from './relay.js';
+import { linkState, readLinkState } from './slack-link.js';
 import { selectEndpoint } from './select-endpoint.js';
 import {
   localStore,
@@ -65,6 +66,21 @@ const databaseUrl = process.env.SYMMA_GATEWAY_DATABASE_URL?.trim() || '';
 // beside the gateway (§6, one box), and its secret is deployment config like
 // the database URL. Unset leaves `/api/slack/pair` off entirely.
 const botToken = process.env.SYMMA_GATEWAY_BOT_TOKEN?.trim() || '';
+// §5's "attributable to whoever approved it", taken literally: Slack decides
+// authorship by token type, so posting as a member needs a token of theirs, and
+// getting one needs the app's credentials and an origin Slack will send them
+// back to. It only redirects over https. All three or the flow is off.
+const slackClientId = process.env.SYMMA_SLACK_CLIENT_ID?.trim() || '';
+const slackClientSecret = process.env.SYMMA_SLACK_CLIENT_SECRET?.trim() || '';
+const publicUrl = (process.env.SYMMA_GATEWAY_PUBLIC_URL?.trim() || '').replace(/\/+$/, '');
+// Everything the rest of the Slack surface needs, plus an https origin, which is
+// the only kind Slack redirects to. The bot secret signs the state that travels
+// through Slack, so half-configured is an empty HMAC key and a callback that
+// 500s — off is a working deployment that simply does not offer this.
+const linkingEnabled = Boolean(
+  slackClientId && slackClientSecret && databaseUrl && botToken && publicUrl.startsWith('https://'),
+);
+const redirectUri = `${publicUrl}/slack/oauth/callback`;
 // A database is authentication too, so it unlocks the configured bind exactly
 // as the shared token does — otherwise a multi-tenant deployment has to invent
 // a dummy token it never uses to become reachable.
@@ -744,6 +760,60 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.end('ok');
     return;
   }
+  // Slack sends the member's browser here, so it authenticates on the signed
+  // state it was given rather than on any token — and sits before the global
+  // gate for the same reason the companion routes do.
+  if (req.method === 'GET' && url.pathname === '/slack/oauth/callback') {
+    const done = (text: string): void => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(text);
+    };
+    const code = url.searchParams.get('code') ?? '';
+    const owner = linkingEnabled
+      ? readLinkState(botToken, url.searchParams.get('state') ?? '', Date.now())
+      : undefined;
+    // One sentence for every way this ends badly: a member reading it can only
+    // do one thing about any of them, which is start again from Slack.
+    if (!code || !owner) return void done('That link did not check out. Start again from Slack.');
+    const granted = (await fetch('https://slack.com/api/oauth.v2.access', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: slackClientId,
+        client_secret: slackClientSecret,
+        code,
+        redirect_uri: redirectUri,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+      .then((r) => r.json() as Promise<Record<string, unknown>>)
+      .catch(() => ({}) as Record<string, unknown>)) as {
+      ok?: unknown;
+      team?: { id?: unknown };
+      authed_user?: { id?: unknown; access_token?: unknown };
+    };
+    const account = granted.authed_user;
+    if (
+      granted.ok !== true ||
+      !str(granted.team?.id) ||
+      !str(account?.id) ||
+      !str(account.access_token)
+    )
+      return void done('Slack would not complete that. Start again from Slack.');
+    // The account that came back has to be the member the state named. Without
+    // this, finishing somebody else's flow would file your posting rights under
+    // their name — and every answer they publish would go out as you.
+    const signedIn = await store.ensureMember(granted.team.id, account.id);
+    if (signedIn && signedIn !== owner)
+      return void done('That signed in as a different account. Start again from Slack.');
+    // `ensureMember` answers with nothing for a member who is not active, so a
+    // deactivation arrives here rather than as a mismatch above; the write
+    // covers one that lands after this. Either way, "linked" would be the one
+    // sentence this page exists to report, wrong.
+    if (!signedIn || !(await store.setSlackUserToken(owner, account.access_token)))
+      return void done('Your symma account is not active, so nothing was linked.');
+    return void done('Linked. Answers you share now go out as you — close this tab.');
+  }
   // Companion routes authenticate with their per-endpoint token, not the
   // gateway token, so they sit before the global gate.
   const endpointRoute = url.pathname.match(/^\/api\/endpoints\/([^/]+)\/(stream|ingest)$/);
@@ -902,9 +972,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // `{}` is "nothing paired", the shape the conversation lookups already use.
       if (!selected) return sendJson(res, 200, {});
       const attached = live.get(selected.endpoint);
-      // The agent the endpoint offers first. §5's picker replaces this with the
-      // member's own choice; until then it is whatever their companion found.
-      const agent = attached?.agents[0]?.agent;
+      // What this machine can run, and which of them this member works with.
+      // A pick is a preference, not a claim: an agent they stopped logging into
+      // is not offered any more, and falling back beats refusing the turn over
+      // a choice they made on a different day.
+      const offeredAgents = attached?.agents.map((a) => a.agent) ?? [];
+      const preferred = await store.defaultAgentFor(owner);
+      const agent = offeredAgents.find((a) => a === preferred) ?? offeredAgents[0];
       if (selected.state !== 'ready' || !agent) return sendJson(res, 200, selected);
 
       // §4: what this thread last ran in, if that machine still offers it, else
@@ -1014,6 +1088,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         ...(mode ? { mode } : {}),
         ...(model ? { model } : {}),
         ...(roster.length ? { models: roster } : {}),
+        // The whole list, so the picker outside a conversation can offer the
+        // ones this member is not on. One agent is not a choice, and a picker
+        // with a single option is a control that does nothing.
+        ...(offeredAgents.length > 1 ? { agents: offeredAgents } : {}),
         ...(resume ? { resume } : {}),
       });
     }
@@ -1036,6 +1114,51 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
           : [];
       });
       await store.rememberRoster(owner, agent, roster);
+      return sendJson(res, 200, {});
+    }
+    if (url.pathname === '/api/slack/link') {
+      // `{}` is a gateway with no Slack app credentials, which is every
+      // deployment that has not set the linking flow up — the bot reads that as
+      // "keep posting as yourself is not on offer" rather than as a failure.
+      if (!linkingEnabled) return sendJson(res, 200, {});
+      const linked = Boolean(await store.slackUserToken(owner));
+      const authorize = new URL('https://slack.com/oauth/v2/authorize');
+      authorize.searchParams.set('client_id', slackClientId);
+      // The one scope, and a user one: a bot scope here would grant the app more
+      // and still post as the app.
+      authorize.searchParams.set('user_scope', 'chat:write');
+      authorize.searchParams.set('redirect_uri', redirectUri);
+      authorize.searchParams.set('state', linkState(botToken, owner, Date.now()));
+      return sendJson(res, 200, { url: authorize.toString(), linked });
+    }
+    if (url.pathname === '/api/slack/unlink') {
+      // The token Slack refused, dropped only if it is still the stored one: a
+      // member who linked again in between would otherwise lose the grant they
+      // had just made, with nothing saying so.
+      // Named, it is the token a share was refused with. Absent, it is a member
+      // disconnecting from the home tab, where whatever is stored is what they
+      // mean — including one Slack stopped honouring that we failed to drop.
+      const { token } = body as { token?: unknown };
+      if (token !== undefined && !str(token)) return sendJson(res, 400, { error: 'request' });
+      // Answered, not assumed: nothing cleared means they are linked to
+      // something newer, and the bot has a sentence that turns on which it was.
+      return sendJson(res, 200, {
+        forgotten: await store.forgetSlackUserToken(owner, str(token) ? token : undefined),
+      });
+    }
+    if (url.pathname === '/api/slack/user-token') {
+      // The member's own credential, handed to the bot for one post. The bot
+      // holds nothing standing (§6) and this is no different: it is fetched
+      // where it is used and never stored on that side.
+      const token = await store.slackUserToken(owner);
+      return sendJson(res, 200, token ? { token } : {});
+    }
+    if (url.pathname === '/api/slack/default-agent') {
+      // Which of their machine's agents a member works with. `null` clears it,
+      // which puts them back on whatever their companion found first.
+      const { agent } = body as { agent?: unknown };
+      if (agent !== null && !isSafeId(agent)) return sendJson(res, 400, { error: 'request' });
+      await store.setDefaultAgent(owner, agent);
       return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/default-model') {

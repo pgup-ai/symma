@@ -74,11 +74,17 @@ export interface SlackApi {
     channel: string,
     thread: string,
     text: string,
+    /** The member's own Slack token. Slack decides authorship by token type, so
+     * this is the whole difference between posting as them and posting as the
+     * bot with their name typed in front. */
+    asMember?: string,
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
 }
 
-/** The ways a destination stops being one, as §5 lists them. */
-export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope';
+/** The ways a destination stops being one, as §5 lists them — plus `author`,
+ * which is not about the destination at all: the member's own token has stopped
+ * working, and the same post as the bot would land. */
+export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope' | 'author';
 
 /** A run takes minutes, and Slack offers no way to say so in the composer — so
  * the member's own message carries it. */
@@ -89,6 +95,10 @@ const MARK: Record<MarkState, string> = {
   done: 'white_check_mark',
   failed: 'x',
 };
+
+/** Slack's names for a token it will not honour any more: revoked from the
+ * member's side, or an app whose install was replaced. */
+const DEAD_TOKEN = new Set(['invalid_auth', 'token_revoked', 'account_inactive', 'not_authed']);
 
 const UNUSABLE: Record<string, Unusable> = {
   is_archived: 'archived',
@@ -186,6 +196,12 @@ export const MODEL_ACTION = 'set_conversation_model';
 /** A model pick with no conversation under it: `/model` and the home tab, which
  * set what the member's *next* conversation starts on. */
 export const DEFAULT_MODEL_ACTION = 'set_default_model';
+/** Which of their machine's agents a member works with. The home tab only —
+ * it is a choice about the machine, not about a thread. */
+export const DEFAULT_AGENT_ACTION = 'set_default_agent';
+/** Handing back the Slack token they granted. A credential taken with a button
+ * needs one to give it up again. */
+export const DISCONNECT_ACTION = 'disconnect_slack_account';
 
 /** Slack's static_select caps: options per select, characters per value. */
 const PICKER_OPTION_LIMIT = 100;
@@ -292,6 +308,18 @@ export const modelSelect = (
         models.currentModelId,
         agent,
       );
+
+/** The agents this machine is logged into: names the companion resolved, not a
+ * roster with descriptions. One outside the wire's alphabet is dropped rather
+ * than shown, since the gateway would refuse the pick it produced. */
+export const agentSelect = (agents: string[], current: string): Record<string, unknown>[] =>
+  rosterSelect(
+    undefined,
+    DEFAULT_AGENT_ACTION,
+    'Agent',
+    agents.map((agent) => ({ id: agent, label: agent, safe: isSafeId(agent) })),
+    current,
+  );
 
 /** Slack codes that mean "not visible to this bot" rather than "broken". Anything
  * else throws: guessing which is which is how a partial snapshot gets answered. */
@@ -571,12 +599,20 @@ export function slackApi(
         .add({ channel, timestamp: ts, name: MARK[state] })
         .catch(swallow(`marking ${state}`));
     },
-    async share(channel, thread, text) {
+    async share(channel, thread, text, asMember) {
       try {
-        await client.chat.postMessage({ channel, text, thread_ts: thread });
+        // Built per call: a client cached across members posts as the wrong one.
+        const author = asMember
+          ? new WebClient(asMember, options.fetch ? { fetch: options.fetch } : {})
+          : client;
+        await author.chat.postMessage({ channel, text, thread_ts: thread });
         return { ok: true };
       } catch (error) {
-        const why = UNUSABLE[slackCode(error) ?? ''];
+        const code = slackCode(error) ?? '';
+        // A member's token Slack has stopped honouring is not a broken bot and
+        // not a bad destination: the answer can still go, just not as them.
+        if (asMember && DEAD_TOKEN.has(code)) return { ok: false, why: 'author' };
+        const why = UNUSABLE[code];
         // Only the ways a destination goes bad are answers. Anything else is
         // this bot being broken, which the caller reports as a failure.
         if (!why) throw error;

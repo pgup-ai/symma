@@ -13,15 +13,37 @@ const CLICK: ShareRequest = {
   conversation: 'conv-1',
 };
 
-function harness(over: { to?: { channel: string; thread: string }; why?: Unusable } = {}) {
-  const shared: { channel: string; thread: string; text: string }[] = [];
+function harness(
+  over: {
+    to?: { channel: string; thread: string };
+    why?: Unusable;
+    /** The member's own Slack token, when they have linked their account. */
+    asMember?: string;
+    /** Slack refuses that token, as it does once it has been revoked. */
+    tokenDead?: boolean;
+    /** The gateway will not take the unlink, so the token is still linked. */
+    unlinkFails?: boolean;
+    /** They linked again before the unlink landed, so it matched nothing. */
+    relinked?: boolean;
+  } = {},
+) {
+  const shared: { channel: string; thread: string; text: string; asMember?: string }[] = [];
+  const unlinked: string[] = [];
   const settled: { channel: string; ts: string; text: string }[] = [];
   const posts: { channel: string; text: string; threadTs?: string }[] = [];
   const deps: ShareDeps = {
     destination: () =>
       Promise.resolve('to' in over ? over.to : { channel: 'C-incidents', thread: '100.0' }),
-    share: (channel, thread, text) => {
-      shared.push({ channel, thread, text });
+    asMember: () => Promise.resolve(over.asMember),
+    unlink: (token) => {
+      unlinked.push(token);
+      if (over.unlinkFails) return Promise.reject(new Error('gateway away'));
+      return Promise.resolve(over.relinked !== true);
+    },
+    share: (channel, thread, text, asMember) => {
+      shared.push({ channel, thread, text, ...(asMember ? { asMember } : {}) });
+      if (over.tokenDead && asMember)
+        return Promise.resolve({ ok: false as const, why: 'author' as const });
       return Promise.resolve(over.why ? { ok: false as const, why: over.why } : { ok: true });
     },
     settle: (channel, ts, text) => {
@@ -33,10 +55,84 @@ function harness(over: { to?: { channel: string; thread: string }; why?: Unusabl
       return Promise.resolve(undefined);
     },
   };
-  return { deps, shared, posts, settled };
+  return { deps, shared, posts, settled, unlinked };
 }
 
 describe('share back', () => {
+  it('posts as the member themselves once they have linked their account', async () => {
+    // Slack decides authorship by token type, so handing their token over is
+    // the whole mechanism — and with it the message is theirs, so the sentence
+    // naming who approved it is the bot's own name badge and goes.
+    const { deps, shared } = harness({ asMember: 'xoxp-nel' });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
+    assert.deepEqual(shared, [
+      {
+        channel: 'C-incidents',
+        thread: '100.0',
+        text: 'the deploy fails on a missing env var',
+        asMember: 'xoxp-nel',
+      },
+    ]);
+  });
+
+  it('publishes as the bot when Slack has stopped honouring their token', async () => {
+    // Revoked, or an install replaced. The answer they approved is worth more
+    // than the name on it, so it goes out as the bot with them named — and the
+    // dead token is forgotten, or every later share pays for the same refusal
+    // and the home tab goes on claiming they post as themselves.
+    const { deps, shared, posts, unlinked } = harness({ asMember: 'xoxp-nel', tokenDead: true });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
+    // Named, not blanket: a member who linked again between the refusal and this
+    // keeps the grant they just made.
+    assert.deepEqual(unlinked, ['xoxp-nel']);
+    // And they are told, or they find out from a channel post that does not say
+    // their name beside a home tab that has quietly stopped offering it.
+    assert.match(posts[0]!.text, /as Symma, not as you/);
+    assert.match(posts[0]!.text, /connect again from the home tab/);
+    assert.deepEqual(
+      shared.map((entry) => [entry.asMember, entry.text]),
+      [
+        ['xoxp-nel', 'the deploy fails on a missing env var'],
+        [undefined, '<@U-nel> shared:\n\nthe deploy fails on a missing env var'],
+      ],
+    );
+  });
+
+  it('does not send them to a home tab that still says they are linked', async () => {
+    // The unlink fails open, so it can leave the token where it was. "I
+    // disconnected it" would then be a claim about something they can see is
+    // untrue, and the reconnect it points at has nothing to press.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', tokenDead: true, unlinkFails: true });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
+    assert.match(posts[0]!.text, /as Symma, not as you/);
+    assert.doesNotMatch(posts[0]!.text, /disconnected|home tab/);
+  });
+
+  it('leaves a fresh link alone, and says nothing about disconnecting it', async () => {
+    // They linked again between the refused post and the unlink, so the compare
+    // matched nothing — telling them to reconnect would send them to undo the
+    // grant they had just made.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', tokenDead: true, relinked: true });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
+    assert.doesNotMatch(posts[0]!.text, /disconnected|home tab/);
+  });
+
+  it('blames the bot for what the bot was refused, after falling back to it', async () => {
+    // The retry is the bot's post. "You are not in that channel" would send them
+    // looking at their own membership for a problem that is not theirs.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', tokenDead: true, why: 'removed' });
+    assert.equal(await handleShare(CLICK, deps), 'kept: removed');
+    assert.match(posts[0]!.text, /I am not in that channel/);
+  });
+
+  it("tells them about their own membership, not the bot's", async () => {
+    // Posting as them, `not_in_channel` is Slack refusing *them* — pointing at
+    // the bot's membership would send them looking in the wrong place.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', why: 'removed' });
+    assert.equal(await handleShare(CLICK, deps), 'kept: removed');
+    assert.match(posts[0]!.text, /you are not in that channel/);
+  });
+
   it('posts to the thread it came from, with the approver named', async () => {
     const { deps, shared, posts, settled } = harness();
     assert.equal(await handleShare(CLICK, deps), 'shared');

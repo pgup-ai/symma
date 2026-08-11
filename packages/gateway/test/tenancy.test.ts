@@ -426,12 +426,47 @@ describe('tenancy', () => {
       // Dropping her endpoints cascades the rows away, so the frames have to
       // come back or they are stranded: unreachable by any route and invisible
       // to retention, which reads sessions.started_at.
+      // Her own Slack credential, which is worth her posting rights and is the
+      // one token here that cannot be a hash — the gateway has to replay it.
+      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
+      assert.equal(await store.slackUserToken(carol.owner), 'xoxp-carol');
+      // A forget drops the token it names, and says whether that was the stored
+      // one: a member who linked again between a refused post and the call that
+      // follows it keeps the grant they just made, and is not told otherwise.
+      assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-older'), false);
+      assert.equal(await store.slackUserToken(carol.owner), 'xoxp-carol');
+      assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-carol'), true);
+      // Naming none is a member disconnecting on purpose: whatever is stored is
+      // what they meant, including one Slack stopped honouring that the compare
+      // above could not drop. False where there was nothing to hand back.
+      assert.equal(await store.forgetSlackUserToken(carol.owner), false);
+      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
+      assert.equal(await store.forgetSlackUserToken(carol.owner), true);
+      assert.equal(await store.slackUserToken(carol.owner), undefined);
+      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
+
       const doomed = await store.deactivateUser('other', 'carol');
       assert.deepEqual(doomed, [{ runId: 'run-carol', sessionId: 'sid-carol' }]);
       forget(doomed);
       assert.deepEqual(readJournalLines(dataDir, 'run-carol', 'sid-carol'), []);
       assert.equal(await store.ownerForClientToken(carol.clientToken), undefined);
       assert.equal(await store.endpointForToken(carol.endpointToken), undefined);
+      // Gone from the row, not merely out of reach of the read that guards on
+      // `deactivated_at`: removing someone is supposed to destroy it.
+      const pool = new Pool({ connectionString: url });
+      try {
+        assert.deepEqual(
+          (await pool.query(`SELECT slack_user_token FROM users WHERE id = $1`, [carol.owner]))
+            .rows,
+          [{ slack_user_token: null }],
+        );
+      } finally {
+        await pool.end();
+      }
+      // And a linking flow that was out in her browser cannot put it back —
+      // which is also what the callback reads to know not to say "linked".
+      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-again'), false);
+      assert.equal(await store.slackUserToken(carol.owner), undefined);
     } finally {
       await store.close();
     }
@@ -1804,6 +1839,59 @@ describe('tenancy', () => {
         200,
       );
       assert.equal((await ask()).model, undefined);
+    } finally {
+      detach?.();
+      await store.close();
+    }
+  });
+
+  it('runs a member on the agent they picked, while their machine still has it', async () => {
+    const url = pg.getConnectionUri();
+    const rae = await provision(url, { team: 'ws', slackUser: 'rae', endpoint: 'rae-box' });
+    const store = await openStore(url, join(import.meta.dirname, '../src/schema.sql'));
+    const post = (path: string, body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer bot-secret' },
+        body: JSON.stringify({ team: 'ws', user: 'rae', ...body }),
+      });
+    const ask = async (): Promise<Record<string, unknown>> =>
+      (await (await post('/api/slack/endpoint', {})).json()) as Record<string, unknown>;
+    let detach: (() => void) | undefined;
+    try {
+      detach = await waitFor(async () => {
+        const off = await attach(rae.endpointToken, 'rae-box', ['codex', 'kilo']);
+        return (await ask()).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint serving what it found first');
+      // Both, so the picker has something to offer. The one it runs is separate
+      // from the ones it could.
+      assert.deepEqual((await ask()).agents, ['codex', 'kilo']);
+
+      assert.equal((await post('/api/slack/default-agent', { agent: 'kilo' })).status, 200);
+      assert.equal((await ask()).agent, 'kilo');
+
+      // A pick their machine no longer offers falls back rather than refusing:
+      // an agent they stopped logging into would otherwise take every turn down
+      // with it, and the companion is the authority on what it can run.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(rae.endpointToken, 'rae-box', ['codex']);
+        return (await ask()).agent === 'codex' ? off : (off(), undefined);
+      }, 'the endpoint reattached without kilo');
+      // And no picker where there is nothing to pick between.
+      assert.equal((await ask()).agents, undefined);
+
+      // The pick is kept through that, so logging back in restores it rather
+      // than making them choose again.
+      detach();
+      detach = await waitFor(async () => {
+        const off = await attach(rae.endpointToken, 'rae-box', ['codex', 'kilo']);
+        return (await ask()).agent === 'kilo' ? off : (off(), undefined);
+      }, 'the pick came back with the agent');
+
+      assert.equal((await post('/api/slack/default-agent', { agent: 'bad id' })).status, 400);
+      assert.equal((await post('/api/slack/default-agent', { agent: null })).status, 200);
+      assert.equal((await ask()).agent, 'codex', 'cleared, so whatever it finds first');
     } finally {
       detach?.();
       await store.close();

@@ -11,7 +11,7 @@
  */
 import type { TurnTarget } from '@symma/protocol';
 
-import { modelSelect, plainly } from './slack-api.js';
+import { agentSelect, modelSelect, plainly, DISCONNECT_ACTION } from './slack-api.js';
 
 const context = (text: string): Record<string, unknown> => ({
   type: 'context',
@@ -72,14 +72,25 @@ export function modelPrompt(target: TurnTarget | undefined): {
   };
 }
 
+/** Whether this member's answers can go out under their own name, and where
+ * they say yes to that. Absent where the deployment has no Slack app
+ * credentials, which is the state to render nothing at all for. */
+export interface Linking {
+  linked: boolean;
+  url?: string;
+}
+
 /**
- * The home tab: what this member's setup is, and the one choice that belongs
+ * The home tab: what this member's setup is, and the choices that belong
  * outside a conversation.
  *
  * Block Kit has no colour of its own — the home tab is Slack's surface, not
  * ours — so the brand carries as the site's marks and the site's voice.
  */
-export function homeBlocks(target: TurnTarget | undefined): Record<string, unknown>[] {
+export function homeBlocks(
+  target: TurnTarget | undefined,
+  linking?: Linking,
+): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [
     {
       type: 'header',
@@ -97,7 +108,12 @@ export function homeBlocks(target: TurnTarget | undefined): Record<string, unkno
     section(
       target.state === 'ready'
         ? `⌁ *${machine}* is ready${target.agent ? `, running \`${plainly(target.agent)}\`` : ''}`
-        : `⌁ *${machine}* is not reachable — start the companion and it will come back`,
+        : // Attached and at capacity, so telling them to start the companion sends
+          // them to restart the thing that is answering them. Not "your last
+          // question": the state is every session it can run being in use.
+          target.state === 'busy'
+          ? `⌁ *${machine}* is busy, running everything it can at once`
+          : `⌁ *${machine}* is not reachable — start the companion and it will come back`,
     ),
     // A machine offering no approved project is not a broken one: conversations
     // run in an empty temp directory, and the DM says so on the turn itself.
@@ -107,10 +123,74 @@ export function homeBlocks(target: TurnTarget | undefined): Record<string, unkno
         : '⌘ No approved projects — conversations run in an empty temp directory',
     ),
     context('◫ Access level is chosen in each conversation'),
+  );
+
+  // Above the model, because a model belongs to the agent that offered it:
+  // changing agent is the larger of the two choices. Nothing at all for a
+  // machine that is up and runs one agent: the gateway sends no list, and a
+  // select with one option is a control that does nothing.
+  const agents = target.agents?.length ? agentSelect(target.agents, target.agent ?? '') : [];
+  if (agents.length)
+    blocks.push(
+      { type: 'divider' },
+      section('*⌁ The agent you work with*'),
+      { type: 'actions', elements: agents },
+      context('Threads already open move with you, and are caught up from the DM.'),
+    );
+  // A list only exists while the machine is attached to say what it runs, so
+  // this goes missing exactly when a member is most likely to be looking —
+  // during a turn. Said, the way the model list below it says it.
+  else if (target.state !== 'ready')
+    blocks.push(
+      { type: 'divider' },
+      section('*⌁ The agent you work with*'),
+      context('Your agents arrive with your machine.'),
+    );
+
+  blocks.push(
     { type: 'divider' },
     section('*◎ Your default model*'),
     ...modelBlocks(target),
     context('Conversations where you picked a model keep it.'),
   );
+
+  // §5's "attributable to whoever approved it", offered as what it is: their own
+  // posting rights, for the one thing they already press a button to do.
+  if (linking?.linked)
+    blocks.push(
+      { type: 'divider' },
+      section('*◆ Answers you share go out as you*'),
+      // The way back. A credential they granted with a button needs one to take
+      // it away — and it is the only control that fixes a token Slack has
+      // stopped honouring while this tab still believes in it.
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Disconnect' },
+            action_id: DISCONNECT_ACTION,
+          },
+        ],
+      },
+    );
+  else if (linking?.url)
+    blocks.push(
+      { type: 'divider' },
+      section('*◆ Share as yourself*'),
+      context(
+        'Answers you share go out from Symma with your name in front. Connect your account and they go out as you.',
+      ),
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Connect my account' },
+            url: linking.url,
+          },
+        ],
+      },
+    );
   return blocks;
 }
