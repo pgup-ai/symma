@@ -17,6 +17,11 @@ function resolver(over: {
   budgetBytes?: number;
   self?: { channel: string; root: string };
   throws?: boolean;
+  host?: string;
+  /** Channels this member could have opened themselves; every link is theirs
+   * unless a test says which are. */
+  mine?: string[];
+  spent?: boolean;
 }) {
   const asked: string[] = [];
   const logged: string[] = [];
@@ -25,6 +30,7 @@ function resolver(over: {
     logged,
     deps: {
       budgetBytes: over.budgetBytes ?? 24_000,
+      mayRead: (channel: string) => Promise.resolve(over.mine ? over.mine.includes(channel) : true),
       threadReplies: (channel: string, thread: string) => {
         asked.push(`${channel}/${thread}`);
         if (over.throws) return Promise.reject(new Error('thread too long to read'));
@@ -33,7 +39,9 @@ function resolver(over: {
       log: (message: string) => {
         logged.push(message);
       },
+      ...(over.host ? { host: over.host } : {}),
       ...(over.self ? { self: over.self } : {}),
+      ...(over.spent ? { spent: () => true } : {}),
     },
   };
 }
@@ -84,7 +92,7 @@ describe('slack links', () => {
     assert.match(got.sections[0]!, /fetched just now/);
     assert.match(got.sections[0]!, /the deploy is failing/);
     assert.equal(got.spent, Buffer.byteLength(got.sections[0]!, 'utf8'));
-    assert.deepEqual(got.unread, []);
+    assert.deepEqual(got.missed, []);
   });
 
   it('names what it could not read and keeps going, a throw included', async () => {
@@ -94,12 +102,12 @@ describe('slack links', () => {
     const alive = link('C0BMCR1FGU9', '1786400100.000001');
     const { deps } = resolver({ threads: { 'C0BMCR1FGU9/1786400100.000001': THREAD } });
     const got = await resolveLinks(`<${dead}> vs <${alive}>`, deps);
-    assert.deepEqual(got.unread, [dead]);
+    assert.deepEqual(got.missed, [{ url: dead, why: 'unreadable' }]);
     assert.equal(got.sections.length, 1);
 
     const throwing = resolver({ throws: true });
     const thrown = await resolveLinks(`<${alive}>`, throwing.deps);
-    assert.deepEqual(thrown.unread, [alive]);
+    assert.deepEqual(thrown.missed, [{ url: alive, why: 'unreadable' }]);
     assert.equal(throwing.logged.length, 1, 'a throw is said once, not swallowed');
   });
 
@@ -119,18 +127,24 @@ describe('slack links', () => {
     });
     const got = await resolveLinks(`<${first}> then <${second}>`, deps);
     assert.equal(got.sections.length, 1);
-    assert.deepEqual(got.unread, []);
-    assert.deepEqual(got.crowded, [second]);
+    assert.deepEqual(got.missed, [{ url: second, why: 'too long' }]);
   });
 
-  it('stops at the cap and says how many it left', async () => {
-    const text = Array.from({ length: LINKS_PER_MESSAGE + 2 }, (_, i) =>
-      link(`C0AAAAAAAA${String(i)}`, `${String(1786400100 + i)}.000001`),
-    ).join(' ');
-    const { deps, asked } = resolver({});
-    const got = await resolveLinks(text, deps);
-    assert.equal(asked.length, LINKS_PER_MESSAGE);
-    assert.equal(got.skipped, 2);
+  it('stops at the cap and names the rest as over it', async () => {
+    const channels = Array.from({ length: LINKS_PER_MESSAGE + 2 }, (_, i) => [
+      `C0AAAAAAAA${String(i)}`,
+      `${String(1786400100 + i)}.000001`,
+    ]);
+    const { deps, asked } = resolver({
+      threads: Object.fromEntries(channels.map(([c, ts]) => [`${c!}/${ts!}`, THREAD])),
+    });
+    const got = await resolveLinks(channels.map(([c, ts]) => link(c!, ts!)).join(' '), deps);
+    assert.equal(asked.length, LINKS_PER_MESSAGE, 'the cap is on fetches, not on links');
+    assert.equal(got.sections.length, LINKS_PER_MESSAGE);
+    assert.deepEqual(
+      got.missed.map((miss) => miss.why),
+      ['over the cap', 'over the cap'],
+    );
   });
 
   it('does not fetch the thread the conversation itself lives in', async () => {
@@ -141,6 +155,43 @@ describe('slack links', () => {
     });
     const got = await resolveLinks(`redo <${link('DNEL000000', '1786400200.000100')}>`, deps);
     assert.deepEqual(asked, []);
-    assert.deepEqual(got, { sections: [], unread: [], crowded: [], skipped: 0, spent: 0 });
+    assert.deepEqual(got, { sections: [], missed: [], spent: 0 });
+  });
+
+  it('will not fetch a channel the member could not open themselves', async () => {
+    // The bot reads with its own token and is in whatever it was invited to, so
+    // without this any member could paste a link to any channel it can see and
+    // read it through the agent — including another member's DM with the bot.
+    const theirs = link('C0PRIVATE00', '1786400100.000001');
+    const { deps, asked } = resolver({
+      mine: ['C0BMCR1FGU9'],
+      threads: { 'C0PRIVATE00/1786400100.000001': THREAD },
+    });
+    const got = await resolveLinks(`what is in <${theirs}>?`, deps);
+    assert.deepEqual(asked, [], 'refused before the fetch, not after');
+    assert.deepEqual(got.missed, [{ url: theirs, why: 'not yours' }]);
+  });
+
+  it('ignores a permalink from another workspace', async () => {
+    // A channel id means something only in the workspace that issued it, so
+    // fetching a foreign one by (channel, ts) answers with whatever we have at
+    // those ids — a different thread under a label naming the link.
+    const { deps, asked } = resolver({ host: 'acme.slack.com' });
+    const foreign = 'https://other.slack.com/archives/C0BMCR1FGU9/p1786400100000001';
+    assert.deepEqual(slackLinks(foreign, 'acme.slack.com'), []);
+    const got = await resolveLinks(foreign, deps);
+    assert.deepEqual(asked, []);
+    assert.deepEqual(got.missed, []);
+  });
+
+  it('stops fetching once the reads have taken too long', async () => {
+    // These happen before the acknowledgement, so a stalled Slack call is a
+    // member watching nothing happen — and it is not the same as a link the bot
+    // cannot read.
+    const url = link('C0BMCR1FGU9', '1786400100.000001');
+    const { deps, asked } = resolver({ spent: true });
+    const got = await resolveLinks(`<${url}>`, deps);
+    assert.deepEqual(asked, []);
+    assert.deepEqual(got.missed, [{ url, why: 'too slow' }]);
   });
 });

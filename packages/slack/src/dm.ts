@@ -25,7 +25,7 @@ import {
 
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
-import { LINKS_PER_MESSAGE, resolveLinks } from './links.js';
+import { LINKS_PER_MESSAGE, resolveLinks, slackLinks, type LinkMiss } from './links.js';
 import { plainly, type MarkState } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
@@ -212,6 +212,22 @@ function pickers(
   return Object.keys(offer).length ? { conversation, agent, ...offer } : undefined;
 }
 
+/** These reads sit in front of the acknowledgement, so a Slack call that never
+ * settles is a member watching nothing happen. Generous — five threads is a
+ * real fetch — but finite. */
+const LINKS_MS = 8_000;
+
+/** Why a link the member pasted is not in the prompt, in their words. Their
+ * next move differs by which it was: a channel that is not theirs is not a
+ * message that was too long. */
+const WHY: Record<LinkMiss['why'], string> = {
+  'not yours': 'it is not a channel you are in',
+  unreadable: 'I cannot read it',
+  'too long': 'it did not fit',
+  'too slow': 'Slack was too slow',
+  'over the cap': `I take ${String(LINKS_PER_MESSAGE)} links per message`,
+};
+
 export interface DmDeps {
   find: (dmChannel: string, rootThread: string) => Promise<ConversationRef | undefined>;
   /** The machine this member's agent would run on, whatever state it is in, and
@@ -269,6 +285,10 @@ export interface DmDeps {
   /** The DM thread itself, which is the durable transcript a follow-up is
    * caught up from. Undefined when the bot cannot read the channel. */
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
+  /** This workspace's own host, for pinning pasted links to it. */
+  host: () => Promise<string | undefined>;
+  /** Whether a channel is one any member could open for themselves. */
+  publicChannel: (channel: string) => Promise<boolean>;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -450,13 +470,27 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   }
 
   // First claim on the budget: the link is what this message is about, where
-  // the catch-up below is background.
-  const linked = await resolveLinks(message.text, {
-    budgetBytes: deps.budgetBytes,
-    threadReplies: deps.threadReplies,
-    log: deps.log,
-    self: { channel: conversation.dmChannel, root: conversation.rootThread },
-  });
+  // the catch-up below is background. Skipped outright for a message with no
+  // link in it, which is nearly all of them — `host()` is an API call the first
+  // time, and no ordinary turn should pay for a feature it is not using.
+  const by = Date.now() + LINKS_MS;
+  const linked = slackLinks(message.text).length
+    ? await resolveLinks(message.text, {
+        budgetBytes: deps.budgetBytes,
+        threadReplies: deps.threadReplies,
+        log: deps.log,
+        host: await deps.host(),
+        // What this member could have opened themselves. A public channel is
+        // that by definition; their own DM with the bot is the one private
+        // thread it can vouch for, since there is exactly one per member and
+        // this turn arrived in it. Everything else the bot happens to be in is
+        // somebody else's, and its reach is not theirs to borrow.
+        mayRead: (channel) =>
+          channel === conversation.dmChannel ? Promise.resolve(true) : deps.publicChannel(channel),
+        self: { channel: conversation.dmChannel, root: conversation.rootThread },
+        spent: () => Date.now() > by,
+      })
+    : { sections: [], missed: [], spent: 0 };
 
   // Even when a resume is on offer, because whether the agent still has that
   // session is not known until it has been asked — and arriving without the
@@ -503,16 +537,10 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // transcript, and still has to say what was missing from it.
   // Links this answer ran without rest beside the catch-up note, but
   // unconditionally: the fetch rides the prompt, so no resume makes this stop
-  // being true. A reason per link — "cannot read" a thread that merely did not
-  // fit is a different fact told wrong.
-  const leftOut = [
-    ...linked.unread.map((url) => `<${url}> — I cannot read it`),
-    ...linked.crowded.map((url) => `<${url}> — it did not fit`),
-    ...(linked.skipped
-      ? [`the last ${String(linked.skipped)} — I take ${String(LINKS_PER_MESSAGE)} per message`]
-      : []),
-  ];
-  const leftOutNote = leftOut.length ? `This ran without ${leftOut.join(', ')}.` : undefined;
+  // being true.
+  const leftOutNote = linked.missed.length
+    ? `This ran without ${linked.missed.map((miss) => `<${miss.url}> — ${WHY[miss.why]}`).join(', ')}.`
+    : undefined;
   const restingFor = (ranIn: string | undefined): string =>
     [
       scope,
@@ -619,11 +647,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       prompt: [
         message.text,
         ...linked.sections,
-        ...(linked.unread.length || linked.crowded.length
+        ...(linked.missed.length
           ? [
-              `Not fetched above — read ${
-                linked.unread.length + linked.crowded.length > 1 ? 'them' : 'it'
-              } yourself if you have Slack access: ${[...linked.unread, ...linked.crowded].join(', ')}`,
+              `Not fetched above — read ${linked.missed.length > 1 ? 'them' : 'it'} yourself if you have Slack access: ${linked.missed
+                .map((miss) => miss.url)
+                .join(', ')}`,
             ]
           : []),
       ].join('\n\n'),

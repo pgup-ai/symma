@@ -62,6 +62,10 @@ function harness(
     /** A thread read that throws rather than coming back empty — a page cap, a
      * transient Slack error. */
     historyFails?: Error;
+    /** This workspace's host, which pasted links are pinned to. */
+    host?: string;
+    /** Channels the member could not open for themselves. */
+    notMine?: string[];
     /** The source channel thread a mention came out of, for a conversation whose
      * `source` says where to read it. `null` is one the bot cannot read. */
     channel?: ThreadMessage[] | null;
@@ -108,6 +112,10 @@ function harness(
     budgetBytes: over.budgetBytes ?? 24_000,
     // Two threads now: the DM the conversation lives in, and the channel a
     // mention came out of — which is where a turn reads what it is about.
+    host: () => Promise.resolve(over.host ?? 'acme.slack.com'),
+    // Every channel a test links to is one the member could open, unless it
+    // says otherwise — the refusal has its own test.
+    publicChannel: (channel) => Promise.resolve(!(over.notMine ?? []).includes(channel)),
     threadReplies: (channel) => {
       if (channel !== 'D-nel')
         return Promise.resolve(over.channel === null ? undefined : (over.channel ?? []));
@@ -636,7 +644,7 @@ describe('dm message', () => {
   });
 
   it('runs without a link it cannot read, and says so to both sides', async () => {
-    const url = 'https://elsewhere.slack.com/archives/C0FOREIGN00/p1786400100000001';
+    const url = 'https://acme.slack.com/archives/C0FOREIGN00/p1786400100000001';
     const { deps, posts, runs } = harness({ existing: CONVERSATION, channel: null });
     await handleDm(
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: `see <${url}>` },
@@ -649,6 +657,41 @@ describe('dm message', () => {
     assert.match(posts[0]!.text, /This ran without <https:.*I cannot read it/);
     assert.match(runs[0]!.prompt, /read it yourself if you have Slack access/);
     assert.equal(posts.at(-1)!.text, 'the answer');
+  });
+
+  it('spends nothing on a message with no link in it', async () => {
+    // Which is nearly every message: the host read is an API call the first
+    // time, and no ordinary turn should pay for a feature it is not using.
+    let hosts = 0;
+    const { deps } = harness({ existing: CONVERSATION });
+    deps.host = () => {
+      hosts += 1;
+      return Promise.resolve('acme.slack.com');
+    };
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'what broke?' },
+      deps,
+    );
+    assert.equal(hosts, 0);
+  });
+
+  it('will not read a member a channel they are not in', async () => {
+    // The bot reads with its own token and is in whatever anyone invited it to,
+    // so without this any member could paste a link to any channel it can see —
+    // another member's private channel, or their DM with the bot — and read it
+    // through the agent.
+    const url = 'https://acme.slack.com/archives/C0THEIRS000/p1786400100000001';
+    const { deps, posts, runs } = harness({
+      existing: CONVERSATION,
+      notMine: ['C0THEIRS000'],
+      channel: [{ ts: '1786400100.000001', author: 'Ola', text: 'their private plans' }],
+    });
+    await handleDm(
+      { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: `see <${url}>` },
+      deps,
+    );
+    assert.doesNotMatch(runs[0]!.prompt, /their private plans/);
+    assert.match(posts[0]!.text, /not a channel you are in/);
   });
 
   it('hands the member’s own files to the agent, and names what it could not', async () => {

@@ -7,6 +7,12 @@
  * the bot leaves unresolved arrives as a bare URL, and the answer becomes the
  * agent explaining what it cannot open. The bot is the one holding a token for
  * this workspace, so fetching is its job.
+ *
+ * Which makes the bot's reach the thing to be careful about. It reads with its
+ * own token and it is in whatever channels anyone invited it to, so "fetch what
+ * this member linked" would hand any member the contents of any channel the bot
+ * can see, theirs or not. Nothing is fetched without `mayRead` saying the member
+ * could have read it themselves.
  */
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
@@ -14,10 +20,10 @@ import { threadSnapshot, type ThreadMessage } from './snapshot.js';
  * out, and `thread_ts` rides along when that message is a reply — pointing at
  * the root, which is the thread the member means. */
 const PERMALINK =
-  /https:\/\/[a-z0-9][a-z0-9.-]*\.slack\.com\/archives\/([A-Z][A-Z0-9]{5,})\/p(\d{10})(\d{6})(?!\d)(\?[^\s>|]*)?/g;
+  /https:\/\/([a-z0-9][a-z0-9.-]*\.slack\.com)\/archives\/([A-Z][A-Z0-9]{5,})\/p(\d{10})(\d{6})(?!\d)(\?[^\s>|]*)?/g;
 
 /** Fetches are API calls and threads can be long; past this the member is
- * pasting an index, not a question. The rest are named as unread. */
+ * pasting an index, not a question. The rest are named, not fetched. */
 export const LINKS_PER_MESSAGE = 5;
 
 export interface SlackLink {
@@ -31,13 +37,22 @@ export interface SlackLink {
   root: string;
 }
 
-/** Every distinct thread the message links to, in order of first appearance.
- * Distinct by thread, not by URL: two replies in one thread are one fetch. */
-export function slackLinks(text: string): SlackLink[] {
+/**
+ * Every distinct thread the message links to, in order of first appearance.
+ * Distinct by thread, not by URL: two replies in one thread are one fetch.
+ *
+ * `host` is this workspace's own, and a link from anywhere else is not a link
+ * to anything here: a channel id only means something in the workspace that
+ * issued it, so fetching a foreign one by `(channel, ts)` would answer with
+ * whatever our own workspace has at those ids — a different thread than the URL
+ * names, under a label claiming otherwise.
+ */
+export function slackLinks(text: string, host?: string): SlackLink[] {
   const seen = new Set<string>();
   const links: SlackLink[] = [];
   for (const hit of text.matchAll(PERMALINK)) {
-    const [url, channel, sec, usec, query] = hit;
+    const [url, from, channel, sec, usec, query] = hit;
+    if (host && from !== host) continue;
     const reply = query?.match(/[?&]thread_ts=(\d+\.\d+)/);
     const root = reply?.[1] ?? `${sec!}.${usec!}`;
     const key = `${channel!}/${root}`;
@@ -48,17 +63,19 @@ export function slackLinks(text: string): SlackLink[] {
   return links;
 }
 
+/** Why a link the member pasted is not in the prompt. Each is a different thing
+ * to tell them, and one told as another sends them to fix the wrong thing — a
+ * channel the bot cannot see reads as a permissions problem where a thread the
+ * budget squeezed out is a longer message. */
+export type LinkMiss = {
+  url: string;
+  why: 'not yours' | 'unreadable' | 'too long' | 'too slow' | 'over the cap';
+};
+
 export interface ResolvedLinks {
-  /** One per readable link, labelled with its URL, ready to ride the prompt. */
+  /** One per fetched link, labelled with its URL, ready to ride the prompt. */
   sections: string[];
-  /** The URLs of links that could not be read — a channel the bot is not in,
-   * another workspace entirely, a thread that is gone. */
-  unread: string[];
-  /** Read, but nothing of it fit beside the links before it — a different fact
-   * from `unread`, and the copy must not claim otherwise. */
-  crowded: string[];
-  /** Links past `LINKS_PER_MESSAGE`, left unfetched on purpose. */
-  skipped: number;
+  missed: LinkMiss[];
   /** Bytes the sections took, charged against the same ceiling as the rest of
    * the injected context. */
   spent: number;
@@ -72,35 +89,53 @@ export async function resolveLinks(
   text: string,
   deps: {
     budgetBytes: number;
+    /** Whether this member could have read that channel themselves. The bot's
+     * own access is not the question — see the note at the top of this file. */
+    mayRead: (channel: string) => Promise<boolean>;
     threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
     log: (message: string) => void;
+    /** This workspace's `something.slack.com`, where it is known. */
+    host?: string;
     /** The conversation's own thread. A link to it resolves to what the turn
      * already carries, so it is not worth a fetch. */
     self?: { channel: string; root: string };
+    /** True once these reads have taken long enough. They happen before the
+     * acknowledgement, so a stalled one is a member watching nothing happen. */
+    spent?: () => boolean;
   },
 ): Promise<ResolvedLinks> {
-  const links = slackLinks(text).filter(
+  const links = slackLinks(text, deps.host).filter(
     (link) => !(link.channel === deps.self?.channel && link.root === deps.self.root),
   );
-  const taking = links.slice(0, LINKS_PER_MESSAGE);
   const sections: string[] = [];
-  const unread: string[] = [];
-  const crowded: string[] = [];
+  const missed: LinkMiss[] = [];
   let spent = 0;
-  for (const link of taking) {
+  for (const link of links) {
+    const miss = (why: LinkMiss['why']): number => missed.push({ url: link.url, why });
+    if (sections.length + missed.length >= LINKS_PER_MESSAGE) {
+      miss('over the cap');
+      continue;
+    }
+    if (deps.spent?.()) {
+      miss('too slow');
+      continue;
+    }
+    if (!(await deps.mayRead(link.channel).catch(() => false))) {
+      miss('not yours');
+      continue;
+    }
     const messages = await deps.threadReplies(link.channel, link.root).catch((error: unknown) => {
       deps.log(`link not read: ${String(error)}`);
       return undefined;
     });
     if (!messages) {
-      unread.push(link.url);
+      miss('unreadable');
       continue;
     }
     // "Fetched just now" tells the agent it need not reach for Slack itself —
     // and does not tell it not to, since one with real access can go deeper.
-    // The label is charged like the snapshot it introduces, with room for the
-    // omitted suffix, or the assembled prompt is over a ceiling its own parts
-    // were each inside.
+    // Charged with the snapshot it introduces, plus room for the suffix below,
+    // or the assembled prompt is over a ceiling its own parts were each inside.
     const label = `Behind ${link.url}, fetched just now`;
     // Greedy in the member's order: the first link is the one the message is
     // most likely about, and an even split starves it for a footnote.
@@ -108,7 +143,7 @@ export async function resolveLinks(
       budgetBytes: Math.max(0, deps.budgetBytes - spent - Buffer.byteLength(label, 'utf8') - 48),
     });
     if (!snapshot.text) {
-      crowded.push(link.url);
+      miss('too long');
       continue;
     }
     const cut = snapshot.omitted
@@ -118,5 +153,5 @@ export async function resolveLinks(
     sections.push(section);
     spent += Buffer.byteLength(section, 'utf8');
   }
-  return { sections, unread, crowded, skipped: links.length - taking.length, spent };
+  return { sections, missed, spent };
 }

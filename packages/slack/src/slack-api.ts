@@ -19,6 +19,16 @@ export interface SlackApi {
   /** The member's DM channel. Asked for rather than assumed: Slack's docs
    * disagree about whether a user id can stand in as a channel. */
   openDm: (user: string) => Promise<string>;
+  /** This workspace's own `something.slack.com`. A permalink from anywhere else
+   * names ids that mean nothing here. Undefined where Slack would not say, which
+   * leaves the check off rather than refusing every link. */
+  host: () => Promise<string | undefined>;
+  /** Whether a channel is one any member of this workspace could open for
+   * themselves — a public channel, and nothing else. The bot is in whatever it
+   * was invited to, so its own reach is no guide to a member's. False for
+   * anything it cannot see either, since that is not a channel it can vouch
+   * for. */
+  publicChannel: (channel: string) => Promise<boolean>;
   /** A link back to a message, so a conversation lifted out of a channel says
    * which thread it came from. Undefined rather than throwing: a handoff without
    * its link is worth having, and one that refused to happen is not. */
@@ -402,7 +412,39 @@ export function slackApi(
     return resolved;
   };
 
+  // Both answer about the workspace rather than about a turn, and neither
+  // changes while the process lives: one call each, ever.
+  let host: Promise<string | undefined> | undefined;
+  const publicity = new Map<string, Promise<boolean>>();
+
   return {
+    host: () => {
+      host ??= quick.auth
+        .test()
+        .then((got) => (typeof got.url === 'string' ? new URL(got.url).host : undefined))
+        .catch((error: unknown) => {
+          // Left unknown rather than remembered as unknown: a blip at boot would
+          // otherwise turn the host check off for the life of the process.
+          host = undefined;
+          options.log?.(`workspace host unknown: ${String(error)}`);
+          return undefined;
+        });
+      return host;
+    },
+    publicChannel: (channel) => {
+      const known = publicity.get(channel);
+      if (known) return known;
+      const asking = quick.conversations
+        .info({ channel })
+        .then((got) => got.channel?.is_channel === true && got.channel.is_private !== true)
+        .catch((error: unknown) => {
+          publicity.delete(channel);
+          options.log?.(`cannot vouch for ${channel}: ${slackCode(error) ?? String(error)}`);
+          return false;
+        });
+      publicity.set(channel, asking);
+      return asking;
+    },
     async threadReplies(channel, thread) {
       try {
         const raw: RawMessage[] = [];

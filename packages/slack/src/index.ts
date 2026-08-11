@@ -400,6 +400,8 @@ const connection = socketMode({
               fetchFile: deps.fetchFile,
               mark: api.mark,
               threadReplies: deps.threadReplies,
+              host: api.host,
+              publicChannel: api.publicChannel,
               destination: deps.destination,
               budgetBytes,
               log,
