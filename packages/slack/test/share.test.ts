@@ -21,6 +21,8 @@ function harness(
     asMember?: string;
     /** Slack refuses that token, as it does once it has been revoked. */
     tokenDead?: boolean;
+    /** The gateway will not take the unlink, so the token is still linked. */
+    unlinkFails?: boolean;
   } = {},
 ) {
   const shared: { channel: string; thread: string; text: string; asMember?: string }[] = [];
@@ -33,7 +35,7 @@ function harness(
     asMember: () => Promise.resolve(over.asMember),
     unlink: (token) => {
       unlinked.push(token);
-      return Promise.resolve();
+      return over.unlinkFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
     },
     share: (channel, thread, text, asMember) => {
       shared.push({ channel, thread, text, ...(asMember ? { asMember } : {}) });
@@ -83,6 +85,7 @@ describe('share back', () => {
     // And they are told, or they find out from a channel post that does not say
     // their name beside a home tab that has quietly stopped offering it.
     assert.match(posts[0]!.text, /as Symma, not as you/);
+    assert.match(posts[0]!.text, /connect again from the home tab/);
     assert.deepEqual(
       shared.map((entry) => [entry.asMember, entry.text]),
       [
@@ -90,6 +93,16 @@ describe('share back', () => {
         [undefined, '<@U-nel> shared:\n\nthe deploy fails on a missing env var'],
       ],
     );
+  });
+
+  it('does not send them to a home tab that still says they are linked', async () => {
+    // The unlink fails open, so it can leave the token where it was. "I
+    // disconnected it" would then be a claim about something they can see is
+    // untrue, and the reconnect it points at has nothing to press.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', tokenDead: true, unlinkFails: true });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
+    assert.match(posts[0]!.text, /as Symma, not as you/);
+    assert.doesNotMatch(posts[0]!.text, /disconnected|home tab/);
   });
 
   it('blames the bot for what the bot was refused, after falling back to it', async () => {

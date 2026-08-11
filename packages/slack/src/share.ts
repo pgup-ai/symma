@@ -88,12 +88,19 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
   // them *they* are not in the channel over a refusal the bot got would send
   // them looking at their own membership for somebody else's problem.
   let byMember = Boolean(token);
+  // Whether the dead token is actually gone. The unlink fails open, so this is
+  // not the same question — and "I disconnected it" is a claim to make only
+  // where the home tab will agree with it.
+  let forgotten = false;
   // Their token stopped working — revoked, or an install replaced. The bot can
   // still publish, and an answer they approved is worth more than the name on
   // it. `author` only ever comes back for a post that carried a token, so the
   // test for one below states that rather than guarding against it.
   if (token && !result.ok && result.why === 'author') {
-    await deps.unlink(token).catch(() => undefined);
+    forgotten = await deps.unlink(token).then(
+      () => true,
+      () => false,
+    );
     byMember = false;
     result = await deps.share(to.channel, to.thread, asBot);
   }
@@ -115,12 +122,15 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
     `${request.text}\n\n_Shared to the thread._`,
   );
   // The fallback, said out loud: they linked so their name would be on it, and
-  // it is not. Finding that in the channel, beside a home tab that has quietly
-  // stopped offering to fix it, is the part worth avoiding.
+  // it is not. What to do about it only where the unlink landed — the home tab
+  // reads the gateway, so until it does there is nothing there to reconnect.
+  const fellBack = Boolean(token) && !byMember;
   await deps.post(
     request.channel,
-    Boolean(token) && !byMember
-      ? 'Shared to the thread — as Symma, not as you. Slack has stopped accepting your sign-in, so I disconnected it. Connect again from the home tab.'
+    fellBack
+      ? `Shared to the thread — as Symma, not as you. Slack has stopped accepting your sign-in.${
+          forgotten ? ' I disconnected it; connect again from the home tab.' : ''
+        }`
       : 'Shared to the thread.',
     request.thread,
   );
