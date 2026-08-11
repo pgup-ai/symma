@@ -18,6 +18,9 @@ import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 const omittedNote = (n: number): string => ` (${String(n)} earlier messages did not fit)`;
 
+/** What a section wraps its snapshot in, after the label and any note. */
+const SECTION_JOIN = ':\n\n';
+
 /** One message a permalink names: `p<sec><usec>` is its ts with the dot taken
  * out, and `thread_ts` rides along when that message is a reply — pointing at
  * the root, which is the thread the member means. */
@@ -28,12 +31,13 @@ const PERMALINK =
  * pasting an index, not a question. The rest are named, not fetched. */
 export const LINKS_PER_MESSAGE = 5;
 
-/** Room for the note a label gains when the snapshot under it was cut. Reserved
- * before the cut, because the label is written after it and would otherwise put
- * the section over the ceiling its own parts were each inside. Measured against
- * a count no thread reaches, so it is the worst case rather than a guess at
+/** Everything a section carries besides the label and the snapshot: the note a
+ * label gains when the snapshot under it was cut, and the join between them.
+ * Reserved before the cut, since both are written after it and would otherwise
+ * put the section over the ceiling its own parts were each inside. Measured
+ * against a count no thread reaches, so it is the worst case and not a guess at
  * one. */
-const OMITTED_NOTE_BYTES = Buffer.byteLength(omittedNote(999_999), 'utf8');
+const SECTION_EXTRA_BYTES = Buffer.byteLength(omittedNote(999_999) + SECTION_JOIN, 'utf8');
 
 export interface SlackLink {
   /** As it appeared, query and all — the name the member and the agent both
@@ -189,7 +193,7 @@ export async function resolveLinks(
     const snapshot = threadSnapshot(messages, {
       budgetBytes: Math.max(
         0,
-        deps.budgetBytes - spent - Buffer.byteLength(label, 'utf8') - OMITTED_NOTE_BYTES,
+        deps.budgetBytes - spent - Buffer.byteLength(label, 'utf8') - SECTION_EXTRA_BYTES,
       ),
     });
     if (!snapshot.text) {
@@ -197,7 +201,7 @@ export async function resolveLinks(
       continue;
     }
     const cut = snapshot.omitted ? omittedNote(snapshot.omitted) : '';
-    const section = `${label}${cut}:\n\n${snapshot.text}`;
+    const section = `${label}${cut}${SECTION_JOIN}${snapshot.text}`;
     sections.push(section);
     spent += Buffer.byteLength(section, 'utf8');
   }

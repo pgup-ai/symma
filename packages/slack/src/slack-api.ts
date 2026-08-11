@@ -39,8 +39,13 @@ export interface SlackApi {
    *
    * Only ever what the bot shares with them — Slack restricts the non-public
    * results to the calling token's own reach — which is why a channel it cannot
-   * see is `unseen` above rather than something this could answer about. */
-  conversationsOf: (user: string) => Promise<Set<string>>;
+   * see is `unseen` above rather than something this could answer about.
+   *
+   * Undefined where the scan failed, which is not an empty list: one says they
+   * are in nothing, the other that nobody asked successfully, and a member told
+   * the first over the second audits their own memberships over a missing
+   * scope. */
+  conversationsOf: (user: string) => Promise<Set<string> | undefined>;
   /** A link back to a message, so a conversation lifted out of a channel says
    * which thread it came from. Undefined rather than throwing: a handoff without
    * its link is worth having, and one that refused to happen is not. */
@@ -462,12 +467,12 @@ export function slackApi(
             if (typeof one.id === 'string') theirs.add(one.id);
         }
       } catch (error) {
-        // Whatever was collected is dropped: a half-read list answers "not in
-        // it" for everything past the page that failed, which is a refusal
-        // dressed as an answer. Said out loud, because a missing scope here
-        // turns every private link into "not yours" and nothing says why — and
-        // swallowed, since a caller's logger throwing must not be what decides
-        // a member cannot read their own channel.
+        // Undefined, not the empty set, and whatever was collected is dropped:
+        // a half-read list answers "not in it" for everything past the page
+        // that failed, which is a refusal dressed as an answer. Said out loud,
+        // because a missing scope here is otherwise a member auditing their own
+        // memberships — and swallowed, since a caller's logger throwing must
+        // not be what decides they cannot read their own channel.
         try {
           options.log?.(
             `cannot list ${user}'s conversations: ${slackCode(error) ?? String(error)}`,
@@ -475,7 +480,7 @@ export function slackApi(
         } catch {
           /* a caller's logger is not worth the answer */
         }
-        return new Set<string>();
+        return undefined;
       }
       return theirs;
     },

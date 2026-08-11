@@ -39,6 +39,23 @@ const THREE_FROM_TWO = {
 };
 
 describe('slack api', () => {
+  it('answers a failed membership scan with nothing, not with an empty list', async () => {
+    // The two are opposite claims: an empty list says the member is in none of
+    // it, nothing says nobody asked successfully. `dm.ts` maps them to "you are
+    // not in that channel" and "I cannot read it", so a scan that failed on a
+    // missing scope reads as a member auditing memberships they do have.
+    const refusing = answering({ ok: false, error: 'missing_scope' });
+    const refused = slackApi('xoxb-test', { fetch: refusing.fetchImpl });
+    assert.equal(await refused.conversationsOf('U-nel'), undefined);
+
+    const listing = answering({
+      ok: true,
+      channels: [{ id: 'C0PRIVATE00' }, { id: 'G0GROUPDM00' }],
+    });
+    const listed = slackApi('xoxb-test', { fetch: listing.fetchImpl });
+    assert.deepEqual([...(await listed.conversationsOf('U-nel'))!], ['C0PRIVATE00', 'G0GROUPDM00']);
+  });
+
   it('reads a thread as names, and asks once per person', async () => {
     const { fetchImpl, asked } = byMethod({
       'conversations.replies': () => THREE_FROM_TWO,
