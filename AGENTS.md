@@ -6,6 +6,9 @@ own machine, with their own credentials. Being extracted from
 as its first downstream client. This file is the single source of truth for
 agents working in this repo; `CLAUDE.md` just points here.
 
+Repo skills live under `.agents/skills`: use `symma-de-slop` for a hostile
+cleanup pass before pushing, opening, or updating a PR.
+
 Full design: `docs/design/m3-slack-companion.md`, kept out of this repo and local
 to the maintainer's machine. Section references below (§N) are to it, so they
 resolve only in a checkout that has it — everything an agent must actually obey
