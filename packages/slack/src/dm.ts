@@ -314,8 +314,9 @@ export interface DmDeps {
   threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
   /** This workspace's own host, for pinning pasted links to it. */
   host: () => Promise<string | undefined>;
-  /** Whether a channel is one any member could open for themselves. */
-  publicChannel: (channel: string) => Promise<boolean>;
+  /** What the bot can say about a channel: anyone's, its own to see but not to
+   * vouch for, or not visible to it at all. */
+  visibility: (channel: string) => Promise<'public' | 'private' | 'unseen'>;
   /** Every conversation this member is in — the other way a link is theirs to
    * read. */
   conversationsOf: (user: string) => Promise<Set<string>>;
@@ -521,13 +522,23 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         host: await deps.host(),
         // What this member could have opened themselves — never what the bot
         // can see, which is the union of everyone's invitations. A public
-        // channel is theirs by definition; their own DM with the bot arrived
-        // this turn; anything else has to have them in it, private channels and
-        // group DMs alike.
-        mayRead: async (channel) =>
-          channel === conversation.dmChannel ||
-          (await deps.publicChannel(channel)) ||
-          (await (mine ??= deps.conversationsOf(message.user))).has(channel),
+        // channel is theirs by definition; their own DM with it arrived this
+        // turn; anything else has to have them in it.
+        //
+        // A channel the bot cannot see is its own answer. Slack restricts the
+        // membership list to conversations the *bot* shares with them, so a
+        // private channel it was never invited to is one it cannot tell them
+        // about — and "you are not in that channel" would be a guess, usually
+        // wrong, about the one thing they can check for themselves.
+        mayRead: async (channel) => {
+          if (channel === conversation.dmChannel) return 'yes';
+          const seen = await deps.visibility(channel);
+          if (seen === 'public') return 'yes';
+          if (seen === 'unseen') return 'unreadable';
+          return (await (mine ??= deps.conversationsOf(message.user))).has(channel)
+            ? 'yes'
+            : 'not yours';
+        },
         self: { channel: conversation.dmChannel, root: conversation.rootThread },
         spent: () => Date.now() > by,
         reading: within,

@@ -68,6 +68,9 @@ function harness(
     notMine?: string[];
     /** Not public, but the member is in them — a private channel, a group DM. */
     privateMine?: string[];
+    /** Channels the bot cannot see at all, so it can say nothing about who is
+     * in them. */
+    unseen?: string[];
     /** The source channel thread a mention came out of, for a conversation whose
      * `source` says where to read it. `null` is one the bot cannot read. */
     channel?: ThreadMessage[] | null;
@@ -113,17 +116,24 @@ function harness(
   const selected = over.endpoint === undefined ? READY : over.endpoint;
   const deps: DmDeps = {
     budgetBytes: over.budgetBytes ?? 24_000,
-    // Two threads now: the DM the conversation lives in, and the channel a
-    // mention came out of — which is where a turn reads what it is about.
+
     host: () => Promise.resolve(over.host ?? 'acme.slack.com'),
     // Every channel a test links to is one the member could open, unless it
     // says otherwise — the refusal has its own test.
-    publicChannel: (channel) =>
-      Promise.resolve(!(over.notMine ?? []).concat(over.privateMine ?? []).includes(channel)),
+    visibility: (channel) =>
+      Promise.resolve(
+        (over.unseen ?? []).includes(channel)
+          ? 'unseen'
+          : (over.notMine ?? []).concat(over.privateMine ?? []).includes(channel)
+            ? 'private'
+            : 'public',
+      ),
     conversationsOf: () => {
       scans += 1;
       return Promise.resolve(new Set(over.privateMine ?? []));
     },
+    // Two threads: the DM the conversation lives in, and the channel a mention
+    // came out of — which is where a turn reads what it is about.
     threadReplies: (channel) => {
       if (channel !== 'D-nel')
         return Promise.resolve(over.channel === null ? undefined : (over.channel ?? []));
@@ -822,6 +832,28 @@ describe('dm message', () => {
     // Their list is read once for the message, not once per link: it is the
     // same answer, and every extra read is latency in front of the ack.
     assert.equal(scans(), 1);
+  });
+
+  it('does not tell a member they are outside a channel it simply cannot see', async () => {
+    // Slack restricts the membership list to conversations the *bot* shares
+    // with them, so a private channel it was never invited to is one it can say
+    // nothing about — and "you are not in that channel" would be a guess about
+    // the one thing they can check themselves, usually wrong.
+    const url = 'https://acme.slack.com/archives/C0UNSEEN000/p1786400100000001';
+    const { deps, posts } = harness({ existing: CONVERSATION, unseen: ['C0UNSEEN000'] });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: `see <${url}>`,
+      },
+      deps,
+    );
+    assert.match(posts[0]!.text, /I cannot read it/);
+    assert.doesNotMatch(posts[0]!.text, /not a channel you are in/);
   });
 
   it('will not read a member a channel they are not in', async () => {

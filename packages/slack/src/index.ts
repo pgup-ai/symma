@@ -402,7 +402,7 @@ const connection = socketMode({
               mark: api.mark,
               threadReplies: deps.threadReplies,
               host: api.host,
-              publicChannel: api.publicChannel,
+              visibility: api.visibility,
               conversationsOf: api.conversationsOf,
               destination: deps.destination,
               budgetBytes,

@@ -23,18 +23,23 @@ export interface SlackApi {
    * names ids that mean nothing here. Undefined where Slack would not say, which
    * leaves the check off rather than refusing every link. */
   host: () => Promise<string | undefined>;
-  /** Whether a channel is one any member of this workspace could open for
-   * themselves — a public channel, and nothing else. The bot is in whatever it
-   * was invited to, so its own reach is no guide to a member's. False for
-   * anything it cannot see either, since that is not a channel it can vouch
-   * for. */
-  publicChannel: (channel: string) => Promise<boolean>;
-  /** Every conversation this member is in — the other way a thread is theirs to
-   * read: a private channel or a group DM they are part of. Asked as their whole
-   * list rather than one channel at a time, since a person is in far fewer
-   * conversations than a busy channel has people, and a message with several
-   * links should cost one scan rather than one each. Empty where Slack would not
-   * say, which refuses rather than guesses. */
+  /** What the bot can say about a channel. `public` is one any member of this
+   * workspace could open for themselves; `private` is one it is in but cannot
+   * vouch for a member's access to; `unseen` is one it cannot read at all — a
+   * different answer, since a member may well be in a channel the bot was never
+   * invited to. */
+  visibility: (channel: string) => Promise<'public' | 'private' | 'unseen'>;
+  /** The non-public conversations this member shares with the bot — the other
+   * way a thread is theirs to read. Asked as their whole list rather than one
+   * channel at a time, since a person is in far fewer conversations than a busy
+   * channel has people, and a message with several links should cost one scan
+   * rather than one each. Public ones are left out: they are answered by
+   * `visibility` without a scan, and in a large workspace they are most of the
+   * pages. Empty where Slack would not say, which refuses rather than guesses.
+   *
+   * Only ever what the bot shares with them — Slack restricts the non-public
+   * results to the calling token's own reach — which is why a channel it cannot
+   * see is `unseen` above rather than something this could answer about. */
   conversationsOf: (user: string) => Promise<Set<string>>;
   /** A link back to a message, so a conversation lifted out of a channel says
    * which thread it came from. Undefined rather than throwing: a handoff without
@@ -422,7 +427,7 @@ export function slackApi(
   // Both answer about the workspace rather than about a turn: one call each,
   // ever. Not `memberOf` below, which a member changes by joining a channel.
   let host: Promise<string | undefined> | undefined;
-  const publicity = new Map<string, Promise<boolean>>();
+  const publicity = new Map<string, Promise<'public' | 'private' | 'unseen'>>();
 
   return {
     host: () => {
@@ -449,7 +454,7 @@ export function slackApi(
       try {
         for await (const page of quick.paginate('users.conversations', {
           user,
-          types: 'public_channel,private_channel,mpim,im',
+          types: 'private_channel,mpim',
           limit: 1000,
           exclude_archived: false,
         })) {
@@ -474,16 +479,24 @@ export function slackApi(
       }
       return theirs;
     },
-    publicChannel: (channel) => {
+    visibility: (channel) => {
       const known = publicity.get(channel);
       if (known) return known;
       const asking = quick.conversations
         .info({ channel })
-        .then((got) => got.channel?.is_channel === true && got.channel.is_private !== true)
+        .then((got) =>
+          got.channel?.is_channel === true && got.channel.is_private !== true
+            ? ('public' as const)
+            : ('private' as const),
+        )
         .catch((error: unknown) => {
           publicity.delete(channel);
-          options.log?.(`cannot vouch for ${channel}: ${slackCode(error) ?? String(error)}`);
-          return false;
+          try {
+            options.log?.(`cannot see ${channel}: ${slackCode(error) ?? String(error)}`);
+          } catch {
+            /* a caller's logger is not worth the answer */
+          }
+          return 'unseen' as const;
         });
       publicity.set(channel, asking);
       return asking;

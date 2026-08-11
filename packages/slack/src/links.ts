@@ -89,9 +89,10 @@ export async function resolveLinks(
   text: string,
   deps: {
     budgetBytes: number;
-    /** Whether this member could have read that channel themselves. The bot's
-     * own access is not the question — see the note at the top of this file. */
-    mayRead: (channel: string) => Promise<boolean>;
+    /** Whether this member could have read that channel themselves — and where
+     * not, which of the reasons it is, since the caller is the one that knows.
+     * The bot's own access is not the question; see the note at the top. */
+    mayRead: (channel: string) => Promise<'yes' | 'not yours' | 'unreadable'>;
     threadReplies: (channel: string, thread: string) => Promise<ThreadMessage[] | undefined>;
     log: (message: string) => void;
     /** This workspace's `something.slack.com`, where it is known. */
@@ -133,13 +134,11 @@ export async function resolveLinks(
     // not knowing whether the member may read it is not permission, and this
     // gate is the whole reason the bot's reach is not handed to whoever pastes
     // a link.
-    const allowed = await deps.reading(deps.mayRead(link.channel)).catch(() => false);
-    if (allowed === 'too slow') {
-      miss('too slow');
-      continue;
-    }
-    if (!allowed) {
-      miss('not yours');
+    const allowed = await deps
+      .reading(deps.mayRead(link.channel))
+      .catch(() => 'not yours' as const);
+    if (allowed !== 'yes') {
+      miss(allowed);
       continue;
     }
     fetches += 1;

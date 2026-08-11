@@ -34,10 +34,10 @@ function resolver(over: {
     logged,
     deps: {
       budgetBytes: over.budgetBytes ?? 24_000,
-      mayRead: (channel: string) =>
+      mayRead: (channel: string): Promise<'yes' | 'not yours' | 'unreadable'> =>
         over.mayReadThrows
           ? Promise.reject(new Error('missing_scope'))
-          : Promise.resolve(over.mine ? over.mine.includes(channel) : true),
+          : Promise.resolve(!over.mine || over.mine.includes(channel) ? 'yes' : 'not yours'),
       spent: () => over.spent === true,
       reading: <T>(read: Promise<T>): Promise<T | 'too slow'> =>
         over.slowRead ? Promise.resolve('too slow' as const) : read,
