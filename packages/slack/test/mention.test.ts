@@ -106,10 +106,9 @@ describe('app_mention', () => {
   });
 
   it('leaves no turn running behind it, in any of the ways it can end', async () => {
-    // A mention runs nothing — it opens the thread and waits — so the row it
-    // took is this event's idempotency record. Left open it reads as work in
-    // flight, and the member's first message in the thread they were just
-    // handed is refused as busy until the stale window retires it.
+    // Left open, the row reads as work in flight, and the member's first message
+    // in the thread they were just handed is refused as busy for the whole stale
+    // window.
     const existing = { id: 'conv-1', dmChannel: 'D-nel', rootThread: '200.0' };
     for (const over of [{}, { existing }, { rootThread: '999.0' }]) {
       const { deps, closed } = harness(over);

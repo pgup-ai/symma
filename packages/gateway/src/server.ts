@@ -669,10 +669,9 @@ setInterval(() => {
  * body on the server and nothing else would ever end it — a byte cap alone lets
  * a client hold a connection by sending under it, slowly, forever. */
 const MAX_PAIR_BYTES = 4096;
-/** The bot's own bodies, which are behind the shared secret rather than open to
- * anyone. A model roster carries the agent's sentence about each entry and is
- * the first of these measured in kilobytes — under the pairing cap it was
- * refused whole, and the member got a picker that never filled. */
+/** The bot's own bodies, which arrive behind the shared secret rather than from
+ * anyone. Room for a model roster, the first of these measured in kilobytes:
+ * under the pairing cap it was refused whole and the picker never filled. */
 const MAX_BOT_BYTES = 64 * 1024;
 const PAIR_BODY_MS = Number(process.env.SYMMA_GATEWAY_PAIR_BODY_MS) || 5_000;
 async function readBody(

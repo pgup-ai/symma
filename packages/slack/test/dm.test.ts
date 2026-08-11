@@ -331,9 +331,8 @@ describe('dm message', () => {
       ),
       'still working',
     );
-    // Scoped out loud: the rule is per thread, and a member reading "still
-    // working" in a thread they just opened has no way to tell what is running
-    // or that anything else can run beside it.
+    // Which thread, said out loud: the rule is per thread, and the refusal is
+    // unreadable to a member who cannot tell what is running or where.
     assert.match(posts[0]!.text, /in this thread/);
     assert.deepEqual(runs, []);
     // And it costs the gateway no credential to find that out.
@@ -528,8 +527,6 @@ describe('dm message', () => {
       { channel: 'D-nel', ts: '250.0', threadTs: '200.0', eventId: 'Ev-1', text: 'go' },
       deps,
     );
-    // And comes to rest on the scope alone: the ellipsis, and anything said about
-    // a turn in flight, have nothing left to be about once the answer is here.
     assert.deepEqual(
       timeline.filter((entry) => !/^(mark|finish):/.test(entry)),
       [`${posts[0]!.text}\n\n_Reading dm.ts_`, atRest(posts[0]!.text)],
@@ -862,7 +859,7 @@ describe('dm message', () => {
     await handleDm({ channel: 'D-nel', ts: '250.0', eventId: 'Ev-1', text: 'what broke?' }, deps);
 
     assert.match(posts[0]!.text, /^`symma` ·/);
-    assert.doesNotMatch(posts[0]!.text, /no access to your files/);
+    assert.doesNotMatch(posts[0]!.text, /cannot see your files/);
     assert.equal(runs[0]!.workspace, 'ws-abc123');
     // The gateway cannot prefer this thread's project without being told which
     // thread is asking.

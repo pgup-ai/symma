@@ -1775,8 +1775,8 @@ describe('tenancy', () => {
       }
 
       // A real roster carries the agent's sentence about each model and runs to
-      // kilobytes; under the pairing cap the whole POST was refused and the
-      // picker never filled, with only a log line on the bot to say so.
+      // kilobytes. Sized against the pairing cap on purpose: under it the whole
+      // POST was refused, and the picker never filled.
       const wordy = Array.from({ length: 20 }, (_, i) => ({
         modelId: `gpt-5.6-model-${String(i)}[high]`,
         name: `Model ${String(i)}`,

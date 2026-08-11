@@ -461,13 +461,13 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const attachments = attached.flatMap((entry) => (entry.ok ? [entry.file] : []));
 
   // A run takes minutes and Slack gives a bot no typing indicator, so this
-  // message is what says the question landed — and §4 wants it to say the scope
-  // rather than leave it guessed at: where the turn ran and what it could do
-  // there. A status line, not a sentence, because this is what the message reads
-  // as at rest above a finished answer. On every turn, since the mode is theirs
-  // to change mid-thread and one that ran write-capable has to say so on its own
-  // answer. The mode is named even when unset: read-only is the floor's truth
-  // for a workspace turn that never picked one.
+  // message is what says the question landed — and §4 wants it to carry the
+  // scope rather than leave it guessed at. A status line rather than a sentence
+  // because it is also what the message reads as at rest, above the finished
+  // answer. Every turn, since the mode is theirs to change mid-thread and the
+  // turn that first ran write-capable is the one that has to say so. Named even
+  // when unset: read-only is the floor's truth for a workspace turn that never
+  // picked one.
   //
   // Through `plainly` like every other name in this message: a backtick closes
   // the span it sits in, and a `<` opens an entity that renders as a mention
@@ -484,10 +484,8 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   const reading = attachments.length
     ? `Reading ${attachments.map((file) => `\`${plainly(file.name)}\``).join(', ')}.`
     : undefined;
-  // What the acknowledgement says beyond the scope, and only while the turn is
-  // out: a resume that may not happen, a file list being read. Kept apart
-  // because the cleanup below comes to rest on the scope alone, and neither of
-  // these is about anything once the answer is here.
+  // Only true while the turn is out, which is why the cleanup below leaves it
+  // behind rather than restoring the whole acknowledgement.
   const inFlight = [note, reading].filter(Boolean).join(' ');
   // The trailing ellipsis is the standing "still going" cue, so it belongs on
   // the end of whatever the acknowledgement turned out to be, not on the scope.
@@ -658,16 +656,15 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       deps.log(`cursor not moved: ${String(error)}`);
     });
   await deps.finish(conversation.id, turn, 'completed', ran);
-  // Slack cannot fold the narration away the way a terminal does, so once the
-  // answer is here the last step, the ellipsis and a note about a resume that
-  // has already happened are all only in the way. What is left is the scope,
-  // which is the part still worth reading above a finished answer. Queued behind
-  // the narration it is undoing, and left
-  // until after the turn is closed: a `chat.update` Slack is slow to take would
+  // Slack cannot fold the narration away the way a terminal does, so the last
+  // step, the ellipsis and a resume that has already happened are all in the way
+  // once the answer is here — leaving the scope, which is the part still worth
+  // reading above it. Queued behind the narration it is undoing, and left until
+  // after the turn is closed: a `chat.update` Slack is slow to take would
   // otherwise hold the turn open, and a member's next message would be refused
   // for a line nobody is waiting on. Skipped where the message already says only
-  // the scope, so a quiet turn still spends nothing. Fail-open like `narrate`,
-  // and waited on to a deadline rather than indefinitely — see `TIDY_MS`.
+  // the scope, so a quiet turn spends nothing. Fail-open like `narrate`, and
+  // waited on to a deadline rather than indefinitely — see `TIDY_MS`.
   if (lastShown || inFlight) {
     let deadline: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
