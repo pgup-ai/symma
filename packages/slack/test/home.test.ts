@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import type { TurnTarget } from '@symma/protocol';
 
 import { homeBlocks, modelPrompt } from '../src/home.js';
-import { DEFAULT_AGENT_ACTION, DEFAULT_MODEL_ACTION } from '../src/slack-api.js';
+import { DEFAULT_AGENT_ACTION, DEFAULT_MODEL_ACTION, DISCONNECT_ACTION } from '../src/slack-api.js';
 
 const paired: TurnTarget = {
   endpoint: 'e1',
@@ -91,7 +91,11 @@ describe('the surfaces with no thread under them', () => {
       text(homeBlocks(paired, { linked: false, url: 'https://slack.test/oauth' })),
       /https:\/\/slack.test\/oauth/,
     );
+    // Linked, they get the way back out: a credential granted with a button
+    // needs one to hand it back, and it is the only control that recovers a tab
+    // still claiming they post as themselves after an unlink failed.
     assert.match(text(homeBlocks(paired, { linked: true })), /go out as you/);
+    assert.match(text(homeBlocks(paired, { linked: true })), new RegExp(DISCONNECT_ACTION));
     const off = text(homeBlocks(paired, { linked: false }));
     assert.doesNotMatch(off, /as you|as yourself/);
     assert.equal(text(homeBlocks(paired)), off, 'no linking config reads the same as not linked');
@@ -102,7 +106,8 @@ describe('the surfaces with no thread under them', () => {
     assert.match(text(homeBlocks({ ...paired, state: 'asleep' })), /not reachable/);
     // A machine mid-turn is attached and working — "start the companion" would
     // send them to restart the thing that is answering them.
-    assert.match(text(homeBlocks({ ...paired, state: 'busy' })), /working on your last question/);
+    // And "busy" is every session it can run being in use, not one question.
+    assert.match(text(homeBlocks({ ...paired, state: 'busy' })), /running everything it can/);
     // A machine offering no approved project still runs, in a temp directory —
     // so the row says that rather than going missing.
     assert.match(

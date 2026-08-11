@@ -235,12 +235,13 @@ export interface Store {
    * linked again between the refusal and this would otherwise lose the token
    * they just granted, silently. False says the stored token is no longer the
    * refused one, which is that member — still linked, and not to be told
-   * otherwise.
+   * otherwise. Naming none is a member disconnecting on purpose, where whatever
+   * is stored is exactly what they mean.
    *
    * Deliberately not gated on the member being active, unlike the read and the
    * write: this destroys a credential, and one left on a deactivated row is the
    * case that most wants destroying. */
-  forgetSlackUserToken(owner: Owner, token: string): Promise<boolean>;
+  forgetSlackUserToken(owner: Owner, token?: string): Promise<boolean>;
   /** The agent this member's turns run on, of the ones their machine offers.
    * Undefined until they pick, and served only while it is still offered. */
   defaultAgentFor(owner: Owner): Promise<string | undefined>;
@@ -774,8 +775,10 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
     },
     async forgetSlackUserToken(owner, token) {
       const { rowCount } = await pool.query(
-        `UPDATE users SET slack_user_token = NULL WHERE id = $1 AND slack_user_token = $2`,
-        [owner, token],
+        `UPDATE users SET slack_user_token = NULL
+          WHERE id = $1 AND slack_user_token IS NOT NULL
+            AND ($2::text IS NULL OR slack_user_token = $2)`,
+        [owner, token ?? null],
       );
       return rowCount === 1;
     },

@@ -69,8 +69,9 @@ nothing has to be shed with it because a model is served only to the agent it
 was picked under and a resume only to the one it was minted under. An answer
 shared back goes out as the member themselves once they have linked their Slack
 account (§5): Slack decides authorship by token type, so the gateway holds one
-`chat:write` user token per member and hands it to the bot for that one post.
-Without the link it is the bot posting with their name in front, as before.
+`chat:write` user token per member and hands it to the bot for that one post,
+which they can hand back from the same tab. Without the link it is the bot
+posting with their name in front, as before.
 
 | package           | what it is                                                                                                                                                                         | depends on                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |

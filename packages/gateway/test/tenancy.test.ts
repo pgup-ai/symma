@@ -436,6 +436,13 @@ describe('tenancy', () => {
       assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-older'), false);
       assert.equal(await store.slackUserToken(carol.owner), 'xoxp-carol');
       assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-carol'), true);
+      // Naming none is a member disconnecting on purpose: whatever is stored is
+      // what they meant, including one Slack stopped honouring that the compare
+      // above could not drop. False where there was nothing to hand back.
+      assert.equal(await store.forgetSlackUserToken(carol.owner), false);
+      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
+      assert.equal(await store.forgetSlackUserToken(carol.owner), true);
+      assert.equal(await store.slackUserToken(carol.owner), undefined);
       assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
 
       const doomed = await store.deactivateUser('other', 'carol');

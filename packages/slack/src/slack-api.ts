@@ -199,6 +199,9 @@ export const DEFAULT_MODEL_ACTION = 'set_default_model';
 /** Which of their machine's agents a member works with. The home tab only —
  * it is a choice about the machine, not about a thread. */
 export const DEFAULT_AGENT_ACTION = 'set_default_agent';
+/** Handing back the Slack token they granted. A credential taken with a button
+ * needs one to give it up again. */
+export const DISCONNECT_ACTION = 'disconnect_slack_account';
 
 /** Slack's static_select caps: options per select, characters per value. */
 const PICKER_OPTION_LIMIT = 100;

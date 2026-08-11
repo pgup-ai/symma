@@ -24,6 +24,7 @@ import {
   slackApi,
   DEFAULT_AGENT_ACTION,
   DEFAULT_MODEL_ACTION,
+  DISCONNECT_ACTION,
   MODE_ACTION,
   MODEL_ACTION,
   SHARE_ACTION,
@@ -144,12 +145,17 @@ const api = slackApi(botToken, { log });
 const memberTarget = async (user: string): Promise<TurnTarget | undefined> =>
   readTurnTarget(await ask<Partial<TurnTarget>>('/api/slack/endpoint', { user }));
 
-/** The home tab, as it stands for this member right now. Both reads or neither:
- * a tab that renders half of itself is worse than one that failed. */
+/** The home tab, as it stands for this member right now. The linking read is
+ * allowed to fail on its own — a gateway that predates it 404s, and the tab is
+ * a machine, an agent and a model besides. Losing all of that to the one card
+ * that might not be on offer anyway is the wrong trade. */
 const home = async (user: string): Promise<Record<string, unknown>[]> => {
   const [target, linking] = await Promise.all([
     memberTarget(user),
-    ask<Partial<Linking>>('/api/slack/link', { user }),
+    ask<Partial<Linking>>('/api/slack/link', { user }).catch((error: unknown): Partial<Linking> => {
+      log(`linking not offered to ${user}: ${String(error)}`);
+      return {};
+    }),
   ]);
   return homeBlocks(target, {
     linked: linking.linked === true,
@@ -445,6 +451,22 @@ const connection = socketMode({
           selected_option?: { value?: unknown };
         }[];
       };
+      // Handing the token back. No conversation and no channel — the home tab is
+      // not one — so it is answered by redrawing the tab it was pressed on.
+      if (actions?.some((a) => a.action_id === DISCONNECT_ACTION)) {
+        const who = user?.id;
+        if (typeof who !== 'string') return;
+        await announcing(who, 'disconnect', async () => {
+          await ask('/api/slack/unlink', { user: who });
+          try {
+            await api.publishHome(who, await home(who));
+          } catch (error) {
+            log(`disconnected, but the home tab did not redraw for ${who}: ${String(error)}`);
+          }
+          return 'slack account disconnected';
+        });
+        return;
+      }
       // Nothing is shed with an agent change: a model is served only back to the
       // agent it was picked under, a resume only to the one it was minted under.
       const asAgent = actions?.find((a) => a.action_id === DEFAULT_AGENT_ACTION)?.selected_option

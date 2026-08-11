@@ -1135,11 +1135,16 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // The token Slack refused, dropped only if it is still the stored one: a
       // member who linked again in between would otherwise lose the grant they
       // had just made, with nothing saying so.
+      // Named, it is the token a share was refused with. Absent, it is a member
+      // disconnecting from the home tab, where whatever is stored is what they
+      // mean — including one Slack stopped honouring that we failed to drop.
       const { token } = body as { token?: unknown };
-      if (!str(token)) return sendJson(res, 400, { error: 'request' });
+      if (token !== undefined && !str(token)) return sendJson(res, 400, { error: 'request' });
       // Answered, not assumed: nothing cleared means they are linked to
       // something newer, and the bot has a sentence that turns on which it was.
-      return sendJson(res, 200, { forgotten: await store.forgetSlackUserToken(owner, token) });
+      return sendJson(res, 200, {
+        forgotten: await store.forgetSlackUserToken(owner, str(token) ? token : undefined),
+      });
     }
     if (url.pathname === '/api/slack/user-token') {
       // The member's own credential, handed to the bot for one post. The bot

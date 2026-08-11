@@ -11,7 +11,7 @@
  */
 import type { TurnTarget } from '@symma/protocol';
 
-import { agentSelect, modelSelect, plainly } from './slack-api.js';
+import { agentSelect, modelSelect, plainly, DISCONNECT_ACTION } from './slack-api.js';
 
 const context = (text: string): Record<string, unknown> => ({
   type: 'context',
@@ -108,10 +108,11 @@ export function homeBlocks(
     section(
       target.state === 'ready'
         ? `⌁ *${machine}* is ready${target.agent ? `, running \`${plainly(target.agent)}\`` : ''}`
-        : // A machine mid-turn is attached and working, so telling them to start
-          // the companion sends them to restart the thing answering them.
+        : // Attached and at capacity, so telling them to start the companion sends
+          // them to restart the thing that is answering them. Not "your last
+          // question": the state is every session it can run being in use.
           target.state === 'busy'
-          ? `⌁ *${machine}* is working on your last question`
+          ? `⌁ *${machine}* is busy, running everything it can at once`
           : `⌁ *${machine}* is not reachable — start the companion and it will come back`,
     ),
     // A machine offering no approved project is not a broken one: conversations
@@ -155,7 +156,24 @@ export function homeBlocks(
 
   // §5's "attributable to whoever approved it", offered as what it is: their own
   // posting rights, for the one thing they already press a button to do.
-  if (linking?.linked) blocks.push(context('◆ Answers you share go out as you.'));
+  if (linking?.linked)
+    blocks.push(
+      { type: 'divider' },
+      section('*◆ Answers you share go out as you*'),
+      // The way back. A credential they granted with a button needs one to take
+      // it away — and it is the only control that fixes a token Slack has
+      // stopped honouring while this tab still believes in it.
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Disconnect' },
+            action_id: DISCONNECT_ACTION,
+          },
+        ],
+      },
+    );
   else if (linking?.url)
     blocks.push(
       { type: 'divider' },
