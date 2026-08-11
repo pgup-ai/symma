@@ -7,10 +7,6 @@
  * the bot leaves unresolved arrives as a bare URL, and the answer becomes the
  * agent explaining what it cannot open. The bot is the one holding a token for
  * this workspace, so fetching is its job.
- *
- * Rides the prompt, not the context, and that is load-bearing: the driver drops
- * context when a resume is honoured, since the session already has its thread —
- * but a link pasted into *this* message is new to that session too.
  */
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
