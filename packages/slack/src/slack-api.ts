@@ -37,9 +37,14 @@ export interface SlackApi {
    * `visibility` without a scan, and in a large workspace they are most of the
    * pages. Empty where Slack would not say, which refuses rather than guesses.
    *
-   * Only ever what the bot shares with them — Slack restricts the non-public
-   * results to the calling token's own reach — which is why a channel it cannot
-   * see is `unseen` above rather than something this could answer about.
+   * The intersection, and that is the property the whole access rule rests on:
+   * "Using a bot user token, this method returns the channels and conversations
+   * your bot is party to. Specifying a `user` parameter filters to conversations
+   * your bot shares with that user" (docs.slack.dev, users.conversations,
+   * checked 2026-08). So a channel here is one they are both in — the member
+   * could have read it, and the bot can fetch it — and a channel the bot cannot
+   * see never appears, which is why `visibility` answers `unseen` for those
+   * rather than leaving them to this.
    *
    * Undefined where the scan failed, which is not an empty list: one says they
    * are in nothing, the other that nobody asked successfully, and a member told
