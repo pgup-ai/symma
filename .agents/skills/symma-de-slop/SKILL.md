@@ -9,10 +9,10 @@ Use this skill with a hostile review mindset after implementation and before fin
 
 ## Workflow
 
-1. Inspect the exact diff: `git status --short --branch`, `git diff --stat`, `git diff --check`, `git diff -- <changed paths>`, and every untracked file. When commits exist, also inspect `git diff origin/main...HEAD`.
+1. Inspect the exact diff: `git status --short --branch`, `git diff --stat`, `git diff --check`, `git diff -- <changed paths>`, and every untracked file. When commits exist, also inspect `git diff <base>...HEAD` against the PR base (usually `origin/main`).
 2. Review only branch changes. Preserve unrelated user work.
 3. Adjudicate comments block by block; a diff-wide "comments look fine" is not a verdict:
-   - Enumerate every added or modified comment block first. Starting point: `git diff -U0 -- '*.ts' | grep -nE '^[+-][[:space:]]*(//|/\*|\*)'`; the unit of judgment is each match's full enclosing block in the file, not the diff fragment.
+   - Enumerate every added or modified comment block first. Starting point: `git diff -U0 -- '*.ts' | grep -nE '^[+-][[:space:]]*(//|/\*|\*)'`; the unit of judgment is each match's full enclosing block in the file, not the diff fragment. A fully deleted block is already `cut`; paired `-`/`+` matches on the same block are one adjudication, not two.
    - Record one verdict per block: `cut` (the default), `rewrite` (true rationale at excess length — compress to the one or two lines stating what the code cannot say), or `keep` (concise and non-obvious). "It explains intent" justifies content, never length.
    - Restating what the code does, narrating what the old code did, or describing sibling code paths never justifies a keep.
 4. Adjudicate added test cases the same way; coverage is never a keep reason (body edits inside existing cases get ordinary diff review, not the cut default):
