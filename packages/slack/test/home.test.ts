@@ -75,6 +75,19 @@ describe('the surfaces with no thread under them', () => {
     assert.equal((shown.initial_option as { value: string }).value, JSON.stringify({ m: 'codex' }));
   });
 
+  it('offers to post as them, says so once it can, and nothing where it cannot', () => {
+    // Three states, and the third is every deployment without Slack app
+    // credentials: an offer that cannot be taken up is worse than no offer.
+    assert.match(
+      text(homeBlocks(paired, { linked: false, url: 'https://slack.test/oauth' })),
+      /https:\/\/slack.test\/oauth/,
+    );
+    assert.match(text(homeBlocks(paired, { linked: true })), /go out as you/);
+    const off = text(homeBlocks(paired, { linked: false }));
+    assert.doesNotMatch(off, /as you|as yourself/);
+    assert.equal(text(homeBlocks(paired)), off, 'no linking config reads the same as not linked');
+  });
+
   it('renders the setup as it is, not as it would read best', () => {
     assert.match(text(homeBlocks(paired)), /start in `symma`/);
     assert.match(text(homeBlocks({ ...paired, state: 'asleep' })), /not reachable/);

@@ -14,6 +14,9 @@ describe('slack account linking', () => {
     // A link sitting in a browser history is not a standing offer to hand over
     // posting rights.
     assert.equal(readLinkState(SECRET, state, NOW + LINK_STATE_MS), undefined);
+    // And a clock that went backwards does not extend it: a state minted ahead
+    // of this one would otherwise stay good for ten minutes past its own age.
+    assert.equal(readLinkState(SECRET, linkState(SECRET, 'owner-1', NOW + 1), NOW), undefined);
   });
 
   it('refuses a state it did not mint', () => {
@@ -24,6 +27,7 @@ describe('slack account linking', () => {
     for (const state of [
       `${forged}.${'A'.repeat(43)}`, // a signature of the right shape
       forged, // and none at all
+      '', // and no state at all, which is a callback nobody came through
       linkState('another-gateway', 'owner-2', NOW),
       // A real signature of ours, over a body naming somebody else.
       `${forged}.${linkState(SECRET, 'owner-1', NOW).split('.')[1]!}`,

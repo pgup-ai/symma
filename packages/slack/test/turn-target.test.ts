@@ -19,6 +19,7 @@ describe('turn target', () => {
         mode: 'agent',
         model: 'gpt-5.6-sol[high]',
         models: [{ modelId: 'gpt-5.6-sol[high]' }],
+        agents: ['codex', 'kilo'],
         resume: 'acp-1',
       }),
       {
@@ -32,6 +33,7 @@ describe('turn target', () => {
         mode: 'agent',
         model: 'gpt-5.6-sol[high]',
         models: [{ modelId: 'gpt-5.6-sol[high]' }],
+        agents: ['codex', 'kilo'],
         resume: 'acp-1',
       },
     );

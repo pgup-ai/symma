@@ -455,9 +455,13 @@ const connection = socketMode({
         if (typeof who !== 'string' || !agent) return;
         await announcing(who, 'default agent', async () => {
           await ask('/api/slack/default-agent', { user: who, agent });
-          await api
-            .publishHome(who, await home(who))
-            .catch((error: unknown) => log(`home for ${who} failed: ${String(error)}`));
+          try {
+            await api.publishHome(who, await home(who));
+          } catch (error) {
+            // The pick is stored; a tab that would not redraw is not a reason to
+            // tell them it did not happen. The next open renders it anyway.
+            log(`agent set, but the home tab did not redraw for ${who}: ${String(error)}`);
+          }
           return `default agent ${agent}`;
         });
         return;
@@ -561,6 +565,9 @@ const connection = socketMode({
             // a member's credential between the two clicks that need it.
             asMember: async () =>
               (await ask<{ token?: string }>('/api/slack/user-token', { user: who })).token,
+            unlink: async () => {
+              await ask('/api/slack/unlink', { user: who });
+            },
             share: api.share,
             post: api.post,
             settle: api.settle,

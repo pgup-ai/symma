@@ -19,17 +19,26 @@ function harness(
     why?: Unusable;
     /** The member's own Slack token, when they have linked their account. */
     asMember?: string;
+    /** Slack refuses that token, as it does once it has been revoked. */
+    tokenDead?: boolean;
   } = {},
 ) {
   const shared: { channel: string; thread: string; text: string; asMember?: string }[] = [];
+  let unlinked = 0;
   const settled: { channel: string; ts: string; text: string }[] = [];
   const posts: { channel: string; text: string; threadTs?: string }[] = [];
   const deps: ShareDeps = {
     destination: () =>
       Promise.resolve('to' in over ? over.to : { channel: 'C-incidents', thread: '100.0' }),
     asMember: () => Promise.resolve(over.asMember),
+    unlink: () => {
+      unlinked += 1;
+      return Promise.resolve();
+    },
     share: (channel, thread, text, asMember) => {
       shared.push({ channel, thread, text, ...(asMember ? { asMember } : {}) });
+      if (over.tokenDead && asMember)
+        return Promise.resolve({ ok: false as const, why: 'author' as const });
       return Promise.resolve(over.why ? { ok: false as const, why: over.why } : { ok: true });
     },
     settle: (channel, ts, text) => {
@@ -41,7 +50,7 @@ function harness(
       return Promise.resolve(undefined);
     },
   };
-  return { deps, shared, posts, settled };
+  return { deps, shared, posts, settled, unlinked: () => unlinked };
 }
 
 describe('share back', () => {
@@ -59,6 +68,31 @@ describe('share back', () => {
         asMember: 'xoxp-nel',
       },
     ]);
+  });
+
+  it('publishes as the bot when Slack has stopped honouring their token', async () => {
+    // Revoked, or an install replaced. The answer they approved is worth more
+    // than the name on it, so it goes out as the bot with them named — and the
+    // dead token is forgotten, or every later share pays for the same refusal
+    // and the home tab goes on claiming they post as themselves.
+    const { deps, shared, unlinked } = harness({ asMember: 'xoxp-nel', tokenDead: true });
+    assert.equal(await handleShare(CLICK, deps), 'shared');
+    assert.equal(unlinked(), 1);
+    assert.deepEqual(
+      shared.map((entry) => [entry.asMember, entry.text]),
+      [
+        ['xoxp-nel', 'the deploy fails on a missing env var'],
+        [undefined, '<@U-nel> shared:\n\nthe deploy fails on a missing env var'],
+      ],
+    );
+  });
+
+  it('blames the bot for what the bot was refused, after falling back to it', async () => {
+    // The retry is the bot's post. "You are not in that channel" would send them
+    // looking at their own membership for a problem that is not theirs.
+    const { deps, posts } = harness({ asMember: 'xoxp-nel', tokenDead: true, why: 'removed' });
+    assert.equal(await handleShare(CLICK, deps), 'kept: removed');
+    assert.match(posts[0]!.text, /I am not in that channel/);
   });
 
   it("tells them about their own membership, not the bot's", async () => {

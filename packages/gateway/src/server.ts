@@ -73,7 +73,13 @@ const botToken = process.env.SYMMA_GATEWAY_BOT_TOKEN?.trim() || '';
 const slackClientId = process.env.SYMMA_SLACK_CLIENT_ID?.trim() || '';
 const slackClientSecret = process.env.SYMMA_SLACK_CLIENT_SECRET?.trim() || '';
 const publicUrl = (process.env.SYMMA_GATEWAY_PUBLIC_URL?.trim() || '').replace(/\/+$/, '');
-const linkingEnabled = Boolean(slackClientId && slackClientSecret && publicUrl);
+// Everything the rest of the Slack surface needs, plus an https origin, which is
+// the only kind Slack redirects to. The bot secret signs the state that travels
+// through Slack, so half-configured is an empty HMAC key and a callback that
+// 500s — off is a working deployment that simply does not offer this.
+const linkingEnabled = Boolean(
+  slackClientId && slackClientSecret && databaseUrl && botToken && publicUrl.startsWith('https://'),
+);
 const redirectUri = `${publicUrl}/slack/oauth/callback`;
 // A database is authentication too, so it unlocks the configured bind exactly
 // as the shared token does — otherwise a multi-tenant deployment has to invent
@@ -1118,6 +1124,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       authorize.searchParams.set('redirect_uri', redirectUri);
       authorize.searchParams.set('state', linkState(botToken, owner, Date.now()));
       return sendJson(res, 200, { url: authorize.toString(), linked });
+    }
+    if (url.pathname === '/api/slack/unlink') {
+      // Slack stopped honouring it, which the bot finds out by being refused.
+      await store.setSlackUserToken(owner, null);
+      return sendJson(res, 200, {});
     }
     if (url.pathname === '/api/slack/user-token') {
       // The member's own credential, handed to the bot for one post. The bot

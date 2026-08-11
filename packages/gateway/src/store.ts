@@ -227,7 +227,8 @@ export interface Store {
   /** The member's own Slack token, for publishing as them rather than as the
    * bot. Undefined until they link, which is what everything falls back from. */
   slackUserToken(owner: Owner): Promise<string | undefined>;
-  setSlackUserToken(owner: Owner, token: string): Promise<void>;
+  /** `null` unlinks, which is what a token Slack has stopped honouring is. */
+  setSlackUserToken(owner: Owner, token: string | null): Promise<void>;
   /** The agent this member's turns run on, of the ones their machine offers.
    * Undefined until they pick, and served only while it is still offered. */
   defaultAgentFor(owner: Owner): Promise<string | undefined>;
@@ -751,7 +752,12 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
       return row?.token ?? undefined;
     },
     async setSlackUserToken(owner, token) {
-      await pool.query(`UPDATE users SET slack_user_token = $2 WHERE id = $1`, [owner, token]);
+      // Active members only, or a callback that raced deactivation writes the
+      // credential back in behind the cleanup that just removed it.
+      await pool.query(
+        `UPDATE users SET slack_user_token = $2 WHERE id = $1 AND deactivated_at IS NULL`,
+        [owner, token],
+      );
     },
     async defaultAgentFor(owner) {
       const row = await one<{ agent: string | null }>(
@@ -952,7 +958,11 @@ export async function openStore(url: string, schemaPath: string): Promise<Store>
         );
         await client.query(
           `WITH target AS (
-           UPDATE users u SET deactivated_at = now()
+           -- The Slack token goes with the membership rather than merely out of
+           -- reach of the read that guards on deactivated_at: it is a live
+           -- posting credential of theirs, and the point of removing someone is
+           -- that it stops existing, not that it stops being served.
+           UPDATE users u SET deactivated_at = now(), slack_user_token = NULL
              FROM workspaces w
             WHERE w.id = u.workspace_id AND w.slack_team_id = $1 AND u.slack_user_id = $2
            RETURNING u.id

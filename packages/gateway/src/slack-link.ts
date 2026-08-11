@@ -29,6 +29,9 @@ export function readLinkState(secret: string, state: string, now: number): strin
   // and a forged state is exactly where that arrives.
   if (offered.length !== expected.length || !timingSafeEqual(offered, expected)) return undefined;
   const [owner, at] = Buffer.from(body, 'base64url').toString().split('.');
-  if (!owner || !at || !(now - Number(at) < LINK_STATE_MS)) return undefined;
+  // Both ends of the window: a state minted ahead of this clock would otherwise
+  // outlive the ten minutes by however far the two disagree.
+  const age = now - Number(at);
+  if (!owner || !at || !(age >= 0 && age < LINK_STATE_MS)) return undefined;
   return owner;
 }

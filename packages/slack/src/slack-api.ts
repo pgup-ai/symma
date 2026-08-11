@@ -81,8 +81,10 @@ export interface SlackApi {
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
 }
 
-/** The ways a destination stops being one, as §5 lists them. */
-export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope';
+/** The ways a destination stops being one, as §5 lists them — plus `author`,
+ * which is not about the destination at all: the member's own token has stopped
+ * working, and the same post as the bot would land. */
+export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope' | 'author';
 
 /** A run takes minutes, and Slack offers no way to say so in the composer — so
  * the member's own message carries it. */
@@ -93,6 +95,10 @@ const MARK: Record<MarkState, string> = {
   done: 'white_check_mark',
   failed: 'x',
 };
+
+/** Slack's names for a token it will not honour any more: revoked from the
+ * member's side, or an app whose install was replaced. */
+const DEAD_TOKEN = new Set(['invalid_auth', 'token_revoked', 'account_inactive', 'not_authed']);
 
 const UNUSABLE: Record<string, Unusable> = {
   is_archived: 'archived',
@@ -599,7 +605,11 @@ export function slackApi(
         await author.chat.postMessage({ channel, text, thread_ts: thread });
         return { ok: true };
       } catch (error) {
-        const why = UNUSABLE[slackCode(error) ?? ''];
+        const code = slackCode(error) ?? '';
+        // A member's token Slack has stopped honouring is not a broken bot and
+        // not a bad destination: the answer can still go, just not as them.
+        if (asMember && DEAD_TOKEN.has(code)) return { ok: false, why: 'author' };
+        const why = UNUSABLE[code];
         // Only the ways a destination goes bad are answers. Anything else is
         // this bot being broken, which the caller reports as a failure.
         if (!why) throw error;
