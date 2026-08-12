@@ -26,7 +26,7 @@ import {
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
 import { LINKS_PER_MESSAGE, resolveLinks, slackLinks, type LinkMiss } from './links.js';
-import { plainly, type MarkState, type UpdateBudget } from './slack-api.js';
+import { plainly, type MarkState, type TurnStream, type UpdateBudget } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
@@ -112,6 +112,11 @@ export interface RunSpec {
  * take that budget on its own before a second turn had asked for any. Long
  * enough to be cheap, short enough that a run still looks like it is moving. */
 const PROGRESS_MIN_MS = 10_000;
+
+/** The stream's own floor, shorter: a card flipping every few seconds is what
+ * "live" means, `chat.appendStream` allows twice what `chat.update` does, and a
+ * card is a line in a list rather than a rewrite of the whole message. */
+const STREAM_MIN_MS = 3_000;
 
 /** How long the answer's own handler will wait on the update that tidies the
  * acknowledgement, for a line the member is not waiting for. Landing late is
@@ -333,6 +338,13 @@ export interface DmDeps {
    * `chat.update` per app rather than per channel, so this is the ceiling a
    * per-turn interval cannot be. */
   updates: UpdateBudget;
+  /** Room on the stream — `chat.appendStream` is its own pool, shared the same
+   * way. */
+  appends: UpdateBudget;
+  /** The thinking-steps stream for this turn's narration, opened on the first
+   * step. Undefined where the workspace refuses one, and the turn narrates onto
+   * the acknowledgement instead. */
+  stream: (channel: string, thread: string, first: string) => Promise<TurnStream | undefined>;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -647,63 +659,104 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  // The agent's own narration, rewritten onto the acknowledgement it already
-  // posted — Slack gives a bot no typing indicator, so the message is the only
-  // place a long turn can show it is still moving. Throttled because
-  // `chat.update` is rate-limited and a busy turn narrates far faster than
-  // anyone reads; fails open, since this is a hint and not the answer.
+  // The agent's own narration — Slack gives a bot no typing indicator, so this
+  // is the only place a long turn can show it is still moving. Streamed as task
+  // cards under the acknowledgement where the workspace serves a stream, and
+  // rewritten onto the acknowledgement itself where it does not. Both throttled
+  // and budgeted: either pool is shared by every turn at once, and a busy turn
+  // narrates far faster than anyone reads. Fails open throughout — a hint, not
+  // the answer.
   //
   // Queued rather than concurrent: two updates in flight on one message can land
   // in either order, and the cleanup below losing that race would leave a step
   // sitting above the answer — the thing it is there to take away.
   let lastShown = 0;
   let reserved: number | undefined;
+  let ackWritten = false;
+  let steps: Promise<TurnStream | undefined> | undefined;
+  let lastStep: string | undefined;
+  let fellBack = false;
   let updating = Promise.resolve();
   const narrate = (title: string): void => {
     const now = Date.now();
-    if (now - lastShown < PROGRESS_MIN_MS) return;
-    // Asked after this turn's own floor, so a quiet turn does not spend the
-    // workspace's budget just by being asked, and refused rather than queued:
-    // narration is only worth anything while it is current. Two on the first
-    // step, because the cleanup below is not optional once a step is written —
-    // unreserved, every narrating turn would put one uncounted `chat.update`
-    // over the ceiling, and a busy minute would clear it twice over.
-    const paid = deps.updates.room(lastShown ? 1 : 2);
-    if (paid === undefined) return;
-    reserved ??= paid;
+    if (now - lastShown < (fellBack ? PROGRESS_MIN_MS : STREAM_MIN_MS)) return;
+    const step = asStep(title);
+    if (fellBack) {
+      // Asked after this turn's own floor, so a quiet turn does not spend the
+      // workspace's budget just by being asked, and refused rather than queued:
+      // narration is only worth anything while it is current. Two on the first
+      // write, because the cleanup below is not optional once a step is written
+      // — unreserved, every narrating turn would put one uncounted
+      // `chat.update` over the ceiling, and a busy minute would clear it twice.
+      const paid = deps.updates.room(ackWritten ? 1 : 2);
+      if (paid === undefined) return;
+      reserved ??= paid;
+      ackWritten = true;
+      lastShown = now;
+      // Caught on the chain and not on the call, so a `working` that throws
+      // where it stands rather than rejecting cannot leave `updating` rejected
+      // — every link after it, the cleanup included, would be skipped and the
+      // step would stay exactly where this is meant to take it from.
+      updating = updating
+        .then(() => deps.working(acked.channel, acked.ts, `${ack}\n\n_${step}_`))
+        .catch(() => undefined);
+      return;
+    }
+    if (steps === undefined) {
+      lastShown = now;
+      lastStep = step;
+      // The first step rides the open, paid from `chat.startStream`'s own pool.
+      // A refused open re-enters above with the floor reset, so the step a
+      // fallback workspace would otherwise lose is the one that finds out.
+      steps = deps.stream(acked.channel, conversation.rootThread, step);
+      updating = steps
+        .then((stream) => {
+          if (stream) return;
+          fellBack = true;
+          lastShown = 0;
+          narrate(title);
+        })
+        .catch(() => undefined);
+      return;
+    }
+    // One card per step: the same title again is the card already in progress.
+    if (step === lastStep) return;
+    if (deps.appends.room(1) === undefined) return;
     lastShown = now;
-    // Caught on the chain and not on the call, so a `working` that throws where
-    // it stands rather than rejecting cannot leave `updating` rejected — every
-    // link after it, the cleanup included, would be skipped and the step would
-    // stay exactly where this is meant to take it from.
-    updating = updating
-      .then(() => deps.working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`))
-      .catch(() => undefined);
+    lastStep = step;
+    updating = updating.then(async () => (await steps)?.append(step)).catch(() => undefined);
   };
 
-  // Slack cannot fold the narration away the way a terminal does, so the last
-  // step and the ellipsis are in the way once the turn is over. Queued behind
-  // the narration it is undoing, and called only after the turn is closed: a
-  // `chat.update` Slack is slow to take would otherwise hold the turn open, and
-  // a member's next message would be refused for a line nobody is waiting on.
-  // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
-  const settle = async (text: string): Promise<void> => {
-    if (!lastShown && !inFlight) return;
-    await before(
-      TIDY_MS,
-      updating
-        .then(() => {
-          // Charged against the call and not against the intention: this waits
-          // behind the narration it is undoing, and a reservation still live
-          // when that wait began can have aged out by the time the call goes.
-          // Taken rather than asked either way — an acknowledgement left
-          // mid-step above a delivered answer reports the turn wrongly, where a
-          // quiet one is merely quiet.
-          deps.updates.take(reserved);
-          return deps.working(acked.channel, acked.ts, text);
-        })
-        .catch(() => undefined),
-    );
+  // The stream folds its cards away when stopped; the acknowledgement cannot
+  // fold, so its last step and the ellipsis are in the way once the turn is
+  // over. Either close is queued behind the narration it is undoing, and called
+  // only after the turn is closed: a call Slack is slow to take would otherwise
+  // hold the turn open, and a member's next message would be refused for a line
+  // nobody is waiting on. Fail-open like `narrate`, and waited on to a
+  // deadline, not indefinitely.
+  const settle = async (text: string, last: 'complete' | 'error' = 'complete'): Promise<void> => {
+    const closing: Promise<unknown>[] = [];
+    if (steps !== undefined)
+      closing.push(updating.then(async () => (await steps)?.stop(last)).catch(() => undefined));
+    // The acknowledgement needs tidying where narration wrote on it, and where
+    // a resume offer left an ellipsis — which a streamed turn still owes, since
+    // the cards sit under the acknowledgement rather than on it.
+    if (ackWritten || inFlight)
+      closing.push(
+        updating
+          .then(() => {
+            // Charged against the call and not against the intention: this
+            // waits behind the narration it is undoing, and a reservation still
+            // live when that wait began can have aged out by the time the call
+            // goes. Taken rather than asked either way — an acknowledgement
+            // left mid-step above a delivered answer reports the turn wrongly,
+            // where a quiet one is merely quiet.
+            deps.updates.take(reserved);
+            return deps.working(acked.channel, acked.ts, text);
+          })
+          .catch(() => undefined),
+      );
+    if (closing.length) await before(TIDY_MS, Promise.all(closing));
   };
 
   let answer: {
@@ -790,8 +843,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // read is said here too, where the member is deciding whether to resend.
       skippedNote(attached),
     );
-    // Or "Reading `rows.csv`…" is left standing over "That run did not finish".
-    await settle(opening);
+    // Or "Reading `rows.csv`…" is left standing over "That run did not finish"
+    // — and a card still spinning would claim the opposite of what it sits over.
+    await settle(opening, 'error');
     return 'failed';
   }
 

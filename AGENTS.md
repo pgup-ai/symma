@@ -59,13 +59,18 @@ the session is not known until it has been asked, so the transcript goes with
 the resume and the driver drops whichever does not apply. A conversation runs
 one turn at a time — two at once fork the session that carries it, and neither
 half then holds the whole thread — so a second message waits and is told so.
-Narration on the acknowledgement runs under a budget the whole process shares,
-because Slack counts `chat.update` per app per workspace and not per channel:
-a per-turn interval cannot honour a shared ceiling, and narration is what gives
-way, since a quiet acknowledgement is a turn still running where a refused tidy
-is one that reports wrongly. So the account is of updates and not of narrations:
-a step reserves the tidy that takes it back off, because charging only what it
-writes puts one uncounted `chat.update` per narrating turn over the ceiling.
+Narration streams as Slack's own thinking steps — task cards in the DM thread,
+opened lazily on a turn's first step, one card per step, folded away as the turn
+ended — and falls back to rewriting the acknowledgement wherever the open is
+refused, so a workspace without the feature keeps exactly the old behaviour.
+Every pool involved is per app per workspace and not per channel, so a per-turn
+interval cannot honour any of them: appends run under their own shared budget,
+and the `chat.update` account keeps its rule for the fallback and the tidies —
+a step there reserves the tidy that takes it back off, because charging only
+what it writes puts one uncounted update per narrating turn over the ceiling.
+`chat.startStream` and `chat.stopStream` are spent once per narrated turn and
+not budgeted: a refused open _is_ the fallback signal, and a refused stop only
+costs the fold.
 Slack permalinks pasted into a message are fetched by the bot and ride the
 prompt — not the context, which an honoured resume drops — because the agent has
 only its own machine's Slack access, which is usually none. The bot reads with

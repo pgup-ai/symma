@@ -21,6 +21,7 @@ import { homeBlocks, modelPrompt, type Linking } from './home.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import {
+  APPENDS_PER_MINUTE,
   updateBudget,
   slackApi,
   DEFAULT_AGENT_ACTION,
@@ -141,9 +142,10 @@ const mint = async (slackUser: string): Promise<MintResult> => {
 
 const api = slackApi(botToken, { log });
 
-// One budget for the process, which is one app in one workspace — the unit
-// Slack counts `chat.update` by.
+// One budget per pool for the process, which is one app in one workspace — the
+// unit Slack counts `chat.update` and `chat.appendStream` by.
 const updates = updateBudget();
+const appends = updateBudget(APPENDS_PER_MINUTE);
 
 /** What `/model` and the home tab render: the turn route without a turn, which
  * is what keeps a picker from minting a credential every time it is looked at. */
@@ -356,6 +358,7 @@ const depsFor = (user: string) => {
       await ask('/api/slack/model', { user, conversation, model: null });
     },
     working: api.working,
+    stream: api.stream,
     fetchFile: api.fetchFile,
   };
 };
@@ -403,7 +406,9 @@ const connection = socketMode({
               shedMode: deps.shedMode,
               shedModel: deps.shedModel,
               working: deps.working,
+              stream: deps.stream,
               updates,
+              appends,
               fetchFile: deps.fetchFile,
               mark: api.mark,
               threadReplies: deps.threadReplies,

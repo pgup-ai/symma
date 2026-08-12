@@ -89,6 +89,80 @@ describe('slack api', () => {
     }
   });
 
+  it('opens the stream around its first card, and folds it away the same way', async () => {
+    const { fetchImpl, seen, called } = answering({ ok: true, ts: '400.0' }, { ok: true });
+    const api = slackApi('xoxb-test', { fetch: fetchImpl });
+    const stream = await api.stream('D-nel', '200.0', 'Reading dm.ts');
+    assert.notEqual(stream, undefined);
+    assert.deepEqual(called, ['chat.startStream']);
+    const opened = new URLSearchParams(String(seen[0]));
+    assert.equal(opened.get('channel'), 'D-nel');
+    assert.equal(opened.get('thread_ts'), '200.0');
+    assert.deepEqual(JSON.parse(opened.get('chunks')!), [
+      { type: 'task_update', id: '1', title: 'Reading dm.ts', status: 'in_progress' },
+    ]);
+
+    await stream!.stop('complete');
+    assert.deepEqual(called, ['chat.startStream', 'chat.stopStream']);
+    // The stop is what closes the card in progress — no append spent on it.
+    assert.deepEqual(JSON.parse(new URLSearchParams(String(seen[1])).get('chunks')!), [
+      { type: 'task_update', id: '1', title: 'Reading dm.ts', status: 'complete' },
+    ]);
+  });
+
+  it('moves the stream along one call per step, completing as it goes', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, ts: '400.0' }, { ok: true }, { ok: true });
+    const api = slackApi('xoxb-test', { fetch: fetchImpl });
+    const stream = await api.stream('D-nel', '200.0', 'Reading dm.ts');
+    await stream!.append('Running git log');
+    // One `chat.appendStream` call — one budget stamp — carries both halves of
+    // the transition, so the cards can never show two steps in progress.
+    const chunks = JSON.parse(new URLSearchParams(String(seen[1])).get('chunks')!) as {
+      id: string;
+      status: string;
+    }[];
+    assert.deepEqual(
+      chunks.map((c) => `${c.id}:${c.status}`),
+      ['1:complete', '2:in_progress'],
+    );
+
+    await stream!.stop('error');
+    assert.deepEqual(JSON.parse(new URLSearchParams(String(seen[2])).get('chunks')!), [
+      { type: 'task_update', id: '2', title: 'Running git log', status: 'error' },
+    ]);
+  });
+
+  it('answers a refused stream with nothing, and says why once', async () => {
+    // Undefined is the fallback signal — the caller narrates onto the
+    // acknowledgement instead — and the log line is the only trace a workspace
+    // without the feature leaves.
+    const lines: string[] = [];
+    const refusing = answering({ ok: false, error: 'feature_not_enabled' });
+    const api = slackApi('xoxb-test', { fetch: refusing.fetchImpl, log: (m) => lines.push(m) });
+    assert.equal(await api.stream('D-nel', '200.0', 'Reading dm.ts'), undefined);
+    assert.deepEqual(lines, ['stream refused: feature_not_enabled']);
+  });
+
+  it('goes quiet after a dead append, but still tries the fold', async () => {
+    const { fetchImpl, called } = answering(
+      { ok: true, ts: '400.0' },
+      { ok: false, error: 'message_not_in_streaming_state' },
+      { ok: true },
+    );
+    const api = slackApi('xoxb-test', { fetch: fetchImpl, log: () => {} });
+    const stream = await api.stream('D-nel', '200.0', 'Reading dm.ts');
+    await stream!.append('Running git log');
+    // Dead: the next append is not even sent. Cards and a rewritten
+    // acknowledgement at once would be two narrations of one run, so there is
+    // no mid-turn fallback either — the turn goes quiet.
+    await stream!.append('Running tests');
+    assert.deepEqual(called, ['chat.startStream', 'chat.appendStream']);
+    // The stop is tried anyway: it is what folds the cards away, and its
+    // failure would only cost the fold.
+    await stream!.stop('complete');
+    assert.deepEqual(called, ['chat.startStream', 'chat.appendStream', 'chat.stopStream']);
+  });
+
   it('answers a failed membership scan with nothing, not with an empty list', async () => {
     // The two are opposite claims: an empty list says the member is in none of
     // it, nothing says nobody asked successfully. `dm.ts` maps them to "you are

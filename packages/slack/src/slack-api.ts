@@ -5,7 +5,13 @@
  * pagination cursors, `ok: false` on a 200, a typed error holding Slack's own
  * code, and `Retry-After` on a 429.
  */
-import { ErrorCode, WebClient, type SectionBlock, type WebAPIPlatformError } from '@slack/web-api';
+import {
+  ErrorCode,
+  WebClient,
+  type SectionBlock,
+  type TaskUpdateChunk,
+  type WebAPIPlatformError,
+} from '@slack/web-api';
 
 import { isSafeId, isSafeModelId, type SessionModels, type SessionModes } from '@symma/protocol';
 
@@ -81,6 +87,12 @@ export interface SlackApi {
    * what the agent is doing. Never throws, and carries no blocks of its own: a
    * progress line that failed to land must not cost the answer behind it. */
   working: (channel: string, ts: string, text: string) => Promise<void>;
+  /** Opens the thinking-steps stream a narrated turn writes to, carrying its
+   * first step so a stream is never visibly empty and the first step costs no
+   * append. Undefined where the workspace refuses one — a missing feature, a
+   * missing scope, a 429 — logged once and never thrown: the caller narrates
+   * onto the acknowledgement instead, which is the whole fallback. */
+  stream: (channel: string, thread: string, first: string) => Promise<TurnStream | undefined>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
    * and reporting a failed update as a failed share would be a lie the member
@@ -117,6 +129,22 @@ export interface SlackApi {
  * which is not about the destination at all: the member's own token has stopped
  * working, and the same post as the bot would land. */
 export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope' | 'author';
+
+/** One turn's stream of task cards, under the acknowledgement it narrates for.
+ * Slack renders them with its own thinking chrome — statuses flip live and the
+ * finished list folds away — which is what rewriting the acknowledgement never
+ * could do. */
+export interface TurnStream {
+  /** Completes the card in progress and opens one for `next` — one
+   * `chat.appendStream` call, so one stamp from the append budget. Goes quiet
+   * for the turn on the first failure rather than throwing: cards and a
+   * rewritten acknowledgement at once would be two narrations of one run. */
+  append: (next: string) => Promise<void>;
+  /** Ends the stream, closing the card in progress the way the turn ended.
+   * Tried even after an append died — the stop is what folds the cards away,
+   * and its failure only costs the fold. */
+  stop: (last: 'complete' | 'error') => Promise<void>;
+}
 
 /** A run takes minutes, and Slack offers no way to say so in the composer — so
  * the member's own message carries it. */
@@ -162,6 +190,14 @@ const MAX_PAGES = 20;
  * Under the tier rather than at it, because the same pool pays for those.
  */
 export const UPDATES_PER_MINUTE = 30;
+
+/** How many `chat.appendStream` calls a minute this app may spend — the same
+ * shared-pool shape as `chat.update`, one tier up: Slack allows 100+ (Tier 4),
+ * and this sits under it for the same reason `UPDATES_PER_MINUTE` sits under
+ * 50. `chat.startStream` and `chat.stopStream` are pools of their own, spent
+ * once per narrated turn and not budgeted here: a refused open already has a
+ * fallback, and a refused stop only costs the fold. */
+export const APPENDS_PER_MINUTE = 80;
 
 export interface UpdateBudget {
   /** Whether `updates` more will fit, spending them if so. Narration is the
@@ -698,6 +734,66 @@ export function slackApi(
           /* a caller's logger is not worth the turn either */
         }
       }
+    },
+    async stream(channel, thread, first) {
+      const card = (
+        id: number,
+        title: string,
+        status: 'in_progress' | 'complete' | 'error',
+      ): TaskUpdateChunk => ({ type: 'task_update', id: String(id), title, status });
+      const said = (what: string, error: unknown): void => {
+        try {
+          options.log?.(`${what}: ${slackCode(error) ?? String(error)}`);
+        } catch {
+          /* a caller's logger is not worth the turn either */
+        }
+      };
+      let opened;
+      try {
+        // No `task_display_mode`: the default is `timeline`, the running list
+        // this narration is.
+        opened = await quick.chat.startStream({
+          channel,
+          thread_ts: thread,
+          chunks: [card(1, first, 'in_progress')],
+        });
+      } catch (error) {
+        said('stream refused', error);
+        return undefined;
+      }
+      const ts = opened.ts;
+      if (!ts) {
+        said('stream refused', new Error('chat.startStream returned no ts'));
+        return undefined;
+      }
+      let id = 1;
+      let title = first;
+      let dead = false;
+      return {
+        async append(next) {
+          if (dead) return;
+          const finished = card(id, title, 'complete');
+          id += 1;
+          title = next;
+          try {
+            await quick.chat.appendStream({
+              channel,
+              ts,
+              chunks: [finished, card(id, title, 'in_progress')],
+            });
+          } catch (error) {
+            dead = true;
+            said('stream went quiet', error);
+          }
+        },
+        async stop(last) {
+          try {
+            await quick.chat.stopStream({ channel, ts, chunks: [card(id, title, last)] });
+          } catch (error) {
+            said('stream not stopped', error);
+          }
+        },
+      };
     },
     async fetchFile(url, maxBytes) {
       // The SDK covers `api.slack.com` calls; a file URL is plain HTTP with the
