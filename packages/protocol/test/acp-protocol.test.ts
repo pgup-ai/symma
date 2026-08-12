@@ -629,6 +629,11 @@ describe('acp', () => {
         return { result: {} };
       },
       onPrompt: (agent) => {
+        // A malformed chunk is dropped, not forwarded as a non-string.
+        agent.update({
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 42 },
+        });
         agent.update({
           sessionUpdate: 'agent_thought_chunk',
           content: { type: 'text', text: 'I should read ' },
@@ -709,7 +714,9 @@ describe('acp', () => {
       onCancelable: (handed) => {
         // Handed only once there is a session to cancel into.
         assert.deepEqual(fake.cancels, []);
-        cancel = handed;
+        // And it answers that the frame left, which is all the receipt a
+        // notification has.
+        cancel = () => assert.equal(handed(), true);
       },
     });
     assert.deepEqual(fake.cancels, [{ sessionId: 's1' }]);

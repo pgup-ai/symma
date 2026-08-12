@@ -74,8 +74,9 @@ export interface RemoteAcpConfig {
    * throttles and reassembles, same as `onProgress`. */
   onThought?: (text: string) => void;
   /** Handed a way to cancel the running turn once there is a session to cancel
-   * into; the turn then resolves normally, with the agent's own stopReason. */
-  onCancelable?: (cancel: () => void) => void;
+   * into — answering whether the cancel left this process — and the turn then
+   * resolves normally, with the agent's own stopReason. */
+  onCancelable?: (cancel: () => boolean) => void;
   /** Receives `AcpSessionResult.notices` — what the agent said about itself
    * rather than about the prompt. Absent drops them. */
   onNotice?: (notice: string) => void;

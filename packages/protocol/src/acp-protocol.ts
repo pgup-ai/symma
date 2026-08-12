@@ -267,10 +267,11 @@ class AcpConnection {
     this.pending.clear();
   }
 
-  /** Fire-and-forget: a notification has no id, so nothing will ever answer
-   * it — a dropped frame surfaces wherever the turn it belonged to does. */
-  notify(method: string, params: Record<string, unknown>): void {
-    this.write({ jsonrpc: '2.0', method, params });
+  /** A notification has no id, so nothing will ever answer it — whether the
+   * frame left this process is the only receipt there is, and the caller
+   * deciding what to tell a member deserves at least that much. */
+  notify(method: string, params: Record<string, unknown>): boolean {
+    return this.write({ jsonrpc: '2.0', method, params });
   }
 
   request(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -385,10 +386,11 @@ export interface AcpSessionOptions {
    * not a sentence. Nothing arrives from agents that never send thoughts. */
   onThought?: (text: string) => void;
   /** Handed a way to cancel the turn, once there is a session to cancel into.
-   * Calling it sends ACP's `session/cancel`; the agent then ends the prompt
-   * with its own stopReason, so the turn still resolves through the one path
-   * the caller is already awaiting. */
-  onCancelable?: (cancel: () => void) => void;
+   * Calling it sends ACP's `session/cancel` and answers whether the frame
+   * left this process; the agent then ends the prompt with its own
+   * stopReason, so the turn still resolves through the one path the caller is
+   * already awaiting. */
+  onCancelable?: (cancel: () => boolean) => void;
 }
 
 /** One file travelling with a prompt: `text` is the contents as they are,
@@ -571,7 +573,12 @@ export async function driveAcpSession(
         const content = update.content as { type?: string; text?: string } | undefined;
         // Same guard as `onProgress`: inside the message loop, a sink that
         // throws would take the turn with it, and thinking is only a hint.
-        if (!replaying && content?.type === 'text' && content.text) {
+        if (
+          !replaying &&
+          content?.type === 'text' &&
+          typeof content.text === 'string' &&
+          content.text
+        ) {
           try {
             options.onThought?.(content.text);
           } catch (error) {
@@ -719,9 +726,7 @@ export async function driveAcpSession(
     // notification: the answer arrives as the prompt's own stopReason, so a
     // cancelled turn still resolves through the path the caller is awaiting.
     try {
-      options.onCancelable(() => {
-        conn.notify('session/cancel', { sessionId });
-      });
+      options.onCancelable(() => conn.notify('session/cancel', { sessionId }));
     } catch (error) {
       log(`acp:${agent} ${label}: cancel sink threw, dropping it: ${String(error)}`);
     }

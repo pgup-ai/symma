@@ -61,6 +61,11 @@ function harness(
     streamStalls?: boolean;
     /** The member presses the stream's stop button while the run is out. */
     stopsMidRun?: boolean;
+    /** The press lands after the run resolved, while the answer is being
+     * delivered. */
+    stopsLate?: boolean;
+    /** The cancel never leaves the process — a dead pipe swallowed it. */
+    cancelDrops?: boolean;
     /** How long each acknowledgement update takes, by call order. */
     updateDelays?: number[];
     /** The first update throws where it stands rather than rejecting. */
@@ -181,6 +186,7 @@ function harness(
       runs.push(spec);
       spec.onCancelable?.(() => {
         cancels += 1;
+        return over.cancelDrops !== true;
       });
       const titles = typeof over.narrates === 'string' ? [over.narrates] : (over.narrates ?? []);
       const musings = typeof over.thinks === 'string' ? [over.thinks] : (over.thinks ?? []);
@@ -236,7 +242,12 @@ function harness(
         ? Promise.reject(over.answerPostFails)
         : Promise.resolve({ channel, ts: '300.0' });
     },
-    destination: () => Promise.resolve(over.destination),
+    destination: () => {
+      // Called between the run resolving and the answer posting — the late
+      // press's window.
+      if (over.stopsLate) for (const halt of stopping.values()) halt();
+      return Promise.resolve(over.destination);
+    },
     finish: (conversation, turn, status, ran) => {
       finished.push({ conversation, turn, status, ...ran });
       timeline.push(`finish:${status}`);
@@ -1073,6 +1084,83 @@ describe('dm message', () => {
     assert.equal(posts.at(-1)!.text, 'the answer');
     assert.match(posts.at(-1)!.notices![0]!, /Stopped at your request/);
     assert.deepEqual(streamed.stopped, ['complete']);
+  });
+
+  it('ignores a press that lands after the run already resolved', async () => {
+    // The answer exists; cancelling now reaches a session that finished, and
+    // "stopped at your request" over a whole answer misreports both.
+    const { deps, posts, cancels } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streams: true,
+      stopsLate: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.equal(cancels(), 0);
+    assert.equal(posts.at(-1)!.notices, undefined);
+  });
+
+  it('clamps a thought to whole characters, freshest end first', async () => {
+    // The tail is what shows, the slice can land between the halves of an
+    // emoji, and Slack renders a lone surrogate as a replacement glyph.
+    const { deps, streamed } = harness({
+      existing: CONVERSATION,
+      // The lone character inside the run is what puts the cut mid-pair: an
+      // unbroken run of two-unit emoji can only ever be sliced on a boundary.
+      thinks: `${'💭'.repeat(100)}x${'💭'.repeat(100)}`,
+      streams: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    const detail = streamed.thought[0]!;
+    assert.doesNotMatch(detail, /^[\uDC00-\uDFFF]/, 'no half of an emoji leads the line');
+    assert.ok(detail.length <= 250);
+    assert.match(detail, /💭$/, 'the freshest end is what survives');
+  });
+
+  it('does not call an answer stopped when the cancel never left', async () => {
+    // The label follows the receipt: a cancel a dead pipe swallowed leaves the
+    // turn to finish whole, and "stopped at your request" over a complete
+    // answer misreports both.
+    const { deps, posts, cancels } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streams: true,
+      stopsMidRun: true,
+      cancelDrops: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.equal(cancels(), 1, 'the press still tried');
+    assert.equal(posts.at(-1)!.notices, undefined);
   });
 
   it('forgets the stop route once the turn is over', async () => {

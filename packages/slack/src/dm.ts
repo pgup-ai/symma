@@ -107,8 +107,8 @@ export interface RunSpec {
    * here, rendered as the open card's detail line. */
   onThought?: (text: string) => void;
   /** Handed a way to cancel the running turn, once there is a session to
-   * cancel into. */
-  onCancelable?: (cancel: () => void) => void;
+   * cancel into — answering whether the cancel left the process. */
+  onCancelable?: (cancel: () => boolean) => void;
   /** The member's own files, already fetched, for the agent to read. */
   attachments?: PromptAttachment[];
 }
@@ -141,9 +141,14 @@ const asStep = (title: string): string =>
 
 /** A thought buffer on its way into a card's detail line — the tail, because
  * the freshest thinking is the end of it, and a detail line is a glance, not a
- * log. Clamped under the 256 bytes a task chunk field takes. */
-const asThought = (buffer: string): string =>
-  plainly(buffer).replace(/\s+/g, ' ').trim().slice(-250);
+ * log. Clamped under the 256 characters a task chunk field takes, and like
+ * `slack-api`'s own clip: a slice landing between the halves of an emoji
+ * leaves a lone surrogate at the front, and one unit forward is a whole
+ * character. */
+const asThought = (buffer: string): string => {
+  const tail = plainly(buffer).replace(/\s+/g, ' ').trim().slice(-250);
+  return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
+};
 
 /** The card a turn thinks under before it has called a single tool. */
 const THINKING = 'Thinking';
@@ -792,16 +797,19 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // The member's stop press, routed here from the stream's own button. The
   // cancel lands on the agent as ACP's `session/cancel`, and the turn still
   // resolves through the one path already being awaited — with whatever the
-  // agent had; `stopped` is what labels that answer as cut short on purpose.
-  let cancelRun: (() => void) | undefined;
+  // agent had. `stopped` labels that answer as cut short on purpose, so it is
+  // set by the cancel actually leaving, not by the press: a cancel a dead
+  // pipe swallowed leaves the turn to finish whole, and "stopped at your
+  // request" over a complete answer misreports both.
+  let cancelRun: (() => boolean) | undefined;
   let stopWanted = false;
   let stopped = false;
   const halt = (): void => {
-    stopped = true;
     // Both orders are real: a stream opens before the session exists, and a
     // press can land in the gap.
-    if (cancelRun) cancelRun();
-    else stopWanted = true;
+    if (cancelRun) {
+      if (cancelRun()) stopped = true;
+    } else stopWanted = true;
   };
 
   // The stream folds its cards away when stopped; the acknowledgement cannot
@@ -879,7 +887,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       onThought: think,
       onCancelable: (cancel) => {
         cancelRun = cancel;
-        if (stopWanted) cancel();
+        if (stopWanted && cancel()) stopped = true;
       },
       ...(caught?.context ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
@@ -937,6 +945,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     }
     return 'failed';
   }
+
+  // The button's window is the run: it is unrouted the moment the answer
+  // exists, so a press landing during delivery cannot cancel a session that
+  // already finished or label a whole answer as cut short.
+  unhook?.();
+  unhook = undefined;
 
   const ran = {
     session: answer.session,
