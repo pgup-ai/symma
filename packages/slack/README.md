@@ -21,7 +21,7 @@ where the bot is in that conversation too, since it cannot read, or even see,
 one it was never added to — `chat:write` with `im:write` to answer there, and `reactions:write`
 to mark their message while a run is out. A shared answer goes out as the bot
 with the approving member named in front — Slack decides authorship by token
-type, and the bot's is the only token this app holds. **Re-paste it after a
+type, and the bot token is the only one this app posts with. **Re-paste it after a
 change and reinstall**, or the new scopes are not granted.
 
 **2. Make an app-level token.** _Basic Information_ → _App-Level Tokens_ →
