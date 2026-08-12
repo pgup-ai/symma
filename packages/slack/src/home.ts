@@ -11,7 +11,7 @@
  */
 import type { TurnTarget } from '@symma/protocol';
 
-import { agentSelect, modelSelect, plainly, DISCONNECT_ACTION } from './slack-api.js';
+import { agentSelect, modelSelect, plainly } from './slack-api.js';
 
 const context = (text: string): Record<string, unknown> => ({
   type: 'context',
@@ -72,14 +72,6 @@ export function modelPrompt(target: TurnTarget | undefined): {
   };
 }
 
-/** Whether this member's answers can go out under their own name, and where
- * they say yes to that. Absent where the deployment has no Slack app
- * credentials, which is the state to render nothing at all for. */
-export interface Linking {
-  linked: boolean;
-  url?: string;
-}
-
 /**
  * The home tab: what this member's setup is, and the choices that belong
  * outside a conversation.
@@ -87,10 +79,7 @@ export interface Linking {
  * Block Kit has no colour of its own — the home tab is Slack's surface, not
  * ours — so the brand carries as the site's marks and the site's voice.
  */
-export function homeBlocks(
-  target: TurnTarget | undefined,
-  linking?: Linking,
-): Record<string, unknown>[] {
+export function homeBlocks(target: TurnTarget | undefined): Record<string, unknown>[] {
   const blocks: Record<string, unknown>[] = [
     {
       type: 'header',
@@ -154,43 +143,5 @@ export function homeBlocks(
     context('Conversations where you picked a model keep it.'),
   );
 
-  // §5's "attributable to whoever approved it", offered as what it is: their own
-  // posting rights, for the one thing they already press a button to do.
-  if (linking?.linked)
-    blocks.push(
-      { type: 'divider' },
-      section('*◆ Answers you share go out as you*'),
-      // The way back. A credential they granted with a button needs one to take
-      // it away — and it is the only control that fixes a token Slack has
-      // stopped honouring while this tab still believes in it.
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Disconnect' },
-            action_id: DISCONNECT_ACTION,
-          },
-        ],
-      },
-    );
-  else if (linking?.url)
-    blocks.push(
-      { type: 'divider' },
-      section('*◆ Share as yourself*'),
-      context(
-        'Answers you share go out from Symma with your name in front. Connect your account and they go out as you.',
-      ),
-      {
-        type: 'actions',
-        elements: [
-          {
-            type: 'button',
-            text: { type: 'plain_text', text: 'Connect my account' },
-            url: linking.url,
-          },
-        ],
-      },
-    );
   return blocks;
 }

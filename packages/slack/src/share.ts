@@ -27,20 +27,10 @@ export interface ShareDeps {
   /** Where this conversation may publish, per the gateway. Undefined when it
    * has nowhere to go back to, or is not this member's. */
   destination: (conversation: string) => Promise<{ channel: string; thread: string } | undefined>;
-  /** The member's own Slack token, when they have linked their account.
-   * Undefined is ordinary, not a failure — the bot posts with their name in
-   * front of it, as it always did. */
-  asMember: () => Promise<string | undefined>;
-  /** Forgets the token Slack has stopped honouring, and only that one — a
-   * member who linked again in between keeps the grant they just made, and
-   * `false` says that is what happened. Fails open: the answer lands either
-   * way. */
-  unlink: (token: string) => Promise<boolean>;
   share: (
     channel: string,
     thread: string,
     text: string,
-    asMember?: string,
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
   post: (channel: string, text: string, threadTs?: string) => Promise<unknown>;
   settle: (channel: string, ts: string, text: string) => Promise<void>;
@@ -49,24 +39,14 @@ export interface ShareDeps {
 export type ShareOutcome = 'shared' | 'no destination' | `kept: ${Unusable}`;
 
 /** What went wrong, in the member's words. §5: a publication that cannot land
- * is not a lost answer, so each of these says the answer is still here.
- *
- * Two of them change subject with the author. Posting as the member, Slack is
- * refusing *them* — and "I am not in that channel" would send them looking at
- * the bot's membership for a problem with their own. */
-const because = (why: Unusable, asMember: boolean): string =>
+ * is not a lost answer, so each of these says the answer is still here. */
+const because = (why: Unusable): string =>
   ({
     archived: 'that thread is in an archived channel',
-    removed: asMember ? 'you are not in that channel' : 'I am not in that channel any more',
+    removed: 'I am not in that channel any more',
     locked: 'that channel is read-only now',
     gone: 'that thread is gone',
-    scope: asMember
-      ? 'Slack would not let me post as you there'
-      : 'I no longer have permission to post there',
-    // Only reachable if the fallback below were ever removed, since the post it
-    // retries with carries no token. Answered rather than left to fall through
-    // to the sentence saying it was shared.
-    author: 'Slack would not take your sign-in',
+    scope: 'I no longer have permission to post there',
   })[why];
 
 export async function handleShare(request: ShareRequest, deps: ShareDeps): Promise<ShareOutcome> {
@@ -79,33 +59,17 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
     return 'no destination';
   }
 
-  // §5 wants a channel post attributable to whoever approved it. With their own
-  // token Slack records exactly that, so the message needs no sentence saying
-  // whose it is; without one the bot is the author and has to say.
-  const asBot = `<@${request.user}> shared:\n\n${request.text}`;
-  const token = await deps.asMember();
-  let result = await deps.share(to.channel, to.thread, token ? request.text : asBot, token);
-  // Whose post the failure is about, which the fallback below changes: telling
-  // them *they* are not in the channel over a refusal the bot got would send
-  // them looking at their own membership for somebody else's problem.
-  let byMember = Boolean(token);
-  // Whether the dead token is actually gone: the unlink can fail, and it clears
-  // nothing where they have already linked again. "I disconnected it" is a
-  // claim to make only where the home tab will agree with it.
-  let forgotten = false;
-  // Their token stopped working — revoked, or an install replaced. The bot can
-  // still publish, and an answer they approved is worth more than the name on
-  // it. `author` only ever comes back for a post that carried a token, so the
-  // test for one below states that rather than guarding against it.
-  if (token && !result.ok && result.why === 'author') {
-    forgotten = await deps.unlink(token).catch(() => false);
-    byMember = false;
-    result = await deps.share(to.channel, to.thread, asBot);
-  }
+  // §5 wants a channel post attributable to whoever approved it. The bot is
+  // the author, so the message has to say whose approval this was.
+  const result = await deps.share(
+    to.channel,
+    to.thread,
+    `<@${request.user}> shared:\n\n${request.text}`,
+  );
   if (!result.ok) {
     await deps.post(
       request.channel,
-      `Kept this here — ${because(result.why, byMember)}. Nothing was lost.`,
+      `Kept this here — ${because(result.why)}. Nothing was lost.`,
       request.thread,
     );
     // The button stays: the destination is what failed, and fixing it makes
@@ -119,18 +83,6 @@ export async function handleShare(request: ShareRequest, deps: ShareDeps): Promi
     request.messageTs,
     `${request.text}\n\n_Shared to the thread._`,
   );
-  // The fallback, said out loud: they linked so their name would be on it, and
-  // it is not. What to do about it only where the unlink landed — the home tab
-  // reads the gateway, so until it does there is nothing there to reconnect.
-  const fellBack = Boolean(token) && !byMember;
-  await deps.post(
-    request.channel,
-    fellBack
-      ? `Shared to the thread — as Symma, not as you. Slack has stopped accepting your sign-in.${
-          forgotten ? ' I disconnected it; connect again from the home tab.' : ''
-        }`
-      : 'Shared to the thread.',
-    request.thread,
-  );
+  await deps.post(request.channel, 'Shared to the thread.', request.thread);
   return 'shared';
 }

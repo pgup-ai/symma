@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import type { TurnTarget } from '@symma/protocol';
 
 import { homeBlocks, modelPrompt } from '../src/home.js';
-import { DEFAULT_AGENT_ACTION, DEFAULT_MODEL_ACTION, DISCONNECT_ACTION } from '../src/slack-api.js';
+import { DEFAULT_AGENT_ACTION, DEFAULT_MODEL_ACTION } from '../src/slack-api.js';
 
 const paired: TurnTarget = {
   endpoint: 'e1',
@@ -82,23 +82,6 @@ describe('the surfaces with no thread under them', () => {
     assert.equal(picker(away), undefined);
     assert.match(text(homeBlocks(away)), /Your agents arrive with your machine/);
     assert.doesNotMatch(text(homeBlocks(paired)), /Your agents arrive/);
-  });
-
-  it('offers to post as them, says so once it can, and nothing where it cannot', () => {
-    // Three states, and the third is every deployment without Slack app
-    // credentials: an offer that cannot be taken up is worse than no offer.
-    assert.match(
-      text(homeBlocks(paired, { linked: false, url: 'https://slack.test/oauth' })),
-      /https:\/\/slack.test\/oauth/,
-    );
-    // Linked, they get the way back out: a credential granted with a button
-    // needs one to hand it back, and it is the only control that recovers a tab
-    // still claiming they post as themselves after an unlink failed.
-    assert.match(text(homeBlocks(paired, { linked: true })), /go out as you/);
-    assert.match(text(homeBlocks(paired, { linked: true })), new RegExp(DISCONNECT_ACTION));
-    const off = text(homeBlocks(paired, { linked: false }));
-    assert.doesNotMatch(off, /as you|as yourself/);
-    assert.equal(text(homeBlocks(paired)), off, 'no linking config reads the same as not linked');
   });
 
   it('renders the setup as it is, not as it would read best', () => {

@@ -426,47 +426,12 @@ describe('tenancy', () => {
       // Dropping her endpoints cascades the rows away, so the frames have to
       // come back or they are stranded: unreachable by any route and invisible
       // to retention, which reads sessions.started_at.
-      // Her own Slack credential, which is worth her posting rights and is the
-      // one token here that cannot be a hash — the gateway has to replay it.
-      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
-      assert.equal(await store.slackUserToken(carol.owner), 'xoxp-carol');
-      // A forget drops the token it names, and says whether that was the stored
-      // one: a member who linked again between a refused post and the call that
-      // follows it keeps the grant they just made, and is not told otherwise.
-      assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-older'), false);
-      assert.equal(await store.slackUserToken(carol.owner), 'xoxp-carol');
-      assert.equal(await store.forgetSlackUserToken(carol.owner, 'xoxp-carol'), true);
-      // Naming none is a member disconnecting on purpose: whatever is stored is
-      // what they meant, including one Slack stopped honouring that the compare
-      // above could not drop. False where there was nothing to hand back.
-      assert.equal(await store.forgetSlackUserToken(carol.owner), false);
-      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
-      assert.equal(await store.forgetSlackUserToken(carol.owner), true);
-      assert.equal(await store.slackUserToken(carol.owner), undefined);
-      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-carol'), true);
-
       const doomed = await store.deactivateUser('other', 'carol');
       assert.deepEqual(doomed, [{ runId: 'run-carol', sessionId: 'sid-carol' }]);
       forget(doomed);
       assert.deepEqual(readJournalLines(dataDir, 'run-carol', 'sid-carol'), []);
       assert.equal(await store.ownerForClientToken(carol.clientToken), undefined);
       assert.equal(await store.endpointForToken(carol.endpointToken), undefined);
-      // Gone from the row, not merely out of reach of the read that guards on
-      // `deactivated_at`: removing someone is supposed to destroy it.
-      const pool = new Pool({ connectionString: url });
-      try {
-        assert.deepEqual(
-          (await pool.query(`SELECT slack_user_token FROM users WHERE id = $1`, [carol.owner]))
-            .rows,
-          [{ slack_user_token: null }],
-        );
-      } finally {
-        await pool.end();
-      }
-      // And a linking flow that was out in her browser cannot put it back —
-      // which is also what the callback reads to know not to say "linked".
-      assert.equal(await store.setSlackUserToken(carol.owner, 'xoxp-again'), false);
-      assert.equal(await store.slackUserToken(carol.owner), undefined);
     } finally {
       await store.close();
     }

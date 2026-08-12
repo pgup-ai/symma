@@ -123,17 +123,11 @@ export interface SlackApi {
     channel: string,
     thread: string,
     text: string,
-    /** The member's own Slack token. Slack decides authorship by token type, so
-     * this is the whole difference between posting as them and posting as the
-     * bot with their name typed in front. */
-    asMember?: string,
   ) => Promise<{ ok: true } | { ok: false; why: Unusable }>;
 }
 
-/** The ways a destination stops being one, as §5 lists them — plus `author`,
- * which is not about the destination at all: the member's own token has stopped
- * working, and the same post as the bot would land. */
-export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope' | 'author';
+/** The ways a destination stops being one, as §5 lists them. */
+export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope';
 
 /** One turn's stream of task cards, under the acknowledgement it narrates
  * for. */
@@ -167,8 +161,6 @@ const MARK: Record<MarkState, string> = {
 
 /** Slack's names for a token it will not honour any more: revoked from the
  * member's side, or an app whose install was replaced. */
-const DEAD_TOKEN = new Set(['invalid_auth', 'token_revoked', 'account_inactive', 'not_authed']);
-
 const UNUSABLE: Record<string, Unusable> = {
   is_archived: 'archived',
   not_in_channel: 'removed',
@@ -339,7 +331,6 @@ export const DEFAULT_MODEL_ACTION = 'set_default_model';
 export const DEFAULT_AGENT_ACTION = 'set_default_agent';
 /** Handing back the Slack token they granted. A credential taken with a button
  * needs one to give it up again. */
-export const DISCONNECT_ACTION = 'disconnect_slack_account';
 
 /** Slack's static_select caps: options per select, characters per value. */
 const PICKER_OPTION_LIMIT = 100;
@@ -903,19 +894,12 @@ export function slackApi(
         .add({ channel, timestamp: ts, name: MARK[state] })
         .catch(swallow(`marking ${state}`));
     },
-    async share(channel, thread, text, asMember) {
+    async share(channel, thread, text) {
       try {
-        // Built per call: a client cached across members posts as the wrong one.
-        const author = asMember
-          ? new WebClient(asMember, options.fetch ? { fetch: options.fetch } : {})
-          : client;
-        await author.chat.postMessage({ channel, text, thread_ts: thread });
+        await client.chat.postMessage({ channel, text, thread_ts: thread });
         return { ok: true };
       } catch (error) {
         const code = slackCode(error) ?? '';
-        // A member's token Slack has stopped honouring is not a broken bot and
-        // not a bad destination: the answer can still go, just not as them.
-        if (asMember && DEAD_TOKEN.has(code)) return { ok: false, why: 'author' };
         const why = UNUSABLE[code];
         // Only the ways a destination goes bad are answers. Anything else is
         // this bot being broken, which the caller reports as a failure.
