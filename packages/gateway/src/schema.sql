@@ -256,11 +256,7 @@ CREATE TABLE IF NOT EXISTS agent_models (
 -- loses its resume and its model to the gates that already key on one.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS default_agent text;
 
--- The member's own Slack credential, so an answer they publish is posted by
--- them and not by the bot wearing their name (§5). Slack decides authorship by
--- token type, so there is no doing this without holding one.
---
--- Stored as it arrives, unlike every other token here: those are ours and are
--- hashed because nothing replays them. This one is Slack's and replaying it is
--- the point. It is worth one member's posting rights, and goes with their row.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS slack_user_token text;
+-- Share-as-the-member is gone; the column its tokens lived in goes too, and
+-- with it every stored credential — they are live posting rights, and code
+-- that no longer serves them must not keep them either.
+ALTER TABLE users DROP COLUMN IF EXISTS slack_user_token;

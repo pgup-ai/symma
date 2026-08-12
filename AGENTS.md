@@ -96,11 +96,12 @@ way, on the home tab and only where the machine offers more than one — a pick
 their companion stops advertising falls back rather than refusing the turn, and
 nothing has to be shed with it because a model is served only to the agent it
 was picked under and a resume only to the one it was minted under. An answer
-shared back goes out as the member themselves once they have linked their Slack
-account (§5): Slack decides authorship by token type, so the gateway holds one
-`chat:write` user token per member and hands it to the bot for that one post,
-which they can hand back from the same tab. Without the link it is the bot
-posting with their name in front, as before.
+shared back goes out as the bot with the approving member named in front (§5).
+It briefly went out as the member themselves, through a per-member `chat:write`
+user token the gateway held — removed on its owner's call: the OAuth flow was
+the one thing needing a public https origin on the gateway, and a name on a
+post was not worth carrying that surface. A member who wants their own name on
+it copies the answer over themselves.
 
 | package           | what it is                                                                                                                                                                         | depends on                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
