@@ -19,26 +19,10 @@ with `groups:read`, `im:read` and `mpim:read` to answer whether a link is one th
 member could have opened themselves before fetching it — a link resolves only
 where the bot is in that conversation too, since it cannot read, or even see,
 one it was never added to — `chat:write` with `im:write` to answer there, and `reactions:write`
-to mark their message while a run is out. The one _user_ scope, `chat:write`, is
-what lets a shared answer go out as the member rather than as the bot — Slack
-decides authorship by token type. **Re-paste it after a change and reinstall**, or the
-new scopes are not granted.
-
-Account linking is the gateway's half as much as this one: on top of the
-`SYMMA_GATEWAY_DATABASE_URL` and `SYMMA_GATEWAY_BOT_TOKEN` the rest of this
-surface already needs, it wants `SYMMA_SLACK_CLIENT_ID`,
-`SYMMA_SLACK_CLIENT_SECRET` and an `https://` `SYMMA_GATEWAY_PUBLIC_URL`. With
-any of them missing the home tab offers nothing to connect, and shared answers
-go out under the bot's name with the member's in front — which is what every
-unlinked member gets, so it is a deployment choice rather than a broken one.
-
-`redirect_urls` is the one field to edit before pasting: replace
-`https://REPLACE-WITH-SYMMA_GATEWAY_PUBLIC_URL` with the gateway's own
-`SYMMA_GATEWAY_PUBLIC_URL`, exactly. Slack matches the redirect it is handed
-against this list character for character, so a near miss fails the account
-linking flow at Slack's own consent screen with `redirect_uri_mismatch`. Leaving
-it as it is costs nothing else: without the linking flow configured the gateway
-never offers one, and everything else works.
+to mark their message while a run is out. A shared answer goes out as the bot
+with the approving member named in front — Slack decides authorship by token
+type, and the bot's is the only token this app holds. **Re-paste it after a
+change and reinstall**, or the new scopes are not granted.
 
 **2. Make an app-level token.** _Basic Information_ → _App-Level Tokens_ →
 _Generate_, with the `connections:write` scope. This is the `xapp-…` token Socket
