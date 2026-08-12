@@ -57,8 +57,9 @@ function harness(
     thinks?: string | string[];
     /** Steps the run emits in one instant, so a floor has something to gate. */
     narratesBurst?: string[];
-    /** The stream open resolves refused only after the run is already over. */
-    streamStalls?: boolean;
+    /** The stream open resolves only after the run is already over — refused,
+     * or, for `'opens'`, as a working stream nobody can use any more. */
+    streamStalls?: boolean | 'opens';
     /** The member presses the stream's stop button while the run is out. */
     stopsMidRun?: boolean;
     /** The press lands after the run resolved, while the answer is being
@@ -281,10 +282,13 @@ function harness(
     stream: (channel, thread, first, thought) => {
       streamed.opened.push(`${channel}/${thread}:${first}`);
       if (thought) streamed.thought.push(thought);
-      if (over.streamStalls)
-        return new Promise((resolve) => setTimeout(() => resolve(undefined), 15));
-      return Promise.resolve(
-        over.streams
+      const serve = over.streams || over.streamStalls === 'opens';
+      const late = <T>(value: T): Promise<T> =>
+        over.streamStalls
+          ? new Promise((resolve) => setTimeout(() => resolve(value), 15))
+          : Promise.resolve(value);
+      return late(
+        serve
           ? {
               ts: '400.0',
               append: (next: string) => {
@@ -1161,6 +1165,32 @@ describe('dm message', () => {
     );
     assert.equal(cancels(), 1, 'the press still tried');
     assert.equal(posts.at(-1)!.notices, undefined);
+  });
+
+  it('never routes a stop for a stream that opened after the turn was over', async () => {
+    // Settle ran its unhook while the open was still pending — a route written
+    // now would sit in the process-wide map forever and take the next press
+    // minted at the same ts. The fold still happens: settle's close awaits the
+    // open it is folding.
+    const { deps, stopping, streamed } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streamStalls: 'opens',
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    await flush();
+    assert.equal(stopping.size, 0);
+    assert.deepEqual(streamed.stopped, ['complete']);
   });
 
   it('forgets the stop route once the turn is over', async () => {

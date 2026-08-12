@@ -718,7 +718,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
    * over the answer for good. */
   const opened = (title?: string) => (stream: TurnStream | undefined) => {
     if (stream) {
-      unhook = deps.stoppable(acked.channel, stream.ts, halt);
+      // Registered only while the turn can still use it: settle already ran
+      // its unhook, so a route written now would sit in the process-wide map
+      // forever, holding this turn and taking the next press minted at the
+      // same ts. The fold is not lost — settle's own close awaits this open.
+      if (!settling) unhook = deps.stoppable(acked.channel, stream.ts, halt);
       return;
     }
     fellBack = true;
