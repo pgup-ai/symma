@@ -55,6 +55,10 @@ function harness(
     streams?: boolean;
     /** Thought fragments the run emits, spaced like `narrates`. */
     thinks?: string | string[];
+    /** Steps the run emits in one instant, so a floor has something to gate. */
+    narratesBurst?: string[];
+    /** The stream open resolves refused only after the run is already over. */
+    streamStalls?: boolean;
     /** The member presses the stream's stop button while the run is out. */
     stopsMidRun?: boolean;
     /** How long each acknowledgement update takes, by call order. */
@@ -196,6 +200,7 @@ function harness(
           Date.now = real;
         }
       }
+      for (const title of over.narratesBurst ?? []) spec.onProgress?.(title);
       if (over.stopsMidRun) {
         // The registration rides the narration chain, so the press waits a tick.
         await flush();
@@ -265,6 +270,8 @@ function harness(
     stream: (channel, thread, first, thought) => {
       streamed.opened.push(`${channel}/${thread}:${first}`);
       if (thought) streamed.thought.push(thought);
+      if (over.streamStalls)
+        return new Promise((resolve) => setTimeout(() => resolve(undefined), 15));
       return Promise.resolve(
         over.streams
           ? {
@@ -618,6 +625,7 @@ describe('dm message', () => {
         model: 'gpt-5.4-mini[low]',
       },
       models,
+      narratesBurst: ['Reading dm.ts', 'Running git log'],
     });
     await handleDm(
       {
@@ -636,16 +644,18 @@ describe('dm message', () => {
     // flight to be about, and the line reads the same after the answer lands as
     // it does now. The narration goes onto this same message, not a second post.
     assert.equal(posts[0]!.text, '`symma` · `read-only`');
-    runs[0]!.onProgress!('Reading dm.ts');
-    await flush();
-    assert.deepEqual(updates, [
-      { channel: 'D-nel', ts: '300.0', text: `${posts[0]!.text}\n\n_Reading dm.ts_` },
-    ]);
-    // Throttled: a turn narrating every file read would spend the rate limit on
-    // frames nobody reads.
-    runs[0]!.onProgress!('Running git log');
-    await flush();
-    assert.equal(updates.length, 1);
+    assert.deepEqual(updates[0], {
+      channel: 'D-nel',
+      ts: '300.0',
+      text: `${posts[0]!.text}\n\n_Reading dm.ts_`,
+    });
+    // Throttled: the second step landed inside the first one's interval, so
+    // nothing anywhere carries it — a turn narrating every file read would
+    // spend the rate limit on frames nobody reads.
+    assert.equal(
+      updates.some((u) => u.text.includes('Running git log')),
+      false,
+    );
     assert.deepEqual(posts[1]!.pickers, { conversation: 'conv-1', agent: 'codex', models });
   });
 
@@ -759,7 +769,10 @@ describe('dm message', () => {
     // Asked after the per-turn interval, not before it: a turn narrating every
     // frame would otherwise drain the workspace's allowance just by being busy,
     // without ever writing a line.
-    const { deps, runs, asks, charged } = harness({ existing: CONVERSATION });
+    const { deps, asks, charged } = harness({
+      existing: CONVERSATION,
+      narratesBurst: Array.from({ length: 5 }, () => 'Reading dm.ts'),
+    });
     await handleDm(
       {
         user: 'U-nel',
@@ -771,8 +784,6 @@ describe('dm message', () => {
       },
       deps,
     );
-    for (let i = 0; i < 5; i += 1) runs[0]!.onProgress!('Reading dm.ts');
-    await flush();
     // One request, for two: the step, and the tidy that step makes certain.
     // Charged per narration, a workspace's whole allowance of narrated turns
     // lands one uncounted `chat.update` each — twice the ceiling in a busy
@@ -1084,6 +1095,58 @@ describe('dm message', () => {
       deps,
     );
     assert.equal(stopping.size, 0);
+  });
+
+  it('still folds the card when the failure notice cannot post', async () => {
+    // Everything on the failure exit can throw too — the notice included —
+    // and a card left spinning claims the opposite of whatever the member
+    // does end up seeing.
+    const { deps, streamed } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streams: true,
+      fails: new Error('agent died'),
+      answerPostFails: new Error('slack refused it'),
+    });
+    await assert.rejects(
+      handleDm(
+        {
+          user: 'U-nel',
+          channel: 'D-nel',
+          ts: '250.0',
+          threadTs: '200.0',
+          eventId: 'Ev-1',
+          text: 'go',
+        },
+        deps,
+      ),
+    );
+    assert.deepEqual(streamed.stopped, ['error']);
+  });
+
+  it('drops a step the settle already outran', async () => {
+    // A refused open that resolves after the turn is over must not re-dispatch:
+    // the write would chain behind the links settle was waiting on, land after
+    // the tidy, and stand over the answer for good.
+    const { deps, updates, asks } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streamStalls: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    await flush();
+    assert.deepEqual(updates, []);
+    assert.deepEqual(asks, [], 'and no reservation for a write that never happens');
   });
 
   it('takes the narration back off once the answer is there to read', async () => {

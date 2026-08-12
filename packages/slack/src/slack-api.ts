@@ -797,25 +797,33 @@ export function slackApi(
       let id = 1;
       let title = first;
       let dead = false;
-      const push = async (chunks: TaskUpdateChunk[]): Promise<void> => {
-        if (dead) return;
+      const push = async (chunks: TaskUpdateChunk[]): Promise<boolean> => {
+        if (dead) return false;
         try {
           await quick.chat.appendStream({ channel, ts, chunks });
+          return true;
         } catch (error) {
           dead = true;
           said('stream went quiet', error);
+          return false;
         }
       };
       return {
         ts,
         append(next) {
-          const finished = card(id, title, 'complete');
-          id += 1;
-          title = next;
-          return push([finished, card(id, title, 'in_progress')]);
+          // The card advances only once Slack has it: an append that died left
+          // the old card in progress, and the stop has to close the card Slack
+          // actually holds, not the one that was never opened.
+          return push([card(id, title, 'complete'), card(id + 1, next, 'in_progress')]).then(
+            (landed) => {
+              if (!landed) return;
+              id += 1;
+              title = next;
+            },
+          );
         },
-        think(detail) {
-          return push([card(id, title, 'in_progress', detail)]);
+        async think(detail) {
+          await push([card(id, title, 'in_progress', detail)]);
         },
         async stop(last) {
           try {

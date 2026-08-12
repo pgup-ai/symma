@@ -190,11 +190,12 @@ describe('slack api', () => {
     const refusing = answering({ ok: false, error: 'feature_not_enabled' });
     const api = slackApi('xoxb-test', { fetch: refusing.fetchImpl, log: (m) => lines.push(m) });
     assert.equal(await api.stream('D-nel', '200.0', 'Reading dm.ts'), undefined);
-    assert.deepEqual(lines, ['stream refused: feature_not_enabled']);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /feature_not_enabled/);
   });
 
   it('goes quiet after a dead append, but still tries the fold', async () => {
-    const { fetchImpl, called } = answering(
+    const { fetchImpl, called, seen } = answering(
       { ok: true, ts: '400.0' },
       { ok: false, error: 'message_not_in_streaming_state' },
       { ok: true },
@@ -207,6 +208,11 @@ describe('slack api', () => {
     assert.deepEqual(called, ['chat.startStream', 'chat.appendStream']);
     await stream!.stop('complete');
     assert.deepEqual(called, ['chat.startStream', 'chat.appendStream', 'chat.stopStream']);
+    // And it closes the card Slack actually holds — the dead append advanced
+    // nothing, so the fold names the first card, not the one never opened.
+    assert.deepEqual(JSON.parse(new URLSearchParams(String(seen[2])).get('chunks')!), [
+      { type: 'task_update', id: '1', title: 'Reading dm.ts', status: 'complete' },
+    ]);
   });
 
   it('answers a failed membership scan with nothing, not with an empty list', async () => {

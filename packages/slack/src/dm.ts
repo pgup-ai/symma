@@ -703,10 +703,14 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   let fellBack = false;
   let updating = Promise.resolve();
   let unhook: (() => void) | undefined;
+  let settling = false;
   /** Wires the opened stream's stop press back to this turn, or falls back. A
    * refused open re-enters `narrate` with the floor reset where there is a
    * step to re-enter with — a pending thought is dropped instead, since the
-   * acknowledgement path renders steps and nothing else. */
+   * acknowledgement path renders steps and nothing else. Nothing re-enters
+   * once the turn is settling: the re-dispatch chains behind the links settle
+   * is already waiting on, so its write would land after the tidy and stand
+   * over the answer for good. */
   const opened = (title?: string) => (stream: TurnStream | undefined) => {
     if (stream) {
       unhook = deps.stoppable(acked.channel, stream.ts, halt);
@@ -714,7 +718,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     }
     fellBack = true;
     lastShown = 0;
-    if (title !== undefined) narrate(title);
+    if (title !== undefined && !settling) narrate(title);
   };
   const narrate = (title: string): void => {
     const now = Date.now();
@@ -808,6 +812,7 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
   // nobody is waiting on. Fail-open like `narrate`, and waited on to a
   // deadline, not indefinitely.
   const settle = async (text: string, last: 'complete' | 'error' = 'complete'): Promise<void> => {
+    settling = true;
     unhook?.();
     const closing: Promise<unknown>[] = [];
     if (steps !== undefined)
@@ -906,25 +911,30 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         () => true,
         () => false,
       ));
-    await deps.finish(conversation.id, turn, 'failed');
-    await deps.mark(message.channel, message.ts, 'failed');
-    await deps.post(
-      conversation.dmChannel,
-      unoffered
-        ? shed
-          ? `The agent no longer offers \`${dropped}\`, so I cleared it. Send it again and I will retry with its default.`
-          : `The agent no longer offers \`${dropped}\`, and I could not clear it. Send it again and I will keep trying.`
-        : 'That run did not finish. Send it again and I will retry.',
-      conversation.rootThread,
-      undefined,
-      // The acknowledgement named the files it fetched, and a turn that never
-      // reached the agent leaves that promise standing — so what could not be
-      // read is said here too, where the member is deciding whether to resend.
-      skippedNote(attached),
-    );
-    // Or "Reading `rows.csv`…" is left standing over "That run did not finish"
-    // — and a card still spinning would claim the opposite of what it sits over.
-    await settle(opening, 'error');
+    try {
+      await deps.finish(conversation.id, turn, 'failed');
+      await deps.mark(message.channel, message.ts, 'failed');
+      await deps.post(
+        conversation.dmChannel,
+        unoffered
+          ? shed
+            ? `The agent no longer offers \`${dropped}\`, so I cleared it. Send it again and I will retry with its default.`
+            : `The agent no longer offers \`${dropped}\`, and I could not clear it. Send it again and I will keep trying.`
+          : 'That run did not finish. Send it again and I will retry.',
+        conversation.rootThread,
+        undefined,
+        // The acknowledgement named the files it fetched, and a turn that never
+        // reached the agent leaves that promise standing — so what could not be
+        // read is said here too, where the member is deciding whether to resend.
+        skippedNote(attached),
+      );
+    } finally {
+      // Or "Reading `rows.csv`…" is left standing over "That run did not
+      // finish" — and a card still spinning would claim the opposite of what
+      // it sits over. In a `finally` because everything above can throw too,
+      // and whatever the member does see, the narration must not outlive it.
+      await settle(opening, 'error');
+    }
     return 'failed';
   }
 
