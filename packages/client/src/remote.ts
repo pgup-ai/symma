@@ -70,6 +70,12 @@ export interface RemoteAcpConfig {
   /** What the agent is doing right now, unthrottled — a caller rendering this
    * anywhere rate-limited does its own throttling. */
   onProgress?: (title: string) => void;
+  /** The agent thinking out loud, unthrottled and in fragments — the caller
+   * throttles and reassembles, same as `onProgress`. */
+  onThought?: (text: string) => void;
+  /** Handed a way to cancel the running turn once there is a session to cancel
+   * into; the turn then resolves normally, with the agent's own stopReason. */
+  onCancelable?: (cancel: () => void) => void;
   /** Receives `AcpSessionResult.notices` — what the agent said about itself
    * rather than about the prompt. Absent drops them. */
   onNotice?: (notice: string) => void;
@@ -299,6 +305,8 @@ export async function runRemotePrompt(
             floorUpstream: true,
             ...(config.mode !== undefined ? { mode: config.mode } : {}),
             ...(config.onProgress ? { onProgress: config.onProgress } : {}),
+            ...(config.onThought ? { onThought: config.onThought } : {}),
+            ...(config.onCancelable ? { onCancelable: config.onCancelable } : {}),
             ...(config.attachments?.length ? { attachments: config.attachments } : {}),
             ...(config.resume !== undefined ? { resume: config.resume } : {}),
             ...(config.context !== undefined ? { context: config.context } : {}),

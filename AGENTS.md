@@ -70,7 +70,14 @@ a step there reserves the tidy that takes it back off, because charging only
 what it writes puts one uncounted update per narrating turn over the ceiling.
 `chat.startStream` and `chat.stopStream` are spent once per narrated turn and
 not budgeted: a refused open _is_ the fallback signal, and a refused stop only
-costs the fold.
+costs the fold. The agent's thinking rides the open card's detail line — pooled,
+tail-clamped, and never the acknowledgement, which renders steps and nothing
+else — and can itself open the stream, under a card named for it. The stream
+carries Slack's own stop button: a press routes back through the turn that owns
+it as ACP's `session/cancel`, the turn resolves through the path already being
+awaited, and the partial answer is labelled as cut short on purpose. Both ride
+`driveAcpSession`'s `onThought`/`onCancelable`, additive on the published
+surface.
 Slack permalinks pasted into a message are fetched by the bot and ride the
 prompt — not the context, which an honoured resume drops — because the agent has
 only its own machine's Slack access, which is usually none. The bot reads with

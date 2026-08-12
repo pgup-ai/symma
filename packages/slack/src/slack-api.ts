@@ -92,7 +92,12 @@ export interface SlackApi {
    * append. Undefined however the workspace refuses, logged once and never
    * thrown: the caller narrates onto the acknowledgement instead, which is the
    * whole fallback. */
-  stream: (channel: string, thread: string, first: string) => Promise<TurnStream | undefined>;
+  stream: (
+    channel: string,
+    thread: string,
+    first: string,
+    thought?: string,
+  ) => Promise<TurnStream | undefined>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
    * and reporting a failed update as a failed share would be a lie the member
@@ -133,11 +138,17 @@ export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope' | 'a
 /** One turn's stream of task cards, under the acknowledgement it narrates
  * for. */
 export interface TurnStream {
+  /** The stream message's own id — what `message_stream_stopped` names, so the
+   * caller can route a member's stop press back to this turn. */
+  ts: string;
   /** Completes the card in progress and opens one for `next` — one
    * `chat.appendStream` call, so one stamp from the append budget. Goes quiet
    * for the turn on the first failure rather than throwing: cards and a
    * rewritten acknowledgement at once would be two narrations of one run. */
   append: (next: string) => Promise<void>;
+  /** Rewrites the card in progress with what the agent is thinking — same
+   * call, same stamp, same quiet death as `append`. */
+  think: (detail: string) => Promise<void>;
   /** Ends the stream, closing the card in progress the way the turn ended.
    * Tried even after an append died — the stop is what folds the cards away,
    * and its failure only costs the fold. */
@@ -733,12 +744,19 @@ export function slackApi(
         }
       }
     },
-    async stream(channel, thread, first) {
+    async stream(channel, thread, first, thought) {
       const card = (
         id: number,
         title: string,
         status: 'in_progress' | 'complete' | 'error',
-      ): TaskUpdateChunk => ({ type: 'task_update', id: String(id), title, status });
+        details?: string,
+      ): TaskUpdateChunk => ({
+        type: 'task_update',
+        id: String(id),
+        title,
+        status,
+        ...(details ? { details } : {}),
+      });
       const said = (what: string, error: unknown): void => {
         try {
           options.log?.(`${what}: ${slackCode(error) ?? String(error)}`);
@@ -746,43 +764,58 @@ export function slackApi(
           /* a caller's logger is not worth the turn either */
         }
       };
-      let opened;
-      try {
-        // No `task_display_mode`: the default is `timeline`, the running list
-        // this narration is.
-        opened = await quick.chat.startStream({
+      // Through `apiCall` for `publishHome`'s reason: `is_stoppable` postdates
+      // the SDK's typed arguments. No `task_display_mode` either way — the
+      // default is `timeline`, the running list this narration is.
+      const open = (stoppable: boolean): Promise<{ ts?: unknown }> =>
+        quick.apiCall('chat.startStream', {
           channel,
           thread_ts: thread,
-          chunks: [card(1, first, 'in_progress')],
+          chunks: [card(1, first, 'in_progress', thought)],
+          ...(stoppable ? { is_stoppable: true } : {}),
+          // `WebAPICallResult` carries no `ts`; the cast is the read.
+        }) as Promise<{ ts?: unknown }>;
+      let opened;
+      try {
+        opened = await open(true).catch(async (error: unknown) => {
+          // The stop button needs the `message_stream_stopped` subscription,
+          // which an install that predates this manifest does not have —
+          // streaming without the button beats not streaming at all.
+          if (slackCode(error) !== 'not_subscribed_to_message_stream_stopped') throw error;
+          said('stream not stoppable', error);
+          return open(false);
         });
       } catch (error) {
         said('stream refused', error);
         return undefined;
       }
       const ts = opened.ts;
-      if (!ts) {
+      if (typeof ts !== 'string' || !ts) {
         said('stream refused', new Error('chat.startStream returned no ts'));
         return undefined;
       }
       let id = 1;
       let title = first;
       let dead = false;
+      const push = async (chunks: TaskUpdateChunk[]): Promise<void> => {
+        if (dead) return;
+        try {
+          await quick.chat.appendStream({ channel, ts, chunks });
+        } catch (error) {
+          dead = true;
+          said('stream went quiet', error);
+        }
+      };
       return {
-        async append(next) {
-          if (dead) return;
+        ts,
+        append(next) {
           const finished = card(id, title, 'complete');
           id += 1;
           title = next;
-          try {
-            await quick.chat.appendStream({
-              channel,
-              ts,
-              chunks: [finished, card(id, title, 'in_progress')],
-            });
-          } catch (error) {
-            dead = true;
-            said('stream went quiet', error);
-          }
+          return push([finished, card(id, title, 'in_progress')]);
+        },
+        think(detail) {
+          return push([card(id, title, 'in_progress', detail)]);
         },
         async stop(last) {
           try {

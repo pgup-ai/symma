@@ -93,11 +93,13 @@ describe('slack api', () => {
     const { fetchImpl, seen, called } = answering({ ok: true, ts: '400.0' }, { ok: true });
     const api = slackApi('xoxb-test', { fetch: fetchImpl });
     const stream = await api.stream('D-nel', '200.0', 'Reading dm.ts');
-    assert.notEqual(stream, undefined);
+    assert.equal(stream?.ts, '400.0');
     assert.deepEqual(called, ['chat.startStream']);
     const opened = new URLSearchParams(String(seen[0]));
     assert.equal(opened.get('channel'), 'D-nel');
     assert.equal(opened.get('thread_ts'), '200.0');
+    // Stoppable, so the member gets Slack's own stop button on the stream.
+    assert.equal(opened.get('is_stoppable'), 'true');
     assert.deepEqual(JSON.parse(opened.get('chunks')!), [
       { type: 'task_update', id: '1', title: 'Reading dm.ts', status: 'in_progress' },
     ]);
@@ -130,6 +132,56 @@ describe('slack api', () => {
     assert.deepEqual(JSON.parse(new URLSearchParams(String(seen[2])).get('chunks')!), [
       { type: 'task_update', id: '2', title: 'Running git log', status: 'error' },
     ]);
+  });
+
+  it('retries the open without the stop button where the workspace lacks the event', async () => {
+    // An install that predates the manifest's `message_stream_stopped` refuses
+    // a stoppable open — streaming without the button beats not streaming.
+    const { fetchImpl, seen } = answering(
+      { ok: false, error: 'not_subscribed_to_message_stream_stopped' },
+      { ok: true, ts: '400.0' },
+    );
+    const api = slackApi('xoxb-test', { fetch: fetchImpl, log: () => {} });
+    const stream = await api.stream('D-nel', '200.0', 'Reading dm.ts');
+    assert.equal(stream?.ts, '400.0');
+    assert.equal(new URLSearchParams(String(seen[1])).get('is_stoppable'), null);
+  });
+
+  it('rewrites the open card with the thinking, never a second card', async () => {
+    const { fetchImpl, seen } = answering({ ok: true, ts: '400.0' }, { ok: true }, { ok: true });
+    const api = slackApi('xoxb-test', { fetch: fetchImpl });
+    // A thought can be what opens the stream, riding the first card as its
+    // detail line.
+    const stream = await api.stream('D-nel', '200.0', 'Thinking', 'weighing options');
+    assert.deepEqual(JSON.parse(new URLSearchParams(String(seen[0])).get('chunks')!), [
+      {
+        type: 'task_update',
+        id: '1',
+        title: 'Thinking',
+        status: 'in_progress',
+        details: 'weighing options',
+      },
+    ]);
+    await stream!.think('reading the diff instead');
+    assert.deepEqual(JSON.parse(new URLSearchParams(String(seen[1])).get('chunks')!), [
+      {
+        type: 'task_update',
+        id: '1',
+        title: 'Thinking',
+        status: 'in_progress',
+        details: 'reading the diff instead',
+      },
+    ]);
+    // And the next real step completes that same card, id unchanged.
+    await stream!.append('Reading dm.ts');
+    const chunks = JSON.parse(new URLSearchParams(String(seen[2])).get('chunks')!) as {
+      id: string;
+      status: string;
+    }[];
+    assert.deepEqual(
+      chunks.map((c) => `${c.id}:${c.status}`),
+      ['1:complete', '2:in_progress'],
+    );
   });
 
   it('answers a refused stream with nothing, and says why once', async () => {

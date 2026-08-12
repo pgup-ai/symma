@@ -53,6 +53,10 @@ function harness(
     /** The workspace serves thinking-step streams; absent, every open is
      * refused and narration falls back onto the acknowledgement. */
     streams?: boolean;
+    /** Thought fragments the run emits, spaced like `narrates`. */
+    thinks?: string | string[];
+    /** The member presses the stream's stop button while the run is out. */
+    stopsMidRun?: boolean;
     /** How long each acknowledgement update takes, by call order. */
     updateDelays?: number[];
     /** The first update throws where it stands rather than rejecting. */
@@ -113,7 +117,14 @@ function harness(
   const finished: Record<string, string>[] = [];
   const sheds: string[] = [];
   const updates: { channel: string; ts: string; text: string }[] = [];
-  const streamed = { opened: [] as string[], appended: [] as string[], stopped: [] as string[] };
+  const streamed = {
+    opened: [] as string[],
+    appended: [] as string[],
+    stopped: [] as string[],
+    thought: [] as string[],
+  };
+  const stopping = new Map<string, () => void>();
+  let cancels = 0;
   /** Acknowledgement updates in the order Slack finished applying them — not the
    * order they were sent — interleaved with the marks and the turn's close, so
    * what the turn waits on and what it has already finished with can be told
@@ -162,21 +173,33 @@ function harness(
       return over.seenFails ? Promise.reject(new Error('gateway away')) : Promise.resolve();
     },
     log: () => {},
-    run: (spec) => {
+    run: async (spec) => {
       runs.push(spec);
+      spec.onCancelable?.(() => {
+        cancels += 1;
+      });
       const titles = typeof over.narrates === 'string' ? [over.narrates] : (over.narrates ?? []);
-      if (titles.length) {
-        // Each step lands past every narration floor, or a list of them could
-        // only ever show its first.
+      const musings = typeof over.thinks === 'string' ? [over.thinks] : (over.thinks ?? []);
+      if (titles.length || musings.length) {
+        // Each lands past every narration floor, or a list of them could only
+        // ever show its first.
         const real = Date.now;
         try {
-          titles.forEach((title, spaced) => {
-            Date.now = () => real() + spaced * 11_000;
-            spec.onProgress?.(title);
-          });
+          [...titles.map((title) => ({ title })), ...musings.map((text) => ({ text }))].forEach(
+            (fires, spaced) => {
+              Date.now = () => real() + spaced * 11_000;
+              if ('title' in fires) spec.onProgress?.(fires.title);
+              else spec.onThought?.(fires.text);
+            },
+          );
         } finally {
           Date.now = real;
         }
+      }
+      if (over.stopsMidRun) {
+        // The registration rides the narration chain, so the press waits a tick.
+        await flush();
+        for (const halt of stopping.values()) halt();
       }
       return over.fails
         ? Promise.reject(over.fails)
@@ -239,13 +262,19 @@ function harness(
       room: () => (over.budgetSpent === true ? undefined : stamps++),
       take: () => {},
     },
-    stream: (channel, thread, first) => {
+    stream: (channel, thread, first, thought) => {
       streamed.opened.push(`${channel}/${thread}:${first}`);
+      if (thought) streamed.thought.push(thought);
       return Promise.resolve(
         over.streams
           ? {
+              ts: '400.0',
               append: (next: string) => {
                 streamed.appended.push(next);
+                return Promise.resolve();
+              },
+              think: (detail: string) => {
+                streamed.thought.push(detail);
                 return Promise.resolve();
               },
               stop: (last: 'complete' | 'error') => {
@@ -256,6 +285,11 @@ function harness(
             }
           : undefined,
       );
+    },
+    stoppable: (channel, ts, halt) => {
+      const key = `${channel}/${ts}`;
+      stopping.set(key, halt);
+      return () => stopping.delete(key);
     },
     working: (channel, ts, text) => {
       updates.push({ channel, ts, text });
@@ -305,6 +339,8 @@ function harness(
     asks,
     charged: () => charged,
     streamed,
+    stopping,
+    cancels: () => cancels,
     posts,
     turns,
     runs,
@@ -524,6 +560,8 @@ describe('dm message', () => {
         prompt: 'what broke?',
         model: 'kilo/default',
         onProgress: runs[0]!.onProgress,
+        onThought: runs[0]!.onThought,
+        onCancelable: runs[0]!.onCancelable,
       },
     ]);
     assert.equal(typeof runs[0]!.onProgress, 'function', 'the run can narrate itself');
@@ -817,7 +855,7 @@ describe('dm message', () => {
       },
       deps,
     );
-    assert.deepEqual(streamed, { opened: [], appended: [], stopped: [] });
+    assert.deepEqual(streamed, { opened: [], appended: [], stopped: [], thought: [] });
   });
 
   it('falls back to the acknowledgement without losing the step that asked', async () => {
@@ -923,6 +961,129 @@ describe('dm message', () => {
     assert.equal(updates.length, 1, 'one update: the ellipsis coming off');
     assert.notEqual(updates[0]!.text, posts[0]!.text);
     assert.equal(charged(), 1, 'taken without a reservation, since no step made one');
+  });
+
+  it('shows the thinking on the card it belongs to', async () => {
+    const { deps, streamed } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      thinks: 'Weighing the floor against the budget',
+      streams: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.deepEqual(streamed.opened, ['D-nel/200.0:Reading dm.ts']);
+    assert.deepEqual(streamed.thought, ['Weighing the floor against the budget']);
+    // Thinking rewrites the open card; it never opens a new one.
+    assert.deepEqual(streamed.appended, []);
+  });
+
+  it('opens the stream on a thought when thinking is all there is so far', async () => {
+    // An agent reasons before it reaches for a tool, and a member watching
+    // nothing happen is the thing narration exists to prevent.
+    const { deps, streamed } = harness({
+      existing: CONVERSATION,
+      thinks: 'The budget and the floor disagree here',
+      streams: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.deepEqual(streamed.opened, ['D-nel/200.0:Thinking']);
+    assert.deepEqual(streamed.thought, ['The budget and the floor disagree here']);
+  });
+
+  it('keeps thinking off the acknowledgement path', async () => {
+    // The fallback renders steps and nothing else: a line of reasoning
+    // rewritten above the answer is noise where a card detail is a glance.
+    const { deps, updates, streamed } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      thinks: 'This should never surface',
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.deepEqual(streamed.thought, []);
+    assert.equal(
+      updates.some((u) => u.text.includes('never surface')),
+      false,
+    );
+    assert.match(updates[0]!.text, /_Reading dm\.ts_/);
+  });
+
+  it('stops the run when the member presses the stream’s own stop', async () => {
+    const { deps, posts, streamed, cancels } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streams: true,
+      stopsMidRun: true,
+    });
+    const outcome = await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    // One press, one ACP cancel — and the turn still resolves through the path
+    // it was already on: the partial answer arrives, labelled as cut short.
+    assert.equal(cancels(), 1);
+    assert.equal(outcome, 'resumed');
+    assert.equal(posts.at(-1)!.text, 'the answer');
+    assert.match(posts.at(-1)!.notices![0]!, /Stopped at your request/);
+    assert.deepEqual(streamed.stopped, ['complete']);
+  });
+
+  it('forgets the stop route once the turn is over', async () => {
+    // The map outlives the turn, and a stale entry would stop whichever turn's
+    // stream is minted at the same ts next.
+    const { deps, stopping } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streams: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.equal(stopping.size, 0);
   });
 
   it('takes the narration back off once the answer is there to read', async () => {
