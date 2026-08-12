@@ -89,9 +89,9 @@ export interface SlackApi {
   working: (channel: string, ts: string, text: string) => Promise<void>;
   /** Opens the thinking-steps stream a narrated turn writes to, carrying its
    * first step so a stream is never visibly empty and the first step costs no
-   * append. Undefined where the workspace refuses one — a missing feature, a
-   * missing scope, a 429 — logged once and never thrown: the caller narrates
-   * onto the acknowledgement instead, which is the whole fallback. */
+   * append. Undefined however the workspace refuses, logged once and never
+   * thrown: the caller narrates onto the acknowledgement instead, which is the
+   * whole fallback. */
   stream: (channel: string, thread: string, first: string) => Promise<TurnStream | undefined>;
   /** Rewrites a posted message without its actions, so a share cannot be
    * pressed twice. Never throws: the publication has already landed by then,
@@ -130,10 +130,8 @@ export interface SlackApi {
  * working, and the same post as the bot would land. */
 export type Unusable = 'archived' | 'removed' | 'locked' | 'gone' | 'scope' | 'author';
 
-/** One turn's stream of task cards, under the acknowledgement it narrates for.
- * Slack renders them with its own thinking chrome — statuses flip live and the
- * finished list folds away — which is what rewriting the acknowledgement never
- * could do. */
+/** One turn's stream of task cards, under the acknowledgement it narrates
+ * for. */
 export interface TurnStream {
   /** Completes the card in progress and opens one for `next` — one
    * `chat.appendStream` call, so one stamp from the append budget. Goes quiet
@@ -195,8 +193,8 @@ export const UPDATES_PER_MINUTE = 30;
  * shared-pool shape as `chat.update`, one tier up: Slack allows 100+ (Tier 4),
  * and this sits under it for the same reason `UPDATES_PER_MINUTE` sits under
  * 50. `chat.startStream` and `chat.stopStream` are pools of their own, spent
- * once per narrated turn and not budgeted here: a refused open already has a
- * fallback, and a refused stop only costs the fold. */
+ * once per narrated turn and not budgeted here: their refusals already have
+ * answers. */
 export const APPENDS_PER_MINUTE = 80;
 
 export interface UpdateBudget {

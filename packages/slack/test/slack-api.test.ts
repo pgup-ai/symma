@@ -133,9 +133,7 @@ describe('slack api', () => {
   });
 
   it('answers a refused stream with nothing, and says why once', async () => {
-    // Undefined is the fallback signal — the caller narrates onto the
-    // acknowledgement instead — and the log line is the only trace a workspace
-    // without the feature leaves.
+    // The log line is the only trace a workspace without the feature leaves.
     const lines: string[] = [];
     const refusing = answering({ ok: false, error: 'feature_not_enabled' });
     const api = slackApi('xoxb-test', { fetch: refusing.fetchImpl, log: (m) => lines.push(m) });
@@ -152,13 +150,9 @@ describe('slack api', () => {
     const api = slackApi('xoxb-test', { fetch: fetchImpl, log: () => {} });
     const stream = await api.stream('D-nel', '200.0', 'Reading dm.ts');
     await stream!.append('Running git log');
-    // Dead: the next append is not even sent. Cards and a rewritten
-    // acknowledgement at once would be two narrations of one run, so there is
-    // no mid-turn fallback either — the turn goes quiet.
+    // Dead: the next append is not even sent.
     await stream!.append('Running tests');
     assert.deepEqual(called, ['chat.startStream', 'chat.appendStream']);
-    // The stop is tried anyway: it is what folds the cards away, and its
-    // failure would only cost the fold.
     await stream!.stop('complete');
     assert.deepEqual(called, ['chat.startStream', 'chat.appendStream', 'chat.stopStream']);
   });

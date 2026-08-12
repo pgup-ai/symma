@@ -781,8 +781,6 @@ describe('dm message', () => {
   });
 
   it('closes the card the way the turn actually ended', async () => {
-    // A card still spinning above "That run did not finish" would claim the
-    // opposite of what it sits over.
     const { deps, streamed } = harness({
       existing: CONVERSATION,
       narrates: 'Reading dm.ts',
@@ -823,9 +821,8 @@ describe('dm message', () => {
   });
 
   it('falls back to the acknowledgement without losing the step that asked', async () => {
-    // The open is the probe: a workspace that refuses it answers on the first
-    // narration, and that same step re-enters the acknowledgement path — with
-    // its reservation math — rather than being the price of finding out.
+    // The probing step re-enters the acknowledgement path, reservation math
+    // and all — it is not the price of finding out.
     const { deps, updates, streamed, asks } = harness({
       existing: CONVERSATION,
       narrates: 'Reading dm.ts',
@@ -848,8 +845,7 @@ describe('dm message', () => {
   });
 
   it('collapses a repeating step into the card it already opened', async () => {
-    // A tool called in a loop is one step, not a ladder of identical cards —
-    // and the skip costs the append budget nothing.
+    // A tool called in a loop is one step, not a ladder of identical cards.
     const { deps, streamed } = harness({
       existing: CONVERSATION,
       narrates: ['Reading dm.ts', 'Reading dm.ts', 'Running git log'],
