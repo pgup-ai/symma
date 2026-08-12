@@ -76,6 +76,7 @@ function fakeAgentIo(script: FakeAgentScript): {
   setModelIds: string[];
   setConfigCalls: unknown[];
   authCalls: unknown[];
+  cancels: unknown[];
 } {
   const input = new PassThrough();
   const output = new PassThrough();
@@ -83,6 +84,7 @@ function fakeAgentIo(script: FakeAgentScript): {
   const setModelIds: string[] = [];
   const setConfigCalls: unknown[] = [];
   const authCalls: unknown[] = [];
+  const cancels: unknown[] = [];
   let authed = false;
   let promptId: unknown;
   const send = (message: Record<string, unknown>): void => {
@@ -168,13 +170,15 @@ function fakeAgentIo(script: FakeAgentScript): {
       const blocks = (message.params as { prompt?: { text?: string }[] }).prompt ?? [];
       script.onPromptBlocks?.(blocks as Record<string, unknown>[]);
       script.onPrompt(agent, blocks.map((block) => block.text ?? '').join(''));
+    } else if (method === 'session/cancel') {
+      cancels.push(message.params);
     } else if (method === undefined && id !== undefined) {
       script.onClientResponse?.(id, (message as { result?: unknown }).result, agent);
     }
   });
   input.setEncoding('utf8');
   input.on('data', (chunk: string) => read(chunk));
-  return { input, output, setModeIds, setModelIds, setConfigCalls, authCalls };
+  return { input, output, setModeIds, setModelIds, setConfigCalls, authCalls, cancels };
 }
 
 /** A pid nothing holds, asked for rather than hard-coded: Linux `pid_max` can
@@ -609,6 +613,145 @@ describe('acp', () => {
         { id: 'agent', name: 'Agent', description: 'Read and edit files.' },
       ],
     });
+  });
+
+  it('hands thoughts to their sink, and never the replayed ones', async () => {
+    const thoughts: string[] = [];
+    const fake = fakeAgentIo({
+      capabilities: { loadSession: true },
+      onLoad: (agent) => {
+        // A resumed session replays the previous turn as the same frames —
+        // narrating it as this turn's thinking would show the wrong turn.
+        agent.update({
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'stale' },
+        });
+        return { result: {} };
+      },
+      onPrompt: (agent) => {
+        // A malformed chunk is dropped, not forwarded as a non-string.
+        agent.update({
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 42 },
+        });
+        agent.update({
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'I should read ' },
+        });
+        agent.update({
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'dm.ts first.' },
+        });
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'done' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      model: 'codex/default',
+      resume: 's1',
+      onThought: (text) => thoughts.push(text),
+    });
+    // Fragments as they came — reassembly is the caller's, like throttling.
+    assert.deepEqual(thoughts, ['I should read ', 'dm.ts first.']);
+    // And the answer is untouched by them: a thought is never a segment.
+    assert.equal(result.text, 'done');
+  });
+
+  it('keeps the turn alive through a thought sink that throws', async () => {
+    const fake = fakeAgentIo({
+      onPrompt: (agent) => {
+        agent.update({
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'pondering' },
+        });
+        agent.update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'done' },
+        });
+        agent.finish();
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      model: 'codex/default',
+      onThought: () => {
+        throw new Error('renderer died');
+      },
+    });
+    assert.equal(result.text, 'done');
+  });
+
+  it('answers false when the cancel frame cannot leave, instead of throwing', async () => {
+    // The boolean is a notification's only error path, and the caller labels a
+    // member-facing answer off it — a throw here would take the stop handler
+    // down instead of leaving the turn honestly unstopped.
+    let cancel: (() => boolean) | undefined;
+    const fake = fakeAgentIo({
+      onPrompt: (agent) => {
+        assert.equal(cancel!(), false);
+        agent.finish();
+      },
+    });
+    const raw = fake.input.write.bind(fake.input);
+    fake.input.write = ((chunk: unknown, ...rest: never[]) => {
+      if (String(chunk).includes('session/cancel')) throw new Error('pipe burst');
+      return raw(chunk as string, ...rest);
+    }) as typeof fake.input.write;
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      model: 'codex/default',
+      onCancelable: (handed) => {
+        cancel = handed;
+      },
+    });
+    assert.deepEqual(fake.cancels, []);
+    assert.equal(result.stopReason, 'end_turn');
+  });
+
+  it('hands over a cancel that sends session/cancel, and only then', async () => {
+    let cancel: (() => void) | undefined;
+    const fake = fakeAgentIo({
+      onPrompt: (agent) => {
+        // The member pressed stop mid-turn: the agent answers the prompt it
+        // was already running with its own stopReason, so the turn resolves
+        // through the path the caller was awaiting all along.
+        cancel!();
+        setTimeout(() => agent.finish('cancelled'), 5);
+      },
+    });
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      model: 'codex/default',
+      onCancelable: (handed) => {
+        // Handed only once there is a session to cancel into.
+        assert.deepEqual(fake.cancels, []);
+        // And it answers that the frame left, which is all the receipt a
+        // notification has.
+        cancel = () => assert.equal(handed(), true);
+      },
+    });
+    assert.deepEqual(fake.cancels, [{ sessionId: 's1' }]);
+    assert.equal(result.stopReason, 'cancelled');
   });
 
   it('selects a model off the roster, reports it, and narrates tool calls', async () => {

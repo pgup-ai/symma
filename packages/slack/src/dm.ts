@@ -26,7 +26,7 @@ import {
 import type { ConversationRef } from './mention.js';
 import { decideTurn, type RefusalReason } from './presence.js';
 import { LINKS_PER_MESSAGE, resolveLinks, slackLinks, type LinkMiss } from './links.js';
-import { plainly, type MarkState, type UpdateBudget } from './slack-api.js';
+import { plainly, type MarkState, type TurnStream, type UpdateBudget } from './slack-api.js';
 import { threadSnapshot, type ThreadMessage } from './snapshot.js';
 
 export interface DmMessage {
@@ -103,6 +103,12 @@ export interface RunSpec {
   context?: string;
   /** What the agent is doing, for the acknowledgement to show while it runs. */
   onProgress?: (title: string) => void;
+  /** The agent thinking out loud, in fragments — reassembled and throttled
+   * here, rendered as the open card's detail line. */
+  onThought?: (text: string) => void;
+  /** Handed a way to cancel the running turn, once there is a session to
+   * cancel into — answering whether the cancel left the process. */
+  onCancelable?: (cancel: () => boolean) => void;
   /** The member's own files, already fetched, for the agent to read. */
   attachments?: PromptAttachment[];
 }
@@ -112,6 +118,11 @@ export interface RunSpec {
  * take that budget on its own before a second turn had asked for any. Long
  * enough to be cheap, short enough that a run still looks like it is moving. */
 const PROGRESS_MIN_MS = 10_000;
+
+/** The stream's own floor, shorter: a card flipping every few seconds is what
+ * "live" means, `chat.appendStream` allows twice what `chat.update` does, and a
+ * card is a line in a list rather than a rewrite of the whole message. */
+const STREAM_MIN_MS = 3_000;
 
 /** How long the answer's own handler will wait on the update that tidies the
  * acknowledgement, for a line the member is not waiting for. Landing late is
@@ -127,6 +138,20 @@ const TIDY_MS = 10_000;
  * closes it as surely as a backtick does. Clamped, since a title is a label. */
 const asStep = (title: string): string =>
   plainly(title).replaceAll('_', ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+
+/** A thought buffer on its way into a card's detail line — the tail, because
+ * the freshest thinking is the end of it, and a detail line is a glance, not a
+ * log. Clamped under the 256 characters a task chunk field takes, and like
+ * `slack-api`'s own clip: a slice landing between the halves of an emoji
+ * leaves a lone surrogate at the front, and one unit forward is a whole
+ * character. */
+const asThought = (buffer: string): string => {
+  const tail = plainly(buffer).replace(/\s+/g, ' ').trim().slice(-250);
+  return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
+};
+
+/** The card a turn thinks under before it has called a single tool. */
+const THINKING = 'Thinking';
 
 /** Rounded: what a member does with a token count is notice a turn that cost
  * ten times the last one. */
@@ -333,6 +358,23 @@ export interface DmDeps {
    * `chat.update` per app rather than per channel, so this is the ceiling a
    * per-turn interval cannot be. */
   updates: UpdateBudget;
+  /** Room on the stream — `chat.appendStream` is its own pool, shared the same
+   * way. */
+  appends: UpdateBudget;
+  /** The thinking-steps stream for this turn's narration, opened on the first
+   * step. Undefined where the workspace refuses one, and the turn narrates onto
+   * the acknowledgement instead. */
+  stream: (
+    channel: string,
+    thread: string,
+    first: string,
+    thought?: string,
+  ) => Promise<TurnStream | undefined>;
+  /** Routes a member pressing Slack's stop on this stream back to the turn
+   * that owns it. Returns the unhook, called once the turn is over: the map
+   * this writes outlives the turn, and a stale entry would stop whichever
+   * turn's stream is minted at the same ts next. */
+  stoppable: (channel: string, ts: string, halt: () => void) => () => void;
   /** The same ceiling a mention's context runs under (§4). */
   budgetBytes: number;
   post: (
@@ -647,63 +689,165 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
 
   await deps.mark(message.channel, message.ts, 'working');
 
-  // The agent's own narration, rewritten onto the acknowledgement it already
-  // posted — Slack gives a bot no typing indicator, so the message is the only
-  // place a long turn can show it is still moving. Throttled because
-  // `chat.update` is rate-limited and a busy turn narrates far faster than
-  // anyone reads; fails open, since this is a hint and not the answer.
+  // The agent's own narration — Slack gives a bot no typing indicator, so this
+  // is the only place a long turn can show it is still moving. Streamed as task
+  // cards under the acknowledgement where the workspace serves a stream, and
+  // rewritten onto the acknowledgement itself where it does not. Both throttled
+  // and budgeted: either pool is shared by every turn at once, and a busy turn
+  // narrates far faster than anyone reads. Fails open throughout — a hint, not
+  // the answer.
   //
   // Queued rather than concurrent: two updates in flight on one message can land
   // in either order, and the cleanup below losing that race would leave a step
   // sitting above the answer — the thing it is there to take away.
   let lastShown = 0;
   let reserved: number | undefined;
+  let ackWritten = false;
+  let steps: Promise<TurnStream | undefined> | undefined;
+  let lastStep: string | undefined;
+  let fellBack = false;
   let updating = Promise.resolve();
+  let unhook: (() => void) | undefined;
+  let settling = false;
+  /** Wires the opened stream's stop press back to this turn, or falls back. A
+   * refused open re-enters `narrate` with the floor reset where there is a
+   * step to re-enter with — a pending thought is dropped instead, since the
+   * acknowledgement path renders steps and nothing else. Nothing re-enters
+   * once the turn is settling: the re-dispatch chains behind the links settle
+   * is already waiting on, so its write would land after the tidy and stand
+   * over the answer for good. */
+  const opened = (title?: string) => (stream: TurnStream | undefined) => {
+    if (stream) {
+      // Registered only while the turn can still use it: settle already ran
+      // its unhook, so a route written now would sit in the process-wide map
+      // forever, holding this turn and taking the next press minted at the
+      // same ts. The fold is not lost — settle's own close awaits this open.
+      if (!settling) unhook = deps.stoppable(acked.channel, stream.ts, halt);
+      return;
+    }
+    fellBack = true;
+    lastShown = 0;
+    if (title !== undefined && !settling) narrate(title);
+  };
   const narrate = (title: string): void => {
     const now = Date.now();
-    if (now - lastShown < PROGRESS_MIN_MS) return;
-    // Asked after this turn's own floor, so a quiet turn does not spend the
-    // workspace's budget just by being asked, and refused rather than queued:
-    // narration is only worth anything while it is current. Two on the first
-    // step, because the cleanup below is not optional once a step is written —
-    // unreserved, every narrating turn would put one uncounted `chat.update`
-    // over the ceiling, and a busy minute would clear it twice over.
-    const paid = deps.updates.room(lastShown ? 1 : 2);
-    if (paid === undefined) return;
-    reserved ??= paid;
+    if (now - lastShown < (fellBack ? PROGRESS_MIN_MS : STREAM_MIN_MS)) return;
+    const step = asStep(title);
+    if (fellBack) {
+      // Asked after this turn's own floor, so a quiet turn does not spend the
+      // workspace's budget just by being asked, and refused rather than queued:
+      // narration is only worth anything while it is current. Two on the first
+      // write, because the cleanup below is not optional once a step is written
+      // — unreserved, every narrating turn would put one uncounted
+      // `chat.update` over the ceiling, and a busy minute would clear it twice.
+      const paid = deps.updates.room(ackWritten ? 1 : 2);
+      if (paid === undefined) return;
+      reserved ??= paid;
+      ackWritten = true;
+      lastShown = now;
+      // Caught on the chain and not on the call, so a `working` that throws
+      // where it stands rather than rejecting cannot leave `updating` rejected
+      // — every link after it, the cleanup included, would be skipped and the
+      // step would stay exactly where this is meant to take it from.
+      updating = updating
+        .then(() => deps.working(acked.channel, acked.ts, `${ack}\n\n_${step}_`))
+        .catch(() => undefined);
+      return;
+    }
+    if (steps === undefined) {
+      lastShown = now;
+      lastStep = step;
+      // The first step rides the open, paid from `chat.startStream`'s own pool.
+      // A refused open re-enters above with the floor reset, so the step a
+      // fallback workspace would otherwise lose is the one that finds out.
+      steps = deps.stream(acked.channel, conversation.rootThread, step);
+      updating = steps.then(opened(title)).catch(() => undefined);
+      return;
+    }
+    // One card per step: the same title again is the card already in progress.
+    if (step === lastStep) return;
+    if (deps.appends.room(1) === undefined) return;
     lastShown = now;
-    // Caught on the chain and not on the call, so a `working` that throws where
-    // it stands rather than rejecting cannot leave `updating` rejected — every
-    // link after it, the cleanup included, would be skipped and the step would
-    // stay exactly where this is meant to take it from.
-    updating = updating
-      .then(() => deps.working(acked.channel, acked.ts, `${ack}\n\n_${asStep(title)}_`))
-      .catch(() => undefined);
+    lastStep = step;
+    updating = updating.then(async () => (await steps)?.append(step)).catch(() => undefined);
   };
 
-  // Slack cannot fold the narration away the way a terminal does, so the last
-  // step and the ellipsis are in the way once the turn is over. Queued behind
-  // the narration it is undoing, and called only after the turn is closed: a
-  // `chat.update` Slack is slow to take would otherwise hold the turn open, and
-  // a member's next message would be refused for a line nobody is waiting on.
-  // Fail-open like `narrate`, and waited on to a deadline, not indefinitely.
-  const settle = async (text: string): Promise<void> => {
-    if (!lastShown && !inFlight) return;
-    await before(
-      TIDY_MS,
-      updating
-        .then(() => {
-          // Charged against the call and not against the intention: this waits
-          // behind the narration it is undoing, and a reservation still live
-          // when that wait began can have aged out by the time the call goes.
-          // Taken rather than asked either way — an acknowledgement left
-          // mid-step above a delivered answer reports the turn wrongly, where a
-          // quiet one is merely quiet.
-          deps.updates.take(reserved);
-          return deps.working(acked.channel, acked.ts, text);
-        })
-        .catch(() => undefined),
-    );
+  // The agent thinking out loud, as the open card's detail line. Fragments
+  // pool until the floor lets one through, and the tail is what shows — the
+  // freshest thinking is the end of the buffer. Thoughts never reach the
+  // acknowledgement path: a rewritten line of reasoning above the answer is
+  // noise where a card detail is a glance, so a fallback turn thinks silently.
+  let thoughts = '';
+  const think = (text: string): void => {
+    thoughts += text;
+    if (fellBack) return;
+    const now = Date.now();
+    if (now - lastShown < STREAM_MIN_MS) return;
+    const detail = asThought(thoughts);
+    if (!detail) return;
+    thoughts = '';
+    if (steps === undefined) {
+      lastShown = now;
+      lastStep = THINKING;
+      steps = deps.stream(acked.channel, conversation.rootThread, THINKING, detail);
+      updating = steps.then(opened()).catch(() => undefined);
+      return;
+    }
+    if (deps.appends.room(1) === undefined) return;
+    lastShown = now;
+    updating = updating.then(async () => (await steps)?.think(detail)).catch(() => undefined);
+  };
+
+  // The member's stop press, routed here from the stream's own button. The
+  // cancel lands on the agent as ACP's `session/cancel`, and the turn still
+  // resolves through the one path already being awaited — with whatever the
+  // agent had. `stopped` labels that answer as cut short on purpose, so it is
+  // set by the cancel actually leaving, not by the press: a cancel a dead
+  // pipe swallowed leaves the turn to finish whole, and "stopped at your
+  // request" over a complete answer misreports both.
+  let cancelRun: (() => boolean) | undefined;
+  let stopWanted = false;
+  let stopped = false;
+  const halt = (): void => {
+    // Both orders are real: a stream opens before the session exists, and a
+    // press can land in the gap.
+    if (cancelRun) {
+      if (cancelRun()) stopped = true;
+    } else stopWanted = true;
+  };
+
+  // The stream folds its cards away when stopped; the acknowledgement cannot
+  // fold, so its last step and the ellipsis are in the way once the turn is
+  // over. Either close is queued behind the narration it is undoing, and called
+  // only after the turn is closed: a call Slack is slow to take would otherwise
+  // hold the turn open, and a member's next message would be refused for a line
+  // nobody is waiting on. Fail-open like `narrate`, and waited on to a
+  // deadline, not indefinitely.
+  const settle = async (text: string, last: 'complete' | 'error' = 'complete'): Promise<void> => {
+    settling = true;
+    unhook?.();
+    const closing: Promise<unknown>[] = [];
+    if (steps !== undefined)
+      closing.push(updating.then(async () => (await steps)?.stop(last)).catch(() => undefined));
+    // The acknowledgement needs tidying where narration wrote on it, and where
+    // a resume offer left an ellipsis — which a streamed turn still owes, since
+    // the cards sit under the acknowledgement rather than on it.
+    if (ackWritten || inFlight)
+      closing.push(
+        updating
+          .then(() => {
+            // Charged against the call and not against the intention: this
+            // waits behind the narration it is undoing, and a reservation still
+            // live when that wait began can have aged out by the time the call
+            // goes. Taken rather than asked either way — an acknowledgement
+            // left mid-step above a delivered answer reports the turn wrongly,
+            // where a quiet one is merely quiet.
+            deps.updates.take(reserved);
+            return deps.working(acked.channel, acked.ts, text);
+          })
+          .catch(() => undefined),
+      );
+    if (closing.length) await before(TIDY_MS, Promise.all(closing));
   };
 
   let answer: {
@@ -744,6 +888,11 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
           : []),
       ].join('\n\n'),
       onProgress: narrate,
+      onThought: think,
+      onCancelable: (cancel) => {
+        cancelRun = cancel;
+        if (stopWanted && cancel()) stopped = true;
+      },
       ...(caught?.context ? { context: caught.context } : {}),
       ...(decision.resume ? { resume: decision.resume } : {}),
       ...(decision.workspace ? { workspace: decision.workspace } : {}),
@@ -774,26 +923,41 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
         () => true,
         () => false,
       ));
-    await deps.finish(conversation.id, turn, 'failed');
-    await deps.mark(message.channel, message.ts, 'failed');
-    await deps.post(
-      conversation.dmChannel,
-      unoffered
-        ? shed
-          ? `The agent no longer offers \`${dropped}\`, so I cleared it. Send it again and I will retry with its default.`
-          : `The agent no longer offers \`${dropped}\`, and I could not clear it. Send it again and I will keep trying.`
-        : 'That run did not finish. Send it again and I will retry.',
-      conversation.rootThread,
-      undefined,
-      // The acknowledgement named the files it fetched, and a turn that never
-      // reached the agent leaves that promise standing — so what could not be
-      // read is said here too, where the member is deciding whether to resend.
-      skippedNote(attached),
-    );
-    // Or "Reading `rows.csv`…" is left standing over "That run did not finish".
-    await settle(opening);
+    try {
+      await deps.finish(conversation.id, turn, 'failed');
+      await deps.mark(message.channel, message.ts, 'failed');
+      await deps.post(
+        conversation.dmChannel,
+        unoffered
+          ? shed
+            ? `The agent no longer offers \`${dropped}\`, so I cleared it. Send it again and I will retry with its default.`
+            : `The agent no longer offers \`${dropped}\`, and I could not clear it. Send it again and I will keep trying.`
+          : 'That run did not finish. Send it again and I will retry.',
+        conversation.rootThread,
+        undefined,
+        // The acknowledgement named the files it fetched, and a turn that never
+        // reached the agent leaves that promise standing — so what could not be
+        // read is said here too, where the member is deciding whether to resend.
+        skippedNote(attached),
+      );
+    } finally {
+      // Or "Reading `rows.csv`…" is left standing over "That run did not
+      // finish" — and a card still spinning would claim the opposite of what
+      // it sits over. In a `finally` because everything above can throw too,
+      // and whatever the member does see, the narration must not outlive it.
+      await settle(opening, 'error');
+    }
     return 'failed';
   }
+
+  // The button's window is the run: the turn is settling from the moment the
+  // answer exists, in both directions — a route already written is unhooked,
+  // and an open still resolving registers none — so a press landing during
+  // delivery cannot cancel a session that already finished or label a whole
+  // answer as cut short.
+  settling = true;
+  unhook?.();
+  unhook = undefined;
 
   const ran = {
     session: answer.session,
@@ -816,6 +980,9 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
       // the session the turn ran in is listed by the agent's own CLI, and this
       // is the one line that turns "it ran somewhere" into somewhere reachable.
       [
+        // First among the asides: it reframes everything under it — a partial
+        // answer read as complete is the misreport, not the stop itself.
+        ...(stopped ? ['Stopped at your request — this is where it got to.'] : []),
         ...answer.notices,
         ...skippedNote(attached),
         // The agent took the turn but not the file: said here because the

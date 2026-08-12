@@ -267,6 +267,20 @@ class AcpConnection {
     this.pending.clear();
   }
 
+  /** A notification has no id, so nothing will ever answer it — whether the
+   * frame left this process is the only receipt there is, and the caller
+   * deciding what to tell a member deserves at least that much. */
+  notify(method: string, params: Record<string, unknown>): boolean {
+    // Total, whatever the stream does: a transport torn down between the
+    // writable check and the write itself surfaces as a throw on some stream
+    // types, and this boolean is a notification's only error path.
+    try {
+      return this.write({ jsonrpc: '2.0', method, params });
+    } catch {
+      return false;
+    }
+  }
+
   request(method: string, params: Record<string, unknown>): Promise<unknown> {
     const id = this.nextId++;
     const promise = new Promise<unknown>((resolve, reject) => {
@@ -374,6 +388,16 @@ export interface AcpSessionOptions {
   /** What the agent is doing right now, at its own pace — a chatty turn emits
    * far more of these than any surface wants, so the caller throttles. */
   onProgress?: (title: string) => void;
+  /** The agent thinking out loud, as whatever fragments it emits — same pace
+   * warning as `onProgress`, and the caller also reassembles: a fragment is
+   * not a sentence. Nothing arrives from agents that never send thoughts. */
+  onThought?: (text: string) => void;
+  /** Handed a way to cancel the turn, once there is a session to cancel into.
+   * Calling it sends ACP's `session/cancel` and answers whether the frame
+   * left this process; the agent then ends the prompt with its own
+   * stopReason, so the turn still resolves through the one path the caller is
+   * already awaiting. */
+  onCancelable?: (cancel: () => boolean) => void;
 }
 
 /** One file travelling with a prompt: `text` is the contents as they are,
@@ -552,7 +576,23 @@ export async function driveAcpSession(
       if (method !== 'session/update') return;
       const update = (params.update ?? {}) as Record<string, unknown>;
       const kind = update.sessionUpdate;
-      if (kind === 'agent_message_chunk') {
+      if (kind === 'agent_thought_chunk') {
+        const content = update.content as { type?: string; text?: string } | undefined;
+        // Same guard as `onProgress`: inside the message loop, a sink that
+        // throws would take the turn with it, and thinking is only a hint.
+        if (
+          !replaying &&
+          content?.type === 'text' &&
+          typeof content.text === 'string' &&
+          content.text
+        ) {
+          try {
+            options.onThought?.(content.text);
+          } catch (error) {
+            log(`acp:${agent} ${label}: thought sink threw, dropping one: ${String(error)}`);
+          }
+        }
+      } else if (kind === 'agent_message_chunk') {
         const messageId = update.messageId;
         if (messageId !== undefined) usesMessageIds = true;
         // `undefined` is an id like any other, so a chunk the agent did not
@@ -687,6 +727,16 @@ export async function driveAcpSession(
   const sessionId = session.sessionId;
   if (typeof sessionId !== 'string' || !sessionId) {
     throw new Error(`acp:${agent} ${label}: session/new returned no sessionId`);
+  }
+  if (options.onCancelable) {
+    // From here down a cancel has something to land on. `session/cancel` is a
+    // notification: the answer arrives as the prompt's own stopReason, so a
+    // cancelled turn still resolves through the path the caller is awaiting.
+    try {
+      options.onCancelable(() => conn.notify('session/cancel', { sessionId }));
+    } catch (error) {
+      log(`acp:${agent} ${label}: cancel sink threw, dropping it: ${String(error)}`);
+    }
   }
   if (options.configOptionModelIds?.length) {
     await selectModelConfigOption(conn, sessionId, session, options);

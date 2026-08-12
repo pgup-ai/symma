@@ -21,6 +21,7 @@ import { homeBlocks, modelPrompt, type Linking } from './home.js';
 import { handleShare } from './share.js';
 import { handleMention, type ConversationRef } from './mention.js';
 import {
+  APPENDS_PER_MINUTE,
   updateBudget,
   slackApi,
   DEFAULT_AGENT_ACTION,
@@ -141,9 +142,16 @@ const mint = async (slackUser: string): Promise<MintResult> => {
 
 const api = slackApi(botToken, { log });
 
-// One budget for the process, which is one app in one workspace — the unit
-// Slack counts `chat.update` by.
+// One budget per pool for the process, which is one app in one workspace — the
+// unit Slack counts `chat.update` and `chat.appendStream` by.
 const updates = updateBudget();
+const appends = updateBudget(APPENDS_PER_MINUTE);
+
+// Streams a member can still stop, by the message that carries the button.
+// One map for the process: the stop event arrives with no memory of which
+// turn opened the stream, so this is that memory — written when a stream
+// opens, taken back out when its turn settles.
+const stopping = new Map<string, () => void>();
 
 /** What `/model` and the home tab render: the turn route without a turn, which
  * is what keeps a picker from minting a credential every time it is looked at. */
@@ -254,6 +262,8 @@ const depsFor = (user: string) => {
       resume,
       context,
       onProgress,
+      onThought,
+      onCancelable,
       attachments,
     }: RunSpec) => {
       const notices: string[] = [];
@@ -284,6 +294,8 @@ const depsFor = (user: string) => {
           onUnsupported: (files) => (unsupported = files),
           onApprovals: (asked) => (approvals = asked),
           ...(onProgress ? { onProgress } : {}),
+          ...(onThought ? { onThought } : {}),
+          ...(onCancelable ? { onCancelable } : {}),
           ...(attachments ? { attachments } : {}),
           ...(resume ? { resume } : {}),
           ...(context ? { context } : {}),
@@ -356,6 +368,7 @@ const depsFor = (user: string) => {
       await ask('/api/slack/model', { user, conversation, model: null });
     },
     working: api.working,
+    stream: api.stream,
     fetchFile: api.fetchFile,
   };
 };
@@ -403,7 +416,14 @@ const connection = socketMode({
               shedMode: deps.shedMode,
               shedModel: deps.shedModel,
               working: deps.working,
+              stream: deps.stream,
+              stoppable: (channel, ts, halt) => {
+                const key = `${channel}/${ts}`;
+                stopping.set(key, halt);
+                return () => stopping.delete(key);
+              },
               updates,
+              appends,
               fetchFile: deps.fetchFile,
               mark: api.mark,
               threadReplies: deps.threadReplies,
@@ -416,6 +436,21 @@ const connection = socketMode({
             },
           ),
         );
+        return;
+      }
+      if (event?.type === 'message_stream_stopped') {
+        // The payload names the stream message; `ts` is the shape the docs
+        // imply and `message_ts` the shape message events usually take —
+        // unverified against a published example, so a press that matches
+        // neither logs the event and becomes the probe that documents it.
+        const stop = event as { channel?: unknown; ts?: unknown; message_ts?: unknown };
+        const at = [stop.ts, stop.message_ts].find((t): t is string => typeof t === 'string');
+        const halt =
+          typeof stop.channel === 'string' && at
+            ? stopping.get(`${stop.channel}/${at}`)
+            : undefined;
+        if (halt) halt();
+        else log(`stream stop for nobody: ${JSON.stringify(event).slice(0, 300)}`);
         return;
       }
       if (event?.type === 'app_home_opened') {

@@ -57,7 +57,7 @@
     "org_deploy_enabled": false,
     "token_rotation_enabled": false,
     "event_subscriptions": {
-      "bot_events": ["app_home_opened", "app_mention", "message.im"]
+      "bot_events": ["app_home_opened", "app_mention", "message.im", "message_stream_stopped"]
     }
   }
 }
