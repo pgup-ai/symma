@@ -693,6 +693,37 @@ describe('acp', () => {
     assert.equal(result.text, 'done');
   });
 
+  it('answers false when the cancel frame cannot leave, instead of throwing', async () => {
+    // The boolean is a notification's only error path, and the caller labels a
+    // member-facing answer off it — a throw here would take the stop handler
+    // down instead of leaving the turn honestly unstopped.
+    let cancel: (() => boolean) | undefined;
+    const fake = fakeAgentIo({
+      onPrompt: (agent) => {
+        assert.equal(cancel!(), false);
+        agent.finish();
+      },
+    });
+    const raw = fake.input.write.bind(fake.input);
+    fake.input.write = ((chunk: unknown, ...rest: never[]) => {
+      if (String(chunk).includes('session/cancel')) throw new Error('pipe burst');
+      return raw(chunk as string, ...rest);
+    }) as typeof fake.input.write;
+    const result = await driveAcpSession(fake, {
+      cwd: '/tmp',
+      prompt: 'p',
+      agent: 'codex',
+      label: 't',
+      log: noLog,
+      model: 'codex/default',
+      onCancelable: (handed) => {
+        cancel = handed;
+      },
+    });
+    assert.deepEqual(fake.cancels, []);
+    assert.equal(result.stopReason, 'end_turn');
+  });
+
   it('hands over a cancel that sends session/cancel, and only then', async () => {
     let cancel: (() => void) | undefined;
     const fake = fakeAgentIo({

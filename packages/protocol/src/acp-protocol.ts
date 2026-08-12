@@ -271,7 +271,14 @@ class AcpConnection {
    * frame left this process is the only receipt there is, and the caller
    * deciding what to tell a member deserves at least that much. */
   notify(method: string, params: Record<string, unknown>): boolean {
-    return this.write({ jsonrpc: '2.0', method, params });
+    // Total, whatever the stream does: a transport torn down between the
+    // writable check and the write itself surfaces as a throw on some stream
+    // types, and this boolean is a notification's only error path.
+    try {
+      return this.write({ jsonrpc: '2.0', method, params });
+    } catch {
+      return false;
+    }
   }
 
   request(method: string, params: Record<string, unknown>): Promise<unknown> {

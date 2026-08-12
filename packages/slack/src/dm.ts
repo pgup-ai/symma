@@ -950,9 +950,12 @@ export async function handleDm(message: DmMessage, deps: DmDeps): Promise<DmOutc
     return 'failed';
   }
 
-  // The button's window is the run: it is unrouted the moment the answer
-  // exists, so a press landing during delivery cannot cancel a session that
-  // already finished or label a whole answer as cut short.
+  // The button's window is the run: the turn is settling from the moment the
+  // answer exists, in both directions — a route already written is unhooked,
+  // and an open still resolving registers none — so a press landing during
+  // delivery cannot cancel a session that already finished or label a whole
+  // answer as cut short.
+  settling = true;
   unhook?.();
   unhook = undefined;
 

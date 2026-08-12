@@ -243,11 +243,15 @@ function harness(
         ? Promise.reject(over.answerPostFails)
         : Promise.resolve({ channel, ts: '300.0' });
     },
-    destination: () => {
+    destination: async () => {
       // Called between the run resolving and the answer posting — the late
-      // press's window.
-      if (over.stopsLate) for (const halt of stopping.values()) halt();
-      return Promise.resolve(over.destination);
+      // press's window. Where the open is stalling, outwait it first: the
+      // press has to find whatever route a late-resolving stream would write.
+      if (over.stopsLate) {
+        if (over.streamStalls) await new Promise((resolve) => setTimeout(resolve, 25));
+        for (const halt of stopping.values()) halt();
+      }
+      return over.destination;
     },
     finish: (conversation, turn, status, ran) => {
       finished.push({ conversation, turn, status, ...ran });
@@ -1165,6 +1169,32 @@ describe('dm message', () => {
     );
     assert.equal(cancels(), 1, 'the press still tried');
     assert.equal(posts.at(-1)!.notices, undefined);
+  });
+
+  it('never routes a stop for a stream that resolved into the delivery window', async () => {
+    // The run is over but settle has not started: an open resolving here used
+    // to write a fresh route, and a press through it cancelled a finished
+    // session and labelled the whole answer as cut short.
+    const { deps, posts, cancels, stopping } = harness({
+      existing: CONVERSATION,
+      narrates: 'Reading dm.ts',
+      streamStalls: 'opens',
+      stopsLate: true,
+    });
+    await handleDm(
+      {
+        user: 'U-nel',
+        channel: 'D-nel',
+        ts: '250.0',
+        threadTs: '200.0',
+        eventId: 'Ev-1',
+        text: 'go',
+      },
+      deps,
+    );
+    assert.equal(cancels(), 0);
+    assert.equal(posts.at(-1)!.notices, undefined);
+    assert.equal(stopping.size, 0);
   });
 
   it('never routes a stop for a stream that opened after the turn was over', async () => {
