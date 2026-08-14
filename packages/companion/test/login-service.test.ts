@@ -235,9 +235,12 @@ describe('login service', () => {
         said.some((line) => line.includes(path)),
         'says where it went',
       );
-      assert.ok(
+      // The nudge to start it belongs to `pair`, which writes the unit and
+      // leaves it stopped — printed from here, `symma install` would be
+      // telling the member to run the command they just ran.
+      assert.equal(
         said.some((line) => line.includes('symma install')),
-        'and the one command that starts it, not a launchctl incantation',
+        false,
       );
       // launchd creates the log file but not the directory holding it, and
       // fails the job rather than the write when it is missing.

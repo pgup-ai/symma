@@ -1266,14 +1266,14 @@ async function runPair(code: string): Promise<never> {
   // §2 step 4: pairing installs the login service. Written, not started —
   // bootstrapping a service is a persistent change to someone's machine, and
   // the installer that ran this command is what does that unattended.
-  for (const line of installLoginService(
+  const supervised = installLoginService(
     process.platform,
     homedir(),
     serviceCommand(),
     process.getuid?.() ?? 0,
-  ).lines) {
-    console.log(line);
-  }
+  );
+  for (const line of supervised.lines) console.log(line);
+  if (supervised.written) console.log('Start it now:  symma install');
   process.exit(0); // fetch's keep-alive socket would hold a finished command open
 }
 

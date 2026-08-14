@@ -207,8 +207,8 @@ export function installLoginService(
       ],
     };
   }
-  return {
-    written: true,
-    lines: [`Starts at login from ${service.path}`, 'Start it now:  symma install'],
-  };
+  // What it did, not what to do about it: `pair` writes the unit without
+  // starting it and adds that nudge itself, where `symma install` printing it
+  // would be telling the member to run the command they are already running.
+  return { written: true, lines: [`Starts at login from ${service.path}`] };
 }
