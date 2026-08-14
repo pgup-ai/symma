@@ -29,8 +29,9 @@ describe('login service', () => {
     assert.deepEqual(service.start, [
       // Unloaded first, so the rewritten unit is the one that gets loaded —
       // launchctl bootstraps a file, and re-bootstrapping a loaded job fails.
-      ['launchctl', 'bootout', 'gui/501/dev.symma.companion'],
-      ['launchctl', 'bootstrap', 'gui/501', service.path],
+      // Soft, because nothing loaded is the ordinary first install.
+      { argv: ['launchctl', 'bootout', 'gui/501/dev.symma.companion'], soft: true },
+      { argv: ['launchctl', 'bootstrap', 'gui/501', service.path] },
     ]);
     assert.deepEqual(service.stop, [['launchctl', 'bootout', 'gui/501/dev.symma.companion']]);
 
@@ -67,10 +68,17 @@ describe('login service', () => {
     // unit it already read, and without the last a running companion keeps the
     // definition this install replaced.
     assert.deepEqual(service.start, [
-      ['systemctl', '--user', 'daemon-reload'],
-      ['systemctl', '--user', 'enable', 'symma-companion'],
-      ['systemctl', '--user', 'restart', 'symma-companion'],
+      { argv: ['systemctl', '--user', 'daemon-reload'] },
+      { argv: ['systemctl', '--user', 'enable', 'symma-companion'] },
+      { argv: ['systemctl', '--user', 'restart', 'symma-companion'] },
     ]);
+    // None of them soft. A refused `enable` is a companion that works until the
+    // next logout and never comes back, which is the failure silence costs most
+    // — and it is not the last step, so a positional rule would swallow it.
+    assert.deepEqual(
+      service.start.filter((step) => step.soft),
+      [],
+    );
     // `is-active` asks the question directly, so its exit code is the answer.
     assert.equal(service.isRunning(''), true);
     // on-failure, not always, for the reason the plist is not a bare KeepAlive:
@@ -112,9 +120,10 @@ describe('login service', () => {
         '/Users/nel/.npm/_npx/9f2/node_modules/symma/dist/index.js',
         '/Users/nel/Library/Caches/pnpm/dlx/9f2/node_modules/symma/dist/index.js',
       ]) {
-        const said = installLoginService('darwin', home, ['/usr/bin/node', cache], 501).join(' ');
-        assert.match(said, /Not installing a login service/, cache);
-        assert.match(said, /npm i -g symma/, 'and says which install is durable');
+        const done = installLoginService('darwin', home, ['/usr/bin/node', cache], 501);
+        assert.equal(done.written, false, cache);
+        assert.match(done.lines.join(' '), /Not installing a login service/, cache);
+        assert.match(done.lines.join(' '), /npm i -g symma/, 'and says which is durable');
       }
       assert.equal(
         existsSync(join(home, 'Library', 'LaunchAgents', 'dev.symma.companion.plist')),
@@ -180,8 +189,12 @@ describe('login service', () => {
     // unit, so a failure here leaves no unit pointing at a log it cannot open.
     const home = mkdtempSync(join(tmpdir(), 'symma-service-'));
     try {
-      installLoginService('darwin', home, COMMAND, 501);
+      // Tightened even where an older build left it open: the mode argument
+      // does nothing to a directory that already exists, and this one ends up
+      // holding the log launchd captures.
       const state = join(home, '.local', 'share', 'symma-companion');
+      mkdirSync(state, { recursive: true, mode: 0o755 });
+      installLoginService('darwin', home, COMMAND, 501);
       assert.equal(statSync(state).mode & 0o777, 0o700);
     } finally {
       rmSync(home, { recursive: true, force: true });
@@ -190,13 +203,18 @@ describe('login service', () => {
 
   it('has nothing to install where there is no user service', () => {
     assert.equal(loginService('win32', 'C:\\Users\\nel', COMMAND, 0), undefined);
-    assert.deepEqual(installLoginService('win32', 'C:\\Users\\nel', COMMAND, 0), []);
+    assert.deepEqual(installLoginService('win32', 'C:\\Users\\nel', COMMAND, 0), {
+      written: false,
+      lines: [],
+    });
   });
 
   it('writes the unit, and reports rather than throws when it cannot', () => {
     const home = mkdtempSync(join(tmpdir(), 'symma-service-'));
     try {
-      const said = installLoginService('darwin', home, COMMAND, 501);
+      const done = installLoginService('darwin', home, COMMAND, 501);
+      assert.equal(done.written, true);
+      const said = done.lines;
       const path = join(home, 'Library', 'LaunchAgents', 'dev.symma.companion.plist');
       assert.ok(existsSync(path));
       assert.equal(statSync(path).mode & 0o777, 0o644, 'launchd must be able to read it');
@@ -225,7 +243,10 @@ describe('login service', () => {
     const blocker = join(mkdtempSync(join(tmpdir(), 'symma-service-')), 'not-a-directory');
     writeFileSync(blocker, '');
     const blocked = installLoginService('darwin', blocker, COMMAND, 501);
-    assert.equal(blocked.length, 1);
-    assert.match(blocked[0]!, /Could not write/);
+    // Never `written`, so a caller about to start it does not start whatever
+    // the failed rewrite left behind.
+    assert.equal(blocked.written, false);
+    assert.deepEqual(blocked.lines.length, 1);
+    assert.match(blocked.lines[0]!, /Could not write/);
   });
 });

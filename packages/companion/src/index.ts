@@ -331,14 +331,17 @@ if (command !== undefined && !COMMANDS.includes(command)) {
 const pairing = command === 'pair';
 
 /** `argv[1]` rather than a fixed path, so a global install and a checkout each
- * supervise themselves. */
+ * supervise themselves — resolved against the cwd this ran in, because a
+ * supervisor has its own and `node dist/index.js` would name nothing from
+ * there. */
+const serviceCommand = (): string[] => [
+  process.execPath,
+  ...process.execArgv,
+  resolve(process.argv[1] ?? ''),
+];
+
 const thisService = (): ReturnType<typeof loginService> =>
-  loginService(
-    process.platform,
-    homedir(),
-    [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
-    process.getuid?.() ?? 0,
-  );
+  loginService(process.platform, homedir(), serviceCommand(), process.getuid?.() ?? 0);
 
 const because = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -376,6 +379,14 @@ if (command === 'install' || command === 'uninstall') {
     // is the real failure, and that one is worth saying.
     const wasLoaded = control(service.probe).ok;
     const refused = service.stop.map(control).filter((step) => !step.ok);
+    // The unit stays where a loaded service refused to stop: removing it takes
+    // away the only thing that describes what is still running, and reporting
+    // that as removed leaves them with a companion and no way to name it.
+    if (wasLoaded && refused.length) {
+      console.error(`Still running, so ${service.path} was left in place.`);
+      for (const step of refused) if (step.said) console.error(`  ${step.said}`);
+      process.exit(1);
+    }
     try {
       rmSync(service.path, { force: true });
     } catch (error) {
@@ -383,30 +394,28 @@ if (command === 'install' || command === 'uninstall') {
       process.exit(1);
     }
     console.log(`Removed ${service.path}.`);
-    if (wasLoaded) for (const step of refused) if (step.said) console.log(`  ${step.said}`);
     process.exit(0);
   }
   // Rewritten every time, never only when absent: a machine that paired before
   // this build has a unit that restarts on a clean exit and captures no output,
   // and starting that one would install this version's bugs rather than fix
   // them. The sequence ends by restarting, so the rewrite is what runs.
-  for (const line of installLoginService(
+  const install = installLoginService(
     process.platform,
     homedir(),
-    [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
+    serviceCommand(),
     process.getuid?.() ?? 0,
-  )) {
-    console.log(line);
-  }
-  // The install declines rather than throws — an npx cache it would outlive, a
-  // home it cannot write — and has already said which it was.
-  if (!existsSync(service.path)) process.exit(1);
-  const steps = [...service.start];
-  const last = steps.pop()!;
-  for (const argv of steps) control(argv);
-  const started = control(last);
-  if (!started.ok) {
-    console.error(`Could not start it: ${started.said || 'unknown error'}`);
+  );
+  for (const line of install.lines) console.log(line);
+  // On what it wrote, never on a file being there: the install declines rather
+  // than throws — an npx cache it would outlive, a unit it could not rewrite —
+  // and starting on the strength of the old file is starting what this was
+  // replacing. It has already said which it was.
+  if (!install.written) process.exit(1);
+  for (const step of service.start) {
+    const done = control(step.argv);
+    if (done.ok || step.soft) continue;
+    console.error(`Could not start it: ${done.said || 'unknown error'}`);
     process.exit(1);
   }
   console.log(
@@ -1256,9 +1265,9 @@ async function runPair(code: string): Promise<never> {
   for (const line of installLoginService(
     process.platform,
     homedir(),
-    [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
+    serviceCommand(),
     process.getuid?.() ?? 0,
-  )) {
+  ).lines) {
     console.log(line);
   }
   process.exit(0); // fetch's keep-alive socket would hold a finished command open

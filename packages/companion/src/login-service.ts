@@ -7,7 +7,7 @@
  * before login can read none of it. So the companion runs while its owner is
  * logged in, and stops when they log out.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 export interface LoginService {
@@ -21,11 +21,12 @@ export interface LoginService {
    * enable-linger`. argv rather than shell lines: these are spawned directly,
    * where `gui/$(id -u)` would arrive as four literal characters.
    *
-   * Only the last step has to succeed. The ones before it are preparation that
-   * is often a no-op — launchd cannot unload what was never loaded — and every
-   * sequence ends by restarting, so re-running this applies a rewritten unit
-   * rather than leaving the old one loaded. */
-  start: string[][];
+   * Every sequence ends by restarting, so re-running this applies a rewritten
+   * unit rather than leaving the old one loaded. A `soft` step is one whose
+   * failure is ordinary — launchd cannot unload what was never loaded — and
+   * marking them individually is what keeps a real refusal from being
+   * swallowed for sitting in the same position. */
+  start: { argv: string[]; soft?: boolean }[];
   /** Stops it and forgets it. No step has to succeed: nothing loaded is the
    * ordinary case for an uninstall. */
   stop: string[][];
@@ -75,8 +76,11 @@ export function loginService(
       path,
       logPath,
       start: [
-        ['launchctl', 'bootout', `${domain}/${LABEL}`],
-        ['launchctl', 'bootstrap', domain, path],
+        // Soft: nothing loaded is the ordinary first install, and bootout says
+        // so with a failure. The bootstrap after it is not allowed to fail —
+        // that one is the whole of whether the service is now running.
+        { argv: ['launchctl', 'bootout', `${domain}/${LABEL}`], soft: true },
+        { argv: ['launchctl', 'bootstrap', domain, path] },
       ],
       stop: [['launchctl', 'bootout', `${domain}/${LABEL}`]],
       probe: ['launchctl', 'print', `${domain}/${LABEL}`],
@@ -109,11 +113,14 @@ ${command.map((argument) => `      <string>${xml(argument)}</string>`).join('\n'
       path: join(home, '.config', 'systemd', 'user', `${UNIT}.service`),
       logPath,
       start: [
-        // A rewritten unit is not read until this, and `restart` is what makes
-        // the running process the one the file now describes.
-        ['systemctl', '--user', 'daemon-reload'],
-        ['systemctl', '--user', 'enable', UNIT],
-        ['systemctl', '--user', 'restart', UNIT],
+        // None soft. A rewritten unit is not read until the reload, `restart`
+        // is what makes the running process the one the file now describes,
+        // and a refused `enable` is a companion that works until the next
+        // logout and never comes back — silence there is the failure worth
+        // catching most.
+        { argv: ['systemctl', '--user', 'daemon-reload'] },
+        { argv: ['systemctl', '--user', 'enable', UNIT] },
+        { argv: ['systemctl', '--user', 'restart', UNIT] },
       ],
       stop: [['systemctl', '--user', 'disable', '--now', UNIT]],
       probe: ['systemctl', '--user', 'is-active', '--quiet', UNIT],
@@ -139,36 +146,50 @@ WantedBy=default.target
   return undefined;
 }
 
-/** Writes the unit and returns what to tell the member. A failure is reported,
- * never thrown: the pairing it follows already succeeded, and losing that to a
- * supervision file would be worse than starting the companion by hand. */
+/** Writes the unit and returns what to tell the member, and whether it is now
+ * the unit on disk — a caller about to start it needs to know that it wrote,
+ * not merely that a file is there, or a rewrite that failed over an older one
+ * starts exactly what it was replacing. A failure is reported, never thrown:
+ * the pairing it follows already succeeded, and losing that to a supervision
+ * file would be worse than starting the companion by hand. */
 export function installLoginService(
   platform: NodeJS.Platform,
   home: string,
   command: string[],
   uid: number,
-): string[] {
+): { written: boolean; lines: string[] } {
   const service = loginService(platform, home, command, uid);
-  if (!service) return [];
+  if (!service) return { written: false, lines: [] };
   if (command.some((argument) => EPHEMERAL.test(argument))) {
-    return [
-      'Not installing a login service: this ran from a temporary npx cache,',
-      'which is deleted eventually. `npm i -g symma`, then pair again.',
-    ];
+    return {
+      written: false,
+      lines: [
+        'Not installing a login service: this ran from a temporary npx cache,',
+        'which is deleted eventually. `npm i -g symma`, then pair again.',
+      ],
+    };
   }
   try {
     // Before the unit, so a failure here leaves nothing behind: the service
     // opens the log itself and will not create the directory it sits in —
     // absent, launchd fails the job rather than the write. `0700` because this
     // is the same directory the pairing and the signing key live in, and a
-    // umask is not an access decision.
+    // umask is not an access decision — chmod'd as well as created with it,
+    // since the mode argument does nothing to a directory already there.
     mkdirSync(dirname(service.logPath), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(service.logPath), 0o700);
     mkdirSync(dirname(service.path), { recursive: true });
     writeFileSync(service.path, service.contents, { mode: 0o644 });
   } catch (error) {
-    return [
-      `Could not write ${service.path}: ${error instanceof Error ? error.message : String(error)}`,
-    ];
+    return {
+      written: false,
+      lines: [
+        `Could not write ${service.path}: ${error instanceof Error ? error.message : String(error)}`,
+      ],
+    };
   }
-  return [`Starts at login from ${service.path}`, 'Start it now:  symma install'];
+  return {
+    written: true,
+    lines: [`Starts at login from ${service.path}`, 'Start it now:  symma install'],
+  };
 }
