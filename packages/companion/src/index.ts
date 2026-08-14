@@ -612,14 +612,16 @@ if (command === 'status') {
   if (!service) supervision = `none for ${process.platform} — run \`symma\` to stay connected`;
   else if (!existsSync(service.path)) supervision = 'not installed — run `symma install`';
   else {
-    // Asked only here, and read rather than counted: loaded is not running —
-    // launchd keeps a job that exited and still answers for it, so the exit
-    // code alone reports a crash-looping companion as healthy.
+    // Asked only here, and read rather than counted. Loaded is not running —
+    // launchd keeps a job that exited and still answers for it — and a
+    // supervisor that could not be reached is neither: reporting that as
+    // stopped sends them to `symma install`, which fails the same way without
+    // ever showing what it was.
     const asked = control(service.probe);
-    supervision =
-      asked.ok && service.isRunning(asked.said)
-        ? `running · ${service.logPath}`
-        : 'installed but stopped — run `symma install`';
+    if (asked.ok && service.isRunning(asked.said)) supervision = `running · ${service.logPath}`;
+    else if (asked.ok || service.absent(asked.code))
+      supervision = 'installed but stopped — run `symma install`';
+    else supervision = `unknown — ${asked.said || 'the supervisor did not answer'}`;
   }
   console.log(`Service   ${supervision}`);
   console.log(
