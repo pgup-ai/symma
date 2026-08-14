@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import { installLoginService, loginService } from '../src/login-service.js';
@@ -18,8 +26,20 @@ describe('login service', () => {
     assert.doesNotMatch(service.path, /LaunchDaemons/);
     // The real uid, not `$(id -u)`: these are spawned directly, and a shell
     // substitution reaches launchctl as four literal characters.
-    assert.deepEqual(service.start, ['launchctl', 'bootstrap', 'gui/501', service.path]);
-    assert.deepEqual(service.stop, ['launchctl', 'bootout', 'gui/501/dev.symma.companion']);
+    assert.deepEqual(service.start, [
+      // Unloaded first, so the rewritten unit is the one that gets loaded —
+      // launchctl bootstraps a file, and re-bootstrapping a loaded job fails.
+      ['launchctl', 'bootout', 'gui/501/dev.symma.companion'],
+      ['launchctl', 'bootstrap', 'gui/501', service.path],
+    ]);
+    assert.deepEqual(service.stop, [['launchctl', 'bootout', 'gui/501/dev.symma.companion']]);
+
+    // Loaded is not running. Live-probed against launchd: a job that exited
+    // cleanly prints `state = spawn scheduled` and `launchctl print` still
+    // exits 0, so the exit code alone calls a crash-looping companion healthy.
+    assert.equal(service.isRunning('\tstate = running\n\tprogram = /usr/bin/node'), true);
+    assert.equal(service.isRunning('\tstate = spawn scheduled\n\tlast exit code = 1'), false);
+    assert.equal(service.isRunning('\tstate = not running'), false);
 
     // Reboot and crash, which is all a supervisor can cover — the closed lid
     // is physics, not packaging (§3).
@@ -43,7 +63,16 @@ describe('login service', () => {
     assert.ok(service);
     assert.equal(service.path, '/home/nel/.config/systemd/user/symma-companion.service');
     assert.doesNotMatch(service.path, /\/etc\/systemd/);
-    assert.deepEqual(service.start, ['systemctl', '--user', 'enable', '--now', 'symma-companion']);
+    // daemon-reload before, restart after: without the first systemd serves the
+    // unit it already read, and without the last a running companion keeps the
+    // definition this install replaced.
+    assert.deepEqual(service.start, [
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'enable', 'symma-companion'],
+      ['systemctl', '--user', 'restart', 'symma-companion'],
+    ]);
+    // `is-active` asks the question directly, so its exit code is the answer.
+    assert.equal(service.isRunning(''), true);
     // on-failure, not always, for the reason the plist is not a bare KeepAlive:
     // the goodbye that precedes a clean exit is a member quitting on purpose.
     assert.match(service.contents, /^Restart=on-failure$/m);
@@ -123,6 +152,40 @@ describe('login service', () => {
     const odd = loginService('linux', '/home/100% nel', COMMAND, 1000)!;
     assert.match(odd.contents, /^StandardOutput=append:\/home\/100%% nel\/\.local\//m);
     assert.doesNotMatch(odd.contents, /StandardOutput=append:"/);
+  });
+
+  it('replaces a unit an older build left behind', () => {
+    // The upgrade path, and the reason `install` never writes conditionally: a
+    // machine paired before this build has a unit that restarts on a clean exit
+    // and captures nothing, and starting *that* one ships this version's bugs
+    // rather than fixing them.
+    const home = mkdtempSync(join(tmpdir(), 'symma-service-'));
+    try {
+      const path = join(home, 'Library', 'LaunchAgents', 'dev.symma.companion.plist');
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, '<plist><dict><key>KeepAlive</key><true/></dict></plist>');
+      installLoginService('darwin', home, COMMAND, 501);
+      const written = readFileSync(path, 'utf8');
+      assert.doesNotMatch(written, /<key>KeepAlive<\/key><true\/>/);
+      assert.match(written, /SuccessfulExit/);
+      assert.match(written, /StandardOutPath/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('locks the state directory down before writing anything into it', () => {
+    // It holds the pairing and the signing key, so `symma install` reaching it
+    // first must not leave it at whatever the umask allows. Written before the
+    // unit, so a failure here leaves no unit pointing at a log it cannot open.
+    const home = mkdtempSync(join(tmpdir(), 'symma-service-'));
+    try {
+      installLoginService('darwin', home, COMMAND, 501);
+      const state = join(home, '.local', 'share', 'symma-companion');
+      assert.equal(statSync(state).mode & 0o777, 0o700);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('has nothing to install where there is no user service', () => {

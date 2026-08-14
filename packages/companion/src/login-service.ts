@@ -16,14 +16,25 @@ export interface LoginService {
   /** Where the service sends the companion's output. Nothing rotates it: this
    * logs an attach, a detach and a line per turn, which is kilobytes a week. */
   logPath: string;
-  /** What starts it now. Writing the unit is the mechanism, starting it the
-   * member's decision — the split §3 already makes for `loginctl
-   * enable-linger`. argv rather than a shell line: these are spawned directly,
-   * where `gui/$(id -u)` would arrive as four literal characters. */
-  start: string[];
-  stop: string[];
-  /** Exits 0 while the service is loaded, whatever it is doing. */
+  /** What starts it now, in order. Writing the unit is the mechanism, starting
+   * it the member's decision — the split §3 already makes for `loginctl
+   * enable-linger`. argv rather than shell lines: these are spawned directly,
+   * where `gui/$(id -u)` would arrive as four literal characters.
+   *
+   * Only the last step has to succeed. The ones before it are preparation that
+   * is often a no-op — launchd cannot unload what was never loaded — and every
+   * sequence ends by restarting, so re-running this applies a rewritten unit
+   * rather than leaving the old one loaded. */
+  start: string[][];
+  /** Stops it and forgets it. No step has to succeed: nothing loaded is the
+   * ordinary case for an uninstall. */
+  stop: string[][];
+  /** Exits 0 while the service is *loaded*, which is not the same as running:
+   * launchd keeps a job that exited cleanly, and reports it as loaded forever.
+   * `isRunning` is what tells the two apart. */
   probe: string[];
+  /** Whether what `probe` printed describes a service that is actually up. */
+  isRunning: (printed: string) => boolean;
 }
 
 const LABEL = 'dev.symma.companion';
@@ -63,9 +74,16 @@ export function loginService(
     return {
       path,
       logPath,
-      start: ['launchctl', 'bootstrap', domain, path],
-      stop: ['launchctl', 'bootout', `${domain}/${LABEL}`],
+      start: [
+        ['launchctl', 'bootout', `${domain}/${LABEL}`],
+        ['launchctl', 'bootstrap', domain, path],
+      ],
+      stop: [['launchctl', 'bootout', `${domain}/${LABEL}`]],
       probe: ['launchctl', 'print', `${domain}/${LABEL}`],
+      // Live-probed rather than assumed: a job that exited cleanly prints
+      // `state = spawn scheduled` and still exits 0, so the exit code alone
+      // reports a crash-looping companion as healthy.
+      isRunning: (printed) => /^\s*state = running$/m.test(printed),
       // RunAtLoad covers the reboot, KeepAlive the crash. The lid is neither
       // (§3) — a closed laptop is not running anything to supervise.
       contents: `<?xml version="1.0" encoding="UTF-8"?>
@@ -90,9 +108,17 @@ ${command.map((argument) => `      <string>${xml(argument)}</string>`).join('\n'
     return {
       path: join(home, '.config', 'systemd', 'user', `${UNIT}.service`),
       logPath,
-      start: ['systemctl', '--user', 'enable', '--now', UNIT],
-      stop: ['systemctl', '--user', 'disable', '--now', UNIT],
+      start: [
+        // A rewritten unit is not read until this, and `restart` is what makes
+        // the running process the one the file now describes.
+        ['systemctl', '--user', 'daemon-reload'],
+        ['systemctl', '--user', 'enable', UNIT],
+        ['systemctl', '--user', 'restart', UNIT],
+      ],
+      stop: [['systemctl', '--user', 'disable', '--now', UNIT]],
       probe: ['systemctl', '--user', 'is-active', '--quiet', UNIT],
+      // `is-active` is already the question, so the exit code is the answer.
+      isRunning: () => true,
       // Staying up past logout needs `loginctl enable-linger`, which §3 keeps
       // as the member's opt-in rather than a default outliving their session.
       contents: `[Unit]
@@ -131,11 +157,14 @@ export function installLoginService(
     ];
   }
   try {
+    // Before the unit, so a failure here leaves nothing behind: the service
+    // opens the log itself and will not create the directory it sits in —
+    // absent, launchd fails the job rather than the write. `0700` because this
+    // is the same directory the pairing and the signing key live in, and a
+    // umask is not an access decision.
+    mkdirSync(dirname(service.logPath), { recursive: true, mode: 0o700 });
     mkdirSync(dirname(service.path), { recursive: true });
     writeFileSync(service.path, service.contents, { mode: 0o644 });
-    // The service opens the log itself and will not create the directory it
-    // sits in — absent, launchd fails the job rather than the write.
-    mkdirSync(dirname(service.logPath), { recursive: true });
   } catch (error) {
     return [
       `Could not write ${service.path}: ${error instanceof Error ? error.message : String(error)}`,

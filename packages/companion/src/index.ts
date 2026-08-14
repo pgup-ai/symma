@@ -59,7 +59,7 @@ import {
   type RelayControl,
 } from '@symma/protocol';
 
-import { installLoginService, loginService } from './login-service.js';
+import { installLoginService, loginService, type LoginService } from './login-service.js';
 import { fetchWorkspace } from './workspace.js';
 
 /** So a code from Slack is the whole of what a member types. A name we own
@@ -340,6 +340,17 @@ const thisService = (): ReturnType<typeof loginService> =>
     process.getuid?.() ?? 0,
   );
 
+const because = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/** Loaded is not running: launchd keeps a job that exited and still answers
+ * for it, so the exit code alone would report a crash-looping companion as
+ * healthy. */
+const running = (service: LoginService): boolean => {
+  const asked = control(service.probe);
+  return asked.ok && service.isRunning(asked.said);
+};
+
 const control = (argv: string[]): { ok: boolean; said: string } => {
   const [bin, ...rest] = argv;
   const done = spawnSync(bin!, rest, { encoding: 'utf8' });
@@ -359,33 +370,48 @@ if (command === 'install' || command === 'uninstall') {
     process.exit(1);
   }
   if (command === 'uninstall') {
-    const stopped = control(service.stop);
-    rmSync(service.path, { force: true });
-    console.log(
-      stopped.ok
-        ? `Stopped, and removed ${service.path}.`
-        : `Removed ${service.path} — it was not running${stopped.said ? `: ${stopped.said}` : ''}.`,
-    );
+    // Asked first, because nothing loaded is the ordinary case: without this
+    // every uninstall ends on launchd's "Boot-out failed: 3: No such process",
+    // which reads as a problem where there is none. Loaded and still refusing
+    // is the real failure, and that one is worth saying.
+    const wasLoaded = control(service.probe).ok;
+    const refused = service.stop.map(control).filter((step) => !step.ok);
+    try {
+      rmSync(service.path, { force: true });
+    } catch (error) {
+      console.error(`Could not remove ${service.path}: ${because(error)}`);
+      process.exit(1);
+    }
+    console.log(`Removed ${service.path}.`);
+    if (wasLoaded) for (const step of refused) if (step.said) console.log(`  ${step.said}`);
     process.exit(0);
   }
-  if (!existsSync(service.path)) {
-    for (const line of installLoginService(
-      process.platform,
-      homedir(),
-      [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
-      process.getuid?.() ?? 0,
-    )) {
-      console.log(line);
-    }
+  // Rewritten every time, never only when absent: a machine that paired before
+  // this build has a unit that restarts on a clean exit and captures no output,
+  // and starting that one would install this version's bugs rather than fix
+  // them. The sequence ends by restarting, so the rewrite is what runs.
+  for (const line of installLoginService(
+    process.platform,
+    homedir(),
+    [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
+    process.getuid?.() ?? 0,
+  )) {
+    console.log(line);
   }
-  const started = control(service.start);
-  // Already loaded is the ordinary second run, not a failure worth an exit
-  // code — the member asked for it to be running and it is.
-  if (!started.ok && !/already|loaded/i.test(started.said)) {
+  // The install declines rather than throws — an npx cache it would outlive, a
+  // home it cannot write — and has already said which it was.
+  if (!existsSync(service.path)) process.exit(1);
+  const steps = [...service.start];
+  const last = steps.pop()!;
+  for (const argv of steps) control(argv);
+  const started = control(last);
+  if (!started.ok) {
     console.error(`Could not start it: ${started.said || 'unknown error'}`);
     process.exit(1);
   }
-  console.log(`Running. It starts again at login, and logs to ${service.logPath}.`);
+  console.log(
+    `Installed and starting. \`symma status\` to check; output goes to ${service.logPath}.`,
+  );
   process.exit(0);
 }
 // Trimmed: a pasted code often brings a newline with it.
@@ -581,7 +607,7 @@ if (command === 'status') {
       ? `Service   none for ${process.platform} — run \`symma\` to stay connected`
       : !installed
         ? 'Service   not installed — run `symma install`'
-        : control(service.probe).ok
+        : running(service)
           ? `Service   running · ${service.logPath}`
           : 'Service   installed but stopped — run `symma install`',
   );
@@ -1167,8 +1193,6 @@ async function runPair(code: string): Promise<never> {
     console.error(why);
     process.exit(1);
   };
-  const because = (error: unknown): string =>
-    error instanceof Error ? error.message : String(error);
   // Before the code is spent: a home that cannot be written to should stop this
   // now rather than after the gateway has consumed a one-time code.
   try {

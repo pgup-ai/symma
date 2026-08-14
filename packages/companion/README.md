@@ -28,7 +28,8 @@ comes back on its own at every login and you never run it again.
 
 Only one at a time: an attach replaces whichever came before it, so a
 foreground `symma` alongside the service leaves the two taking the connection
-off each other. `symma status` says which is running.
+off each other. `symma status` reports the service, not the foreground one —
+if you started `symma` by hand, that is the one to stop.
 
 ## Agents
 
