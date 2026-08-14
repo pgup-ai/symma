@@ -39,7 +39,12 @@ export interface LoginService {
   /** Whether a refused `probe` means there is no such service, as opposed to a
    * supervisor that could not be reached — which is no evidence that nothing
    * is running, and the difference between an uninstall that can tell it left
-   * nothing behind and one that assumes so. */
+   * nothing behind and one that assumes so.
+   *
+   * Narrow on purpose, and to be kept narrow: an unrecognised code answers
+   * false, so a supervisor that changes its mind about one leaves the unit in
+   * place with a message rather than removing it over a companion still
+   * running. Widening this trades a visible refusal for a silent misreport. */
   absent: (code: number | null) => boolean;
 }
 
