@@ -59,8 +59,16 @@ import {
   type RelayControl,
 } from '@symma/protocol';
 
-import { installLoginService } from './login-service.js';
+import { installLoginService, loginService } from './login-service.js';
 import { fetchWorkspace } from './workspace.js';
+
+/** Where `symma pair <CODE>` goes when nobody says otherwise, so a code from
+ * Slack is the whole of what a member types. Compiled in rather than prompted
+ * for, and a name we own rather than a host we rent: this string ships inside
+ * every installed copy, so moving providers has to be a DNS change and not a
+ * reinstall for everyone who already paired. `SYMMA_COMPANION_GATEWAY` is how
+ * a self-hosted deployment says otherwise. */
+const DEFAULT_GATEWAY = 'https://gateway.symma.dev';
 
 const KILL_GRACE_MS = 2_000;
 const BACKOFF_MIN_MS = 1_000;
@@ -140,7 +148,10 @@ function readPairing(): Pairing {
 // variable both wins and comes to nothing, and a real pairing reads as absent.
 const paired = readPairing();
 const pick = (name: string, saved: string): string => (process.env[name] ?? '').trim() || saved;
-const gatewayUrl = pick('SYMMA_COMPANION_GATEWAY', paired.gateway).replace(/\/+$/, '');
+const gatewayUrl = (pick('SYMMA_COMPANION_GATEWAY', paired.gateway) || DEFAULT_GATEWAY).replace(
+  /\/+$/,
+  '',
+);
 const token = pick('SYMMA_COMPANION_TOKEN', paired.token);
 const endpointId = pick('SYMMA_COMPANION_ENDPOINT', paired.endpoint);
 const device = pick('SYMMA_COMPANION_DEVICE', paired.device) || hostname();
@@ -312,11 +323,74 @@ function loadSigningKeys(): { privateKey: string; publicKey: string } {
 // `symma pair <CODE>` trades a code for this machine's identity and exits. With
 // no command the companion attaches using whatever it already has.
 const [command, argument] = process.argv.slice(2);
-if (command !== undefined && command !== 'pair') {
-  console.error(`Unknown command: ${command}. Usage: symma [pair <CODE>]`);
+const COMMANDS = ['pair', 'install', 'uninstall', 'status'];
+if (command !== undefined && !COMMANDS.includes(command)) {
+  console.error(
+    `Unknown command: ${command}. Usage: symma [pair <CODE> | install | uninstall | status]`,
+  );
   process.exit(1);
 }
 const pairing = command === 'pair';
+
+/** The service as this machine would run it. `argv[1]` is what the shell
+ * resolved, so a global install and a checkout each name themselves. */
+const thisService = (): ReturnType<typeof loginService> =>
+  loginService(
+    process.platform,
+    homedir(),
+    [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
+    process.getuid?.() ?? 0,
+  );
+
+/** Runs one of the service's own commands, quietly — the caller reports. */
+const control = (argv: string[]): { ok: boolean; said: string } => {
+  const [bin, ...rest] = argv;
+  const done = spawnSync(bin!, rest, { encoding: 'utf8' });
+  return {
+    ok: done.status === 0,
+    said: `${done.stderr ?? ''}${done.stdout ?? ''}`.trim() || String(done.error ?? ''),
+  };
+};
+
+/** Installing and removing need no gateway, no pairing and no agent — they are
+ * about this machine's supervisor and nothing else. Answered here, before all
+ * three are resolved, so neither can be blocked by a setup they do not use. */
+if (command === 'install' || command === 'uninstall') {
+  const service = thisService();
+  if (!service) {
+    console.error(`No login service for ${process.platform}. Run \`symma\` to stay connected.`);
+    process.exit(1);
+  }
+  if (command === 'uninstall') {
+    const stopped = control(service.stop);
+    rmSync(service.path, { force: true });
+    console.log(
+      stopped.ok
+        ? `Stopped, and removed ${service.path}.`
+        : `Removed ${service.path} — it was not running${stopped.said ? `: ${stopped.said}` : ''}.`,
+    );
+    process.exit(0);
+  }
+  if (!existsSync(service.path)) {
+    for (const line of installLoginService(
+      process.platform,
+      homedir(),
+      [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
+      process.getuid?.() ?? 0,
+    )) {
+      console.log(line);
+    }
+  }
+  const started = control(service.start);
+  // Already loaded is the ordinary second run, not a failure worth an exit
+  // code — the member asked for it to be running and it is.
+  if (!started.ok && !/already|loaded/i.test(started.said)) {
+    console.error(`Could not start it: ${started.said || 'unknown error'}`);
+    process.exit(1);
+  }
+  console.log(`Running. It starts again at login, and logs to ${service.logPath}.`);
+  process.exit(0);
+}
 // Trimmed: a pasted code often brings a newline with it.
 const pairCode = (argument ?? '').trim();
 if (pairing && !pairCode) {
@@ -324,10 +398,10 @@ if (pairing && !pairCode) {
   process.exit(1);
 }
 
-if (!pairing && (!gatewayUrl || !token || !endpointId)) {
+if (command === undefined && (!token || !endpointId)) {
   console.error(
-    'Not paired. Run `symma pair <CODE>`, or set SYMMA_COMPANION_GATEWAY, ' +
-      'SYMMA_COMPANION_TOKEN and SYMMA_COMPANION_ENDPOINT.',
+    'Not paired. Run `symma pair <CODE>` with a code from Slack, or set ' +
+      'SYMMA_COMPANION_GATEWAY, SYMMA_COMPANION_TOKEN and SYMMA_COMPANION_ENDPOINT.',
   );
   process.exit(1);
 }
@@ -479,7 +553,11 @@ for (const entry of agentNames) {
   }
   agents.set(resolved.name, { ...resolved.spec, bin });
 }
-if (agents.size === 0) {
+// `status` is the one command that has to survive this: a machine with no
+// agent logged in is exactly the machine whose owner is asking what is wrong,
+// and answering with the same refusal the attach gives would tell them nothing
+// they could act on.
+if (agents.size === 0 && command !== 'status') {
   console.error(
     pairing
       ? 'Nothing to connect: no agent on this machine is logged in.'
@@ -490,7 +568,38 @@ if (agents.size === 0) {
 }
 // Only once the start is going ahead — the refusal above already said them, and
 // `pair` prints them as copy rather than as a log line.
-if (!pairing) for (const why of skipped) log(`skipping agent — ${why}`);
+if (command === undefined) for (const why of skipped) log(`skipping agent — ${why}`);
+
+// Everything a hidden process owes the person running it: whether it is on,
+// what it would reach, and what it can run. Answered from this machine alone —
+// asking the gateway would report a companion that cannot start as healthy on
+// the strength of an earlier one that could.
+if (command === 'status') {
+  const service = thisService();
+  const installed = service !== undefined && existsSync(service.path);
+  console.log(`Machine   ${device}`);
+  console.log(
+    token && endpointId
+      ? `Paired    ${endpointId} → ${gatewayUrl}`
+      : 'Paired    no — run `symma pair <CODE>` with a code from Slack',
+  );
+  console.log(
+    !service
+      ? `Service   none for ${process.platform} — run \`symma\` to stay connected`
+      : !installed
+        ? 'Service   not installed — run `symma install`'
+        : control(service.probe).ok
+          ? `Service   running · ${service.logPath}`
+          : 'Service   installed but stopped — run `symma install`',
+  );
+  console.log(
+    agents.size
+      ? `Agents    ${[...agents.keys()].join(', ')}`
+      : 'Agents    none logged in — sign in to codex or claude and run `symma status` again',
+  );
+  for (const why of skipped) console.log(`          ⚪ ${why}`);
+  process.exit(0);
+}
 
 interface LiveSession {
   child: ChildProcess;
@@ -1060,8 +1169,6 @@ function savePairing(saved: Pairing): string {
  * an unauthenticated caller naming an identity is one code away from someone
  * else's endpoint. */
 async function runPair(code: string): Promise<never> {
-  // A default is the point: without one the §2 one-liner needs a second field.
-  const pairTarget = gatewayUrl || 'https://symma.dev';
   const running = [...agents.keys()];
   const refused = (why: string): never => {
     console.error(why);
@@ -1079,7 +1186,7 @@ async function runPair(code: string): Promise<never> {
   let status: number;
   let body: { error?: string; endpoint?: string; token?: string };
   try {
-    const res = await fetch(`${pairTarget}/api/pair`, {
+    const res = await fetch(`${gatewayUrl}/api/pair`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ code, device, agents: running }),
@@ -1097,19 +1204,19 @@ async function runPair(code: string): Promise<never> {
       body = {};
     }
   } catch (error) {
-    return refused(`Could not reach ${pairTarget}: ${because(error)}`);
+    return refused(`Could not reach ${gatewayUrl}: ${because(error)}`);
   }
   if (status === 401) return refused('That code has expired or been used — ask for a new one.');
   if (status === 429) return refused('Too many attempts just now. Wait a minute and retry.');
   if (status !== 200 || !body.endpoint || !body.token)
     return refused(
-      `Pairing failed (${status}${body.error ? `: ${body.error}` : ''}) at ${pairTarget}.`,
+      `Pairing failed (${status}${body.error ? `: ${body.error}` : ''}) at ${gatewayUrl}.`,
     );
 
   let path: string;
   try {
     path = savePairing({
-      gateway: pairTarget,
+      gateway: gatewayUrl,
       endpoint: body.endpoint,
       token: body.token,
       device,
@@ -1129,11 +1236,12 @@ async function runPair(code: string): Promise<never> {
   // §2 step 4: pairing installs the login service. Written, not started —
   // bootstrapping a service is a persistent change to someone's machine, and
   // the installer that ran this command is what does that unattended.
-  for (const line of installLoginService(process.platform, homedir(), [
-    process.execPath,
-    ...process.execArgv,
-    process.argv[1] ?? '',
-  ])) {
+  for (const line of installLoginService(
+    process.platform,
+    homedir(),
+    [process.execPath, ...process.execArgv, process.argv[1] ?? ''],
+    process.getuid?.() ?? 0,
+  )) {
     console.log(line);
   }
   process.exit(0); // fetch's keep-alive socket would hold a finished command open

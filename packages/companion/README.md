@@ -14,8 +14,21 @@ cache that is eventually deleted, and a companion supervised out of one stops
 coming back after a reboot without saying so.
 
 Pairing detects the agents you are logged into, exchanges the code for this
-machine's identity, and writes it to `~/.local/share/symma-companion/` at
-`0600`. Running `symma` with no arguments attaches with what it saved.
+machine's identity, writes it to `~/.local/share/symma-companion/` at `0600`,
+and leaves a login service behind. `symma install` starts it — after that it
+comes back on its own at every login and you never run it again.
+
+|                     |                                                                        |
+| ------------------- | ---------------------------------------------------------------------- |
+| `symma pair <CODE>` | trade a code from Slack for this machine's identity                    |
+| `symma install`     | start the login service, now and at every login                        |
+| `symma status`      | whether it is running, what it would reach, which agents are logged in |
+| `symma uninstall`   | stop it and remove the service                                         |
+| `symma`             | attach in the foreground — what the service runs                       |
+
+Only one at a time: an attach replaces whichever came before it, so a
+foreground `symma` alongside the service leaves the two taking the connection
+off each other. `symma status` says which is running.
 
 ## Agents
 

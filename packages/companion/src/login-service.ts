@@ -13,13 +13,22 @@ import { dirname, join } from 'node:path';
 export interface LoginService {
   path: string;
   contents: string;
-  /** What starts it now. Writing the unit is the mechanism, enabling it the
+  /** Where the service sends the companion's output. Nothing rotates it: this
+   * logs an attach, a detach and a line per turn, which is kilobytes a week. */
+  logPath: string;
+  /** What starts it now. Writing the unit is the mechanism, starting it the
    * member's decision — the split §3 already makes for `loginctl
-   * enable-linger`. */
-  enable: string;
+   * enable-linger`. argv rather than a shell line: `gui/$(id -u)` means
+   * nothing without a shell, and spawning one to start a service is a layer
+   * that only adds ways to quote something wrong. */
+  start: string[];
+  stop: string[];
+  /** Exits 0 while the service is loaded, whatever it is doing. */
+  probe: string[];
 }
 
 const LABEL = 'dev.symma.companion';
+const UNIT = 'symma-companion';
 
 /** `npx` runs from a cache its package manager may evict, so a unit pointing
  * into one starts failing silently the first time that happens — the member
@@ -33,6 +42,11 @@ const EPHEMERAL = /(^|[/\\])(_npx|dlx)([/\\]|$)/;
 const systemdArgument = (value: string): string =>
   (/[\s"'\\]/.test(value) ? JSON.stringify(value) : value).replace(/%/g, '%%');
 
+/** Only the `%` doubling of `systemdArgument`: these directives take the rest
+ * of the line as one value, so a path with a space needs no quoting — and a
+ * quoted one would be read with the quotes in it. */
+const systemdPath = (value: string): string => value.replace(/%/g, '%%');
+
 const xml = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -42,11 +56,18 @@ export function loginService(
   platform: NodeJS.Platform,
   home: string,
   command: string[],
+  uid: number,
 ): LoginService | undefined {
+  const logPath = join(home, '.local', 'share', 'symma-companion', 'companion.log');
   if (platform === 'darwin') {
     const path = join(home, 'Library', 'LaunchAgents', `${LABEL}.plist`);
+    const domain = `gui/${String(uid)}`;
     return {
       path,
+      logPath,
+      start: ['launchctl', 'bootstrap', domain, path],
+      stop: ['launchctl', 'bootout', `${domain}/${LABEL}`],
+      probe: ['launchctl', 'print', `${domain}/${LABEL}`],
       // RunAtLoad covers the reboot, KeepAlive the crash. The lid is neither
       // (§3) — a closed laptop is not running anything to supervise.
       contents: `<?xml version="1.0" encoding="UTF-8"?>
@@ -59,16 +80,21 @@ export function loginService(
 ${command.map((argument) => `      <string>${xml(argument)}</string>`).join('\n')}
     </array>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>StandardOutPath</key><string>${xml(logPath)}</string>
+    <key>StandardErrorPath</key><string>${xml(logPath)}</string>
   </dict>
 </plist>
 `,
-      enable: `launchctl bootstrap gui/$(id -u) ${path}`,
     };
   }
   if (platform === 'linux') {
     return {
-      path: join(home, '.config', 'systemd', 'user', 'symma-companion.service'),
+      path: join(home, '.config', 'systemd', 'user', `${UNIT}.service`),
+      logPath,
+      start: ['systemctl', '--user', 'enable', '--now', UNIT],
+      stop: ['systemctl', '--user', 'disable', '--now', UNIT],
+      probe: ['systemctl', '--user', 'is-active', '--quiet', UNIT],
       // Staying up past logout needs `loginctl enable-linger`, which §3 keeps
       // as the member's opt-in rather than a default outliving their session.
       contents: `[Unit]
@@ -76,13 +102,14 @@ Description=symma companion
 
 [Service]
 ExecStart=${command.map(systemdArgument).join(' ')}
-Restart=always
+Restart=on-failure
 RestartSec=5
+StandardOutput=append:${systemdPath(logPath)}
+StandardError=append:${systemdPath(logPath)}
 
 [Install]
 WantedBy=default.target
 `,
-      enable: 'systemctl --user enable --now symma-companion',
     };
   }
   return undefined;
@@ -95,8 +122,9 @@ export function installLoginService(
   platform: NodeJS.Platform,
   home: string,
   command: string[],
+  uid: number,
 ): string[] {
-  const service = loginService(platform, home, command);
+  const service = loginService(platform, home, command, uid);
   if (!service) return [];
   if (command.some((argument) => EPHEMERAL.test(argument))) {
     return [
@@ -107,10 +135,13 @@ export function installLoginService(
   try {
     mkdirSync(dirname(service.path), { recursive: true });
     writeFileSync(service.path, service.contents, { mode: 0o644 });
+    // The service opens the log itself and will not create the directory it
+    // sits in — absent, launchd fails the job rather than the write.
+    mkdirSync(dirname(service.logPath), { recursive: true });
   } catch (error) {
     return [
       `Could not write ${service.path}: ${error instanceof Error ? error.message : String(error)}`,
     ];
   }
-  return [`Starts at login from ${service.path}`, `Start it now:  ${service.enable}`];
+  return [`Starts at login from ${service.path}`, 'Start it now:  symma install'];
 }

@@ -107,7 +107,7 @@ it copies the answer over themselves.
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | `@symma/protocol` | ACP framing, JSON-RPC peer, `driveAcpSession`, agent specs + credential helpers, read-only permission floor, envelope signing, observer envelope, relay control + presence, ndjson | —                           |
 | `@symma/gateway`  | relay, journal store, viewer, HTTP API, tenancy                                                                                                                                    | protocol                    |
-| `symma`           | the companion CLI — attach loop, agent detection, workspace allowlist, checkout mechanism, local spawn/lifecycle, pairing, login service                                           | protocol                    |
+| `symma`           | the companion CLI — attach loop, agent detection, workspace allowlist, checkout mechanism, local spawn/lifecycle, pairing, login service (`install`/`uninstall`/`status`)          | protocol                    |
 | `@symma/client`   | drive an ACP prompt: local spawn/lifecycle, gateway transport                                                                                                                      | protocol                    |
 | `@symma/slack`    | the bot — Socket Mode, `/connect`, `/model`, home tab, mentions, DM turns, presence copy; no agent credentials, spawns nothing                                                     | client, protocol, Slack SDK |
 
