@@ -62,12 +62,10 @@ import {
 import { installLoginService, loginService } from './login-service.js';
 import { fetchWorkspace } from './workspace.js';
 
-/** Where `symma pair <CODE>` goes when nobody says otherwise, so a code from
- * Slack is the whole of what a member types. Compiled in rather than prompted
- * for, and a name we own rather than a host we rent: this string ships inside
- * every installed copy, so moving providers has to be a DNS change and not a
- * reinstall for everyone who already paired. `SYMMA_COMPANION_GATEWAY` is how
- * a self-hosted deployment says otherwise. */
+/** So a code from Slack is the whole of what a member types. A name we own
+ * rather than a host we rent, because this ships inside every installed copy:
+ * moving providers has to be a DNS change, not a reinstall for everyone who
+ * already paired. `SYMMA_COMPANION_GATEWAY` overrides it. */
 const DEFAULT_GATEWAY = 'https://gateway.symma.dev';
 
 const KILL_GRACE_MS = 2_000;
@@ -332,8 +330,8 @@ if (command !== undefined && !COMMANDS.includes(command)) {
 }
 const pairing = command === 'pair';
 
-/** The service as this machine would run it. `argv[1]` is what the shell
- * resolved, so a global install and a checkout each name themselves. */
+/** `argv[1]` rather than a fixed path, so a global install and a checkout each
+ * supervise themselves. */
 const thisService = (): ReturnType<typeof loginService> =>
   loginService(
     process.platform,
@@ -342,7 +340,6 @@ const thisService = (): ReturnType<typeof loginService> =>
     process.getuid?.() ?? 0,
   );
 
-/** Runs one of the service's own commands, quietly — the caller reports. */
 const control = (argv: string[]): { ok: boolean; said: string } => {
   const [bin, ...rest] = argv;
   const done = spawnSync(bin!, rest, { encoding: 'utf8' });
@@ -352,9 +349,9 @@ const control = (argv: string[]): { ok: boolean; said: string } => {
   };
 };
 
-/** Installing and removing need no gateway, no pairing and no agent — they are
- * about this machine's supervisor and nothing else. Answered here, before all
- * three are resolved, so neither can be blocked by a setup they do not use. */
+/** Answered before the gateway, the pairing and the agents are resolved: these
+ * two are about this machine's supervisor, and neither should be refusable by a
+ * setup it does not use. */
 if (command === 'install' || command === 'uninstall') {
   const service = thisService();
   if (!service) {
@@ -553,10 +550,8 @@ for (const entry of agentNames) {
   }
   agents.set(resolved.name, { ...resolved.spec, bin });
 }
-// `status` is the one command that has to survive this: a machine with no
-// agent logged in is exactly the machine whose owner is asking what is wrong,
-// and answering with the same refusal the attach gives would tell them nothing
-// they could act on.
+// `status` survives it: a machine with no agent is exactly the one whose owner
+// is asking what is wrong, and the attach path's refusal answers nothing.
 if (agents.size === 0 && command !== 'status') {
   console.error(
     pairing
@@ -570,10 +565,8 @@ if (agents.size === 0 && command !== 'status') {
 // `pair` prints them as copy rather than as a log line.
 if (command === undefined) for (const why of skipped) log(`skipping agent — ${why}`);
 
-// Everything a hidden process owes the person running it: whether it is on,
-// what it would reach, and what it can run. Answered from this machine alone —
-// asking the gateway would report a companion that cannot start as healthy on
-// the strength of an earlier one that could.
+// Answered from this machine alone: asking the gateway would report a companion
+// that cannot start as healthy, on the strength of an earlier one that could.
 if (command === 'status') {
   const service = thisService();
   const installed = service !== undefined && existsSync(service.path);

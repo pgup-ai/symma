@@ -106,9 +106,8 @@ describe('login service', () => {
   });
 
   it('sends the output somewhere a member can be pointed at', () => {
-    // A hidden process with nowhere to look is one nobody can debug — and
-    // `symma status` prints this path, so it has to be the same one on both
-    // platforms.
+    // A hidden process with nowhere to look is one nobody can debug, and
+    // `symma status` prints this path — so it is the same one on both.
     const mac = loginService('darwin', '/Users/nel', COMMAND, 501)!;
     assert.equal(mac.logPath, '/Users/nel/.local/share/symma-companion/companion.log');
     assert.ok(mac.contents.includes(`<key>StandardOutPath</key><string>${mac.logPath}</string>`));
@@ -117,15 +116,13 @@ describe('login service', () => {
     const unit = loginService('linux', '/home/nel', COMMAND, 1000)!;
     assert.equal(unit.logPath, '/home/nel/.local/share/symma-companion/companion.log');
     assert.match(unit.contents, /^StandardOutput=append:\/home\/nel\/\.local\/share\//m);
-  });
 
-  it('leaves a percent in the log path alone for systemd, and quotes nothing', () => {
-    // These directives take the rest of the line, so a space needs no quoting
-    // — and quoting would land the quotes in the path. The specifier prefix
-    // still has to be escaped.
-    const unit = loginService('linux', '/home/100% nel', COMMAND, 1000)!;
-    assert.match(unit.contents, /^StandardOutput=append:\/home\/100%% nel\/\.local\//m);
-    assert.doesNotMatch(unit.contents, /StandardOutput=append:"/);
+    // The specifier prefix still has to be escaped here, but the quoting
+    // `systemdArgument` does must not happen: these directives take the rest of
+    // the line, so the quotes would land in the path.
+    const odd = loginService('linux', '/home/100% nel', COMMAND, 1000)!;
+    assert.match(odd.contents, /^StandardOutput=append:\/home\/100%% nel\/\.local\//m);
+    assert.doesNotMatch(odd.contents, /StandardOutput=append:"/);
   });
 
   it('has nothing to install where there is no user service', () => {

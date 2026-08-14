@@ -18,9 +18,8 @@ export interface LoginService {
   logPath: string;
   /** What starts it now. Writing the unit is the mechanism, starting it the
    * member's decision — the split §3 already makes for `loginctl
-   * enable-linger`. argv rather than a shell line: `gui/$(id -u)` means
-   * nothing without a shell, and spawning one to start a service is a layer
-   * that only adds ways to quote something wrong. */
+   * enable-linger`. argv rather than a shell line: these are spawned directly,
+   * where `gui/$(id -u)` would arrive as four literal characters. */
   start: string[];
   stop: string[];
   /** Exits 0 while the service is loaded, whatever it is doing. */
@@ -42,9 +41,8 @@ const EPHEMERAL = /(^|[/\\])(_npx|dlx)([/\\]|$)/;
 const systemdArgument = (value: string): string =>
   (/[\s"'\\]/.test(value) ? JSON.stringify(value) : value).replace(/%/g, '%%');
 
-/** Only the `%` doubling of `systemdArgument`: these directives take the rest
- * of the line as one value, so a path with a space needs no quoting — and a
- * quoted one would be read with the quotes in it. */
+/** `systemdArgument` without the quoting: these directives take the rest of the
+ * line, so a quoted path would be read with the quotes in it. */
 const systemdPath = (value: string): string => value.replace(/%/g, '%%');
 
 const xml = (value: string): string =>
