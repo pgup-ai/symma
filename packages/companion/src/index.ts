@@ -59,7 +59,7 @@ import {
   type RelayControl,
 } from '@symma/protocol';
 
-import { installLoginService, loginService, type LoginService } from './login-service.js';
+import { installLoginService, loginService } from './login-service.js';
 import { fetchWorkspace } from './workspace.js';
 
 /** So a code from Slack is the whole of what a member types. A name we own
@@ -346,14 +346,6 @@ const thisService = (): ReturnType<typeof loginService> =>
 const because = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** Loaded is not running: launchd keeps a job that exited and still answers
- * for it, so the exit code alone would report a crash-looping companion as
- * healthy. */
-const running = (service: LoginService): boolean => {
-  const asked = control(service.probe);
-  return asked.ok && service.isRunning(asked.said);
-};
-
 const control = (argv: string[]): { ok: boolean; code: number | null; said: string } => {
   const [bin, ...rest] = argv;
   const done = spawnSync(bin!, rest, { encoding: 'utf8' });
@@ -610,22 +602,26 @@ if (command === undefined) for (const why of skipped) log(`skipping agent — ${
 // that cannot start as healthy, on the strength of an earlier one that could.
 if (command === 'status') {
   const service = thisService();
-  const installed = service !== undefined && existsSync(service.path);
   console.log(`Machine   ${device}`);
   console.log(
     token && endpointId
       ? `Paired    ${endpointId} → ${gatewayUrl}`
       : 'Paired    no — run `symma pair <CODE>` with a code from Slack',
   );
-  console.log(
-    !service
-      ? `Service   none for ${process.platform} — run \`symma\` to stay connected`
-      : !installed
-        ? 'Service   not installed — run `symma install`'
-        : running(service)
-          ? `Service   running · ${service.logPath}`
-          : 'Service   installed but stopped — run `symma install`',
-  );
+  let supervision: string;
+  if (!service) supervision = `none for ${process.platform} — run \`symma\` to stay connected`;
+  else if (!existsSync(service.path)) supervision = 'not installed — run `symma install`';
+  else {
+    // Asked only here, and read rather than counted: loaded is not running —
+    // launchd keeps a job that exited and still answers for it, so the exit
+    // code alone reports a crash-looping companion as healthy.
+    const asked = control(service.probe);
+    supervision =
+      asked.ok && service.isRunning(asked.said)
+        ? `running · ${service.logPath}`
+        : 'installed but stopped — run `symma install`';
+  }
+  console.log(`Service   ${supervision}`);
   console.log(
     agents.size
       ? `Agents    ${[...agents.keys()].join(', ')}`
