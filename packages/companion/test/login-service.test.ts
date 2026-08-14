@@ -42,6 +42,13 @@ describe('login service', () => {
     assert.equal(service.isRunning('\tstate = spawn scheduled\n\tlast exit code = 1'), false);
     assert.equal(service.isRunning('\tstate = not running'), false);
 
+    // Live-probed too: `print` answers 113 for a label launchd does not hold.
+    // Every other refusal is launchd itself, which is no evidence about the
+    // companion — so an uninstall must not read it as nothing to stop.
+    assert.equal(service.absent(113), true);
+    assert.equal(service.absent(1), false);
+    assert.equal(service.absent(null), false);
+
     // Reboot and crash, which is all a supervisor can cover — the closed lid
     // is physics, not packaging (§3).
     assert.match(service.contents, /<key>RunAtLoad<\/key><true\/>/);
@@ -81,6 +88,11 @@ describe('login service', () => {
     );
     // `is-active` asks the question directly, so its exit code is the answer.
     assert.equal(service.isRunning(''), true);
+    // Inactive and no-such-unit mean nothing is there; an unreachable user bus
+    // answers 1 and means only that systemd could not say.
+    assert.equal(service.absent(3), true);
+    assert.equal(service.absent(4), true);
+    assert.equal(service.absent(1), false);
     // on-failure, not always, for the reason the plist is not a bare KeepAlive:
     // the goodbye that precedes a clean exit is a member quitting on purpose.
     assert.match(service.contents, /^Restart=on-failure$/m);
@@ -246,7 +258,7 @@ describe('login service', () => {
     // Never `written`, so a caller about to start it does not start whatever
     // the failed rewrite left behind.
     assert.equal(blocked.written, false);
-    assert.deepEqual(blocked.lines.length, 1);
+    assert.equal(blocked.lines.length, 1);
     assert.match(blocked.lines[0]!, /Could not write/);
   });
 });

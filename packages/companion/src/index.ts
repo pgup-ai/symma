@@ -354,11 +354,12 @@ const running = (service: LoginService): boolean => {
   return asked.ok && service.isRunning(asked.said);
 };
 
-const control = (argv: string[]): { ok: boolean; said: string } => {
+const control = (argv: string[]): { ok: boolean; code: number | null; said: string } => {
   const [bin, ...rest] = argv;
   const done = spawnSync(bin!, rest, { encoding: 'utf8' });
   return {
     ok: done.status === 0,
+    code: done.status,
     said: `${done.stderr ?? ''}${done.stdout ?? ''}`.trim() || String(done.error ?? ''),
   };
 };
@@ -377,13 +378,18 @@ if (command === 'install' || command === 'uninstall') {
     // every uninstall ends on launchd's "Boot-out failed: 3: No such process",
     // which reads as a problem where there is none. Loaded and still refusing
     // is the real failure, and that one is worth saying.
-    const wasLoaded = control(service.probe).ok;
+    // Nothing to stop is the ordinary uninstall, and it is the only reading of
+    // a refused probe that justifies removing the unit anyway: a supervisor
+    // that could not be reached refuses identically, and is no evidence that
+    // the companion is not still running.
+    const asked = control(service.probe);
+    const nothingThere = !asked.ok && service.absent(asked.code);
     const refused = service.stop.map(control).filter((step) => !step.ok);
-    // The unit stays where a loaded service refused to stop: removing it takes
-    // away the only thing that describes what is still running, and reporting
-    // that as removed leaves them with a companion and no way to name it.
-    if (wasLoaded && refused.length) {
-      console.error(`Still running, so ${service.path} was left in place.`);
+    // The unit stays where a stop was refused and the service was not known to
+    // be absent: removing it leaves `status` reporting "not installed" over a
+    // companion that is still answering.
+    if (refused.length && !nothingThere) {
+      console.error(`Not stopped, so ${service.path} was left in place.`);
       for (const step of refused) if (step.said) console.error(`  ${step.said}`);
       process.exit(1);
     }

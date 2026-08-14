@@ -36,6 +36,11 @@ export interface LoginService {
   probe: string[];
   /** Whether what `probe` printed describes a service that is actually up. */
   isRunning: (printed: string) => boolean;
+  /** Whether a refused `probe` means there is no such service, as opposed to a
+   * supervisor that could not be reached — which is no evidence that nothing
+   * is running, and the difference between an uninstall that can tell it left
+   * nothing behind and one that assumes so. */
+  absent: (code: number | null) => boolean;
 }
 
 const LABEL = 'dev.symma.companion';
@@ -88,6 +93,10 @@ export function loginService(
       // `state = spawn scheduled` and still exits 0, so the exit code alone
       // reports a crash-looping companion as healthy.
       isRunning: (printed) => /^\s*state = running$/m.test(printed),
+      // Live-probed against launchd (macOS 15): `print` answers 113 for a label
+      // it does not hold, and 0 for one it does. Anything else is launchd
+      // itself refusing, which says nothing about the companion.
+      absent: (code) => code === 113,
       // RunAtLoad covers the reboot, KeepAlive the crash. The lid is neither
       // (§3) — a closed laptop is not running anything to supervise.
       contents: `<?xml version="1.0" encoding="UTF-8"?>
@@ -126,6 +135,11 @@ ${command.map((argument) => `      <string>${xml(argument)}</string>`).join('\n'
       probe: ['systemctl', '--user', 'is-active', '--quiet', UNIT],
       // `is-active` is already the question, so the exit code is the answer.
       isRunning: () => true,
+      // systemd's documented codes for inactive and no-such-unit — not probed
+      // live, unlike launchd's above. What matters is which codes are excluded:
+      // an unreachable user bus answers 1, which is the case this exists for
+      // and is common over SSH without a session.
+      absent: (code) => code === 3 || code === 4,
       // Staying up past logout needs `loginctl enable-linger`, which §3 keeps
       // as the member's opt-in rather than a default outliving their session.
       contents: `[Unit]
